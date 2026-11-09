@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/rtc/routine.schema.json",
+  "title": "RTC Routine Definition",
+  "description": "声明式时刻表：什么时候该响、什么时候该播报、什么时段不许主动打扰。不含任何运行时路径或平台命令。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "timezone", "dateTypes", "alarmWindows", "rollcalls", "phases"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1, "default": 1 },
+    "timezone": {
+      "type": "string",
+      "description": "IANA 时区名，例如 {{TIMEZONE}}",
+      "minLength": 1
+    },
+    "tzOffset": {
+      "type": "string",
+      "pattern": "^[+-][0-9]{2}:[0-9]{2}$",
+      "description": "UTC 偏移，例如 {{TZ_OFFSET}}"
+    },
+    "dateTypes": {
+      "type": "object",
+      "description": "日期类型判定规则。holidayOverrides 优先级最高。",
+      "additionalProperties": false,
+      "required": ["workday", "weekend", "holidayOverrides"],
+      "properties": {
+        "workday": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 6 }, "description": "星期几算工作日，0=周日" },
+        "weekend": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 6 } },
+        "holidayOverrides": {
+          "type": "array",
+          "description": "手工维护的覆盖表，不联网抓取（网络失败会造成静默）",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "type"],
+            "properties": {
+              "date": { "type": "string", "format": "date" },
+              "type": { "enum": ["workday", "weekend", "holiday"] },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "alarmWindows": {
+      "type": "array",
+      "description": "需要重复响铃直到被确认的窗口。这是唯一描述『闹钟』的地方。",
+      "items": { "$ref": "#/$defs/alarmWindow" }
+    },
+    "rollcalls": {
+      "type": "array",
+      "description": "例行播报（汇报/跟进/总结）。同一时点在不同日期类型可有不同语义，由 kindByDateType 决定。",
+      "items": { "$ref": "#/$defs/rollcall" }
+    },
+    "phases": {
+      "type": "array",
+      "description": "一天内的相位，约束『能不能主动发消息』。",
+      "items": { "$ref": "#/$defs/phase" }
+    },
+    "weeklyChores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["dayOfWeek", "label"],
+        "properties": {
+          "dayOfWeek": { "type": "integer", "minimum": 0, "maximum": 6 },
+          "label": { "type": "string" },
+          "attachToRollcallHour": { "type": "integer", "minimum": 0, "maximum": 23 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "alarmWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "start", "end", "intervalMin", "expectFires", "ackHints"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "label": { "type": "string" },
+        "start": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$", "description": "本地时间 HH:MM" },
+        "end": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$", "description": "闭区间，含这一分钟" },
+        "intervalMin": { "type": "integer", "minimum": 1 },
+        "expectFires": { "type": "integer", "minimum": 1, "description": "(end-start)/intervalMin + 1，生成时校验" },
+        "ackHints": { "type": "array", "items": { "type": "string" }, "description": "用户说这些词即视为确认" },
+        "dateTypes": { "type": "array", "items": { "type": "string" }, "description": "空/省略 = 每天都生效" }
+      }
+    },
+    "rollcall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hour", "kindByDateType"],
+      "properties": {
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "minute": { "type": "integer", "minimum": 0, "maximum": 59, "default": 0 },
+        "kindByDateType": {
+          "type": "object",
+          "description": "键为日期类型；值 report / follow / summary / none",
+          "additionalProperties": { "enum": ["report", "follow", "summary", "none"] }
+        }
+      }
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "start", "end", "proactiveAllowed"],
+      "properties": {
+        "name": { "type": "string" },
+        "start": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$" },
+        "end": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$" },
+        "proactiveAllowed": { "type": "boolean" },
+        "exception": { "type": "string", "description": "例如仅 P0 例外" }
+      }
+    }
+  }
+}

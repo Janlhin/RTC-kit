@@ -1,0 +1,33 @@
+# 本机状态与私有数据 —— 禁止入库
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.local.md
+*.local.json
+.env
+.env.*
+!*.example.md
+!*.example.json
+
+# 填好占位符的个人配置（只提交 .example 版本）
+/templates/AGENTS.md
+/templates/USER.md
+/templates/TOOLS.md
+/templates/SOUL.md
+/templates/HEARTBEAT.md
+/templates/tasks.md
+/rules/routines.md
+
+# 备份与临时
+*.bak-*
+*.bak
+*.tmp
+node_modules/
+dist/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini

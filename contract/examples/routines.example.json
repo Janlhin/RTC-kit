@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "timezone": "{{TIMEZONE}}",
+  "tzOffset": "{{TZ_OFFSET}}",
+  "dateTypes": {
+    "workday": [1, 2, 3, 4, 5],
+    "weekend": [0, 6],
+    "holidayOverrides": [
+      { "date": "2030-01-01", "type": "holiday", "note": "示例：新年" }
+    ]
+  },
+  "alarmWindows": [
+    {
+      "id": "wake",
+      "label": "起床",
+      "start": "{{WAKE_TIME}}",
+      "end": "{{WAKE_END}}",
+      "intervalMin": 5,
+      "expectFires": 6,
+      "ackHints": ["{{ACK_WORD_A}}", "{{ACK_WORD_B}}"]
+    },
+    {
+      "id": "meds-am",
+      "label": "例行事项 A",
+      "start": "{{MORNING_TIME}}",
+      "end": "{{MORNING_END}}",
+      "intervalMin": 5,
+      "expectFires": 6,
+      "ackHints": ["{{ACK_WORD_C}}", "{{ACK_WORD_D}}"]
+    },
+    {
+      "id": "meds-noon",
+      "label": "例行事项 B",
+      "start": "{{NOON_TIME}}",
+      "end": "{{NOON_END}}",
+      "intervalMin": 5,
+      "expectFires": 6,
+      "ackHints": ["{{ACK_WORD_C}}", "{{ACK_WORD_D}}"]
+    },
+    {
+      "id": "meds-pm",
+      "label": "例行事项 C",
+      "start": "{{EVENING_TIME}}",
+      "end": "{{EVENING_END}}",
+      "intervalMin": 5,
+      "expectFires": 6,
+      "ackHints": ["{{ACK_WORD_C}}", "{{ACK_WORD_D}}"]
+    }
+  ],
+  "rollcalls": [
+    { "hour": 9, "minute": 0, "kindByDateType": { "workday": "report", "weekend": "none", "holiday": "none" } },
+    { "hour": 10, "minute": 0, "kindByDateType": { "workday": "follow", "weekend": "none", "holiday": "none" } },
+    { "hour": 11, "minute": 0, "kindByDateType": { "workday": "follow", "weekend": "none", "holiday": "none" } },
+    { "hour": 12, "minute": 0, "kindByDateType": { "workday": "follow", "weekend": "none", "holiday": "none" } },
+    { "hour": 14, "minute": 0, "kindByDateType": { "workday": "follow", "weekend": "report", "holiday": "report" } },
+    { "hour": 15, "minute": 0, "kindByDateType": { "workday": "follow", "weekend": "follow", "holiday": "follow" } },
+    { "hour": 20, "minute": 0, "kindByDateType": { "workday": "summary", "weekend": "summary", "holiday": "summary" } }
+  ],
+  "phases": [
+    { "name": "active", "start": "{{ACTIVE_START}}", "end": "{{ACTIVE_END}}", "proactiveAllowed": true },
+    { "name": "quiet", "start": "{{ACTIVE_END}}", "end": "{{ACTIVE_START}}", "proactiveAllowed": false, "exception": "仅 P0" }
+  ],
+  "weeklyChores": [
+    { "dayOfWeek": 6, "label": "{{SATURDAY_CHORE}}", "attachToRollcallHour": 14 },
+    { "dayOfWeek": 0, "label": "{{SUNDAY_CHORE}}", "attachToRollcallHour": 14 }
+  ]
+}

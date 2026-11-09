@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/rtc/alarm-state.schema.json",
+  "title": "RTC Alarm State Ledger",
+  "description": "运行状态账本。关键设计：ack 是一个字段，不是删掉剩余几条任务。整份文件只有一个写者负责重建，其余角色只做字段级更新。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "rev", "timezone", "planDate", "planKind", "windows"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1, "default": 1 },
+    "rev": { "type": "integer", "minimum": 0, "description": "乐观锁。写入前读取，写入后 rev+1；不符则放弃写入并记错误，不重试不合并。" },
+    "timezone": { "type": "string" },
+    "planDate": { "type": "string", "format": "date", "description": "本账本属于哪一天。不等于今天时由日切或首次唤醒补建。" },
+    "planKind": { "enum": ["workday", "weekend", "holiday"] },
+    "generatedBy": { "type": "string", "description": "daily-task-prep 或 alarm-clock:catchup" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "windows": { "type": "array", "items": { "$ref": "#/$defs/window" } },
+    "history": {
+      "type": "array",
+      "description": "只追加的压缩归档，保留最近 14 天。超过窗口且未落账的数据会永久丢失，因此另有 metrics 旁路兜底。",
+      "items": { "$ref": "#/$defs/historyEntry" }
+    }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "start", "end", "intervalMin", "expectFires", "fireCount", "state"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "label": { "type": "string" },
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" },
+        "intervalMin": { "type": "integer", "minimum": 1 },
+        "expectFires": { "type": "integer", "minimum": 1 },
+        "fireCount": { "type": "integer", "minimum": 0 },
+        "state": { "$ref": "#/$defs/state" },
+        "lastFiredAt": { "type": ["string", "null"], "format": "date-time" },
+        "ackedAt": { "type": ["string", "null"], "format": "date-time" },
+        "ackText": { "type": ["string", "null"] },
+        "missedAt": { "type": ["string", "null"], "format": "date-time" },
+        "missedReason": { "type": ["string", "null"] },
+        "ackHint": { "type": "string" }
+      }
+    },
+    "state": {
+      "enum": ["pending", "ringing", "acked", "missed", "skipped"],
+      "description": "pending→ringing→(acked|missed)；补建时窗口已过则 skipped"
+    },
+    "historyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "id", "state", "fires"],
+      "properties": {
+        "date": { "type": "string", "format": "date" },
+        "id": { "type": "string" },
+        "state": { "$ref": "#/$defs/state" },
+        "fires": { "type": "integer", "minimum": 0 },
+        "ackedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

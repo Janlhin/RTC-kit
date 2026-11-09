@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "rev": 1,
+  "timezone": "{{TIMEZONE}}",
+  "planDate": "{{DATE}}",
+  "planKind": "workday",
+  "generatedBy": "daily-task-prep",
+  "generatedAt": "{{DATE}}T{{CUTOVER_TIME}}:00{{TZ_OFFSET}}",
+  "windows": [
+    {
+      "id": "wake",
+      "label": "起床",
+      "start": "{{DATE}}T{{WAKE_TIME}}:00{{TZ_OFFSET}}",
+      "end": "{{DATE}}T{{WAKE_END}}:00{{TZ_OFFSET}}",
+      "intervalMin": 5,
+      "expectFires": 6,
+      "fireCount": 0,
+      "state": "pending",
+      "lastFiredAt": null,
+      "ackedAt": null,
+      "ackText": null,
+      "missedAt": null,
+      "missedReason": null,
+      "ackHint": "起了"
+    }
+  ],
+  "history": []
+}

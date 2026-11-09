@@ -1,0 +1,46 @@
+{
+  "note": "模板，不是可直接导入的配置。字段名随运行时版本变化，以 platform/openclaw.md 与官方文档为准。",
+  "timezone": "{{TIMEZONE}}",
+  "delivery": {
+    "mode": "none",
+    "channel": "{{DELIVERY_CHANNEL}}",
+    "to": "{{DELIVERY_TARGET}}",
+    "comment": "影子模式先设 none；登记投递目标后才允许 announce"
+  },
+  "jobs": [
+    {
+      "name": "alarm-window-a",
+      "schedule": { "kind": "cron", "expr": "{{WINDOW_A_EXPR}}", "tz": "{{TIMEZONE}}" },
+      "payload": { "kind": "command", "argv": ["{{SCRIPT_RUNTIME}}", "{{STATE_DIR}}/due.mjs"] },
+      "delivery": { "mode": "none" },
+      "expectedFires": 6
+    },
+    {
+      "name": "alarm-windows-bcd",
+      "schedule": { "kind": "cron", "expr": "{{WINDOW_BCD_EXPR}}", "tz": "{{TIMEZONE}}" },
+      "payload": { "kind": "command", "argv": ["{{SCRIPT_RUNTIME}}", "{{STATE_DIR}}/due.mjs"] },
+      "delivery": { "mode": "none" },
+      "expectedFires": 18
+    },
+    {
+      "name": "rollcall",
+      "schedule": { "kind": "cron", "expr": "{{ROLLCALL_EXPR}}", "tz": "{{TIMEZONE}}" },
+      "payload": { "kind": "command", "argv": ["{{SCRIPT_RUNTIME}}", "{{STATE_DIR}}/rollcall.mjs"] },
+      "delivery": { "mode": "none" },
+      "comment": "日期类型差异由脚本按 星期×小时 门控，不靠表达式"
+    },
+    {
+      "name": "day-cutover",
+      "schedule": { "kind": "cron", "expr": "{{CUTOVER_EXPR}}", "tz": "{{TIMEZONE}}" },
+      "payload": { "kind": "command", "argv": ["{{SCRIPT_RUNTIME}}", "{{STATE_DIR}}/cutover.mjs"] },
+      "delivery": { "mode": "none" },
+      "comment": "永远不投递；负责归档、窗口生成、落账"
+    }
+  ],
+  "invariants": [
+    "任务条数恒定，任何流程只允许 update，不允许重新 add",
+    "所有任务创建后必须核对 nextRunAtMs",
+    "没有任何两条任务落在同一分钟",
+    "该响的分支禁止输出静默标记"
+  ]
+}

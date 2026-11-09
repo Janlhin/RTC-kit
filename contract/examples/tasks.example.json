@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "updatedAt": "{{DATE}}T{{CUTOVER_TIME}}:00{{TZ_OFFSET}}",
+  "sections": [
+    {
+      "id": "today",
+      "title": "Today",
+      "maxItems": 12,
+      "tasks": [
+        {
+          "id": "td-{{DATE_COMPACT}}-example-task",
+          "title": "示例任务：核对 {{PROJECT_A}}",
+          "state": "open",
+          "owner": "principal",
+          "due": null,
+          "completedAt": null,
+          "note": null,
+          "dependsOnExternalReply": false
+        }
+      ]
+    },
+    { "id": "due", "title": "待安排（有日期）", "tasks": [] },
+    { "id": "backlog", "title": "待安排（没日期）", "tasks": [] },
+    { "id": "recurring", "title": "每天固定", "tasks": [] }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/rtc/task.schema.json",
+  "title": "RTC Task Contract",
+  "description": "任务清单的逻辑结构。运行时可以存成 Markdown、SQLite 或任意数据库；字段定义不变。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "updatedAt", "sections"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1, "default": 1 },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "sections": {
+      "type": "array",
+      "description": "分区管『什么时候做』，状态管『做没做』，两者不许混。不建『已完成』分节。",
+      "items": { "$ref": "#/$defs/section" }
+    }
+  },
+  "$defs": {
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "tasks"],
+      "properties": {
+        "id": { "enum": ["today", "due", "backlog", "recurring"] },
+        "title": { "type": "string" },
+        "maxItems": { "type": "integer", "minimum": 1, "description": "例如 today 建议 12，超了说明排序没做" },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "state"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^td-[0-9]{8}-[a-z0-9-]+$",
+          "description": "td-YYYYMMDD-slug。日期是创建日，不是截止日。不要塞 HHMM，避免零时歧义。"
+        },
+        "title": { "type": "string" },
+        "state": { "enum": ["open", "done", "skipped"], "description": "渲染为 [ ] / [x] / [~]" },
+        "owner": { "enum": ["principal", "assistant"] },
+        "due": { "type": ["string", "null"], "format": "date" },
+        "completedAt": { "type": ["string", "null"], "description": "HH:MM，实际完成时刻" },
+        "note": { "type": ["string", "null"], "description": "例如 auto-fix 标注或跳过原因" },
+        "dependsOnExternalReply": { "type": "boolean", "default": false }
+      }
+    }
+  }
+}
