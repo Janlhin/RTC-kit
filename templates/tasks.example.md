@@ -9,23 +9,23 @@
 
 ### principal
 
-- [ ] td-{{DATE_COMPACT}}-example-a 示例任务 A
+- [ ] td-{{DATE_COMPACT}}-{{TIME_COMPACT}}-example-a 示例任务 A
 
 ### assistant
 
-- [ ] td-{{DATE_COMPACT}}-example-b 示例任务 B
+- [ ] td-{{DATE_COMPACT}}-{{TIME_COMPACT}}-example-b 示例任务 B
 
 ---
 
 ## 待安排（有日期）
 
-- [ ] td-{{DATE_COMPACT}}-example-c 示例任务 C（截止 {{DATE_DUE}}）
+- [ ] td-{{DATE_COMPACT}}-{{TIME_COMPACT}}-example-c 示例任务 C（截止 {{DATE_DUE}}）
 
 ---
 
 ## 待安排（没日期）
 
-- [ ] td-{{DATE_COMPACT}}-example-d 示例任务 D
+- [ ] td-{{DATE_COMPACT}}-example-d 示例任务 D（无约定时刻，省略 HHMM）
 
 ---
 
@@ -39,11 +39,13 @@
 | `- [x]` | 做完了，同行末尾补 `✅ HH:MM` |
 | `- [~]` | 不做了 / 推迟 / 过期没做，末尾补原因 |
 
-**ID 格式**：`td-YYYYMMDD-slug`
+**ID 格式**：`td-YYYYMMDD-HHMM-slug`
 
-- 日期是**建这条任务的那天**，不是截止日
+- `YYYYMMDD-HHMM` 是这条任务**约定的执行时刻**（本地 24 小时制）
+- **没有约定时刻 → 省略 `HHMM`**，写成 `td-YYYYMMDD-slug`；此时日期取创建日
 - `slug` 只用小写字母、数字、连字符；空格是 ID 与正文的分隔符
-- 不要往 ID 里塞 `HHMM`（会产生零时歧义）
+- `0000` 不许用来表示「没时刻」——那是省略 `HHMM` 的变体
+- ID 只是稳定引用，**不参与任何运行时逻辑**（不建 cron、不做匹配）
 
 **截止日期**：正文末尾 `（截止 YYYY-MM-DD）`。没有就不写。
 

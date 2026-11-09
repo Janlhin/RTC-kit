@@ -14,7 +14,7 @@ description: 任务增删改。把用户口述的事项落进唯一的 tasks.md�
 ## §1 加任务
 
 1. **先读 `tasks.md`**，扫一遍有没有重复（同样的意思换个说法也算重复）
-2. 生成 ID：`td-YYYYMMDD-slug`，日期取今天，slug 用 2–3 个英文词
+2. 生成 ID：`td-YYYYMMDD-HHMM-slug`，`YYYYMMDD-HHMM` 取这条任务**约定的执行时刻**（本地 24h），slug 用 2–3 个英文词；**没约定时刻就省略 `HHMM`**
 3. 判断放哪：
    - 今天真的要动 → `## Today` 下对应的 `### 我` / `### 助理`
    - 未来某天 → `## 待安排（有日期）`，正文末尾加 `（截止 YYYY-MM-DD）`
@@ -33,8 +33,8 @@ description: 任务增删改。把用户口述的事项落进唯一的 tasks.md�
 
 改成 `[~]` + 行末一句原因：
 
-- `- [~] td-{{DATE_COMPACT}}-report 交说明（改为下周再做）`
-- `- [~] td-{{DATE_COMPACT}}-call 打电话（过期未做）`
+- `- [~] td-{{DATE_COMPACT}}-{{TIME_COMPACT}}-report 交说明（改为下周再做）`
+- `- [~] td-{{DATE_COMPACT}}-{{TIME_COMPACT}}-call 打电话（过期未做）`
 
 推迟到具体某天 → 直接改截止日期并保持 `[ ]`，不要用 `[~]`。
 

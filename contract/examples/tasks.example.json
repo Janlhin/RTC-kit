@@ -8,7 +8,7 @@
       "maxItems": 12,
       "tasks": [
         {
-          "id": "td-{{DATE_COMPACT}}-example-task",
+          "id": "td-{{DATE_COMPACT}}-{{TIME_COMPACT}}-example-task",
           "title": "示例任务：核对 {{PROJECT_A}}",
           "state": "open",
           "owner": "principal",

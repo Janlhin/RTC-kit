@@ -31,6 +31,7 @@
 | `{{SATURDAY_CHORE}}` / `{{SUNDAY_CHORE}}` | 周末专项 | 任意短句 |
 | `{{PROJECT_A}}` / `{{PROJECT_B}}` | 项目名 | 任意短句 |
 | `{{DATE}}` / `{{DATE_PREV}}` / `{{DATE_COMPACT}}` / `{{DATE_DUE}}` | 示例日期 | 任意日期 |
+| `{{TIME_COMPACT}}` | ID 里的 HHMM | 24 小时制四位，如 `0900` |
 | `{{WAKE_END}}` / `{{MORNING_TIME}}` / `{{NOON_TIME}}` / `{{EVENING_TIME}}` 等 | 各窗口起止 | 任意本地时刻 |
 | `{{ACTIVE_START}}` / `{{ACTIVE_END}}` / `{{REPORT_HOUR}}` / `{{FOLLOW_HOURS}}` / `{{SUMMARY_HOUR}}` | 相位与播报时点 | 任意时刻集合 |
 | `{{WINDOW_COUNT}}` / `{{EXPECTED_FIRES}}` / `{{WINDOW_IDS}}` | 窗口数量与标识 | 由你的配置决定 |

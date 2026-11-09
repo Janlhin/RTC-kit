@@ -34,8 +34,8 @@
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^td-[0-9]{8}-[a-z0-9-]+$",
-          "description": "td-YYYYMMDD-slug。日期是创建日，不是截止日。不要塞 HHMM，避免零时歧义。"
+          "pattern": "^td-[0-9]{8}(-[0-9]{4})?-[a-z0-9-]+$",
+          "description": "td-YYYYMMDD-HHMM-slug。有约定时刻时带 HHMM（本地 24h，如 0900）；无约定时刻则省略 HHMM，只留创建日 YYYYMMDD。0000 不得用作无时刻占位。ID 仅为稳定引用，不参与运行时匹配。"
         },
         "title": { "type": "string" },
         "state": { "enum": ["open", "done", "skipped"], "description": "渲染为 [ ] / [x] / [~]" },
