@@ -21,29 +21,43 @@
 
 ```
 hermes cron create "0 6 * * *"  --name rtc-plan --no-agent --script rtc_plan.py \
-      --deliver local --failure-deliver <target> --catch-up on  --timezone <TZ>
+      --deliver <target> --failure-deliver <target> --catch-up on  --timezone <TZ>
 
 hermes cron create "*/5 * * * *" --name rtc-due  --no-agent --script rtc_due.py \
       --deliver <target> --failure-deliver <target> --catch-up off --timezone <TZ>
 ```
 
-- `rtc-plan` 成功时**不输出**（静默），只有失败才经由 `--failure-deliver` 通知
+- `rtc-plan` 正常时**不输出**，所以接真实渠道也不会每天响一次；只有自检发现异常才推一条（见下节）
 - `rtc-due` 的 `--catch-up off` 是刻意的：机器关机数小时后开机，不需要补一串过期提醒
 - 任务条数恒定两条，任何流程只 `edit`，不重新 `create`
 
 ## 入口脚本
 
-`--script` 只接受 `~/.hermes/scripts/` 下的相对文件名，且不传参数。所以用一个三行的包装器：
+`--script` 只接受 `~/.hermes/scripts/` 下的相对文件名，且**不传参数**，cwd 也在那里。所以用一个三行的包装器，把工作区写死在脚本里：
 
 ```python
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rtc
-raise SystemExit(rtc.main(["due"]))
+raise SystemExit(rtc.main(["--workspace", r"C:\path\to\workspace", "due"]))
 ```
 
-工作区通过环境变量 `RTC_WORKSPACE` 指定，包装器里可以直写，也可以用 Hermes 的 profile 环境。
+工作区不要靠 cwd 推断——Hermes 从 `scripts/` 目录执行，靠 cwd 会找不到 `rules/routines.json`，表现为任务 `failed` 而输出是一行错误路径。
+
+## 自检与心跳
+
+`rtc.py due` 每跑一次（无论响不响）都会写 `state/heartbeat.json`。`rtc.py plan` 在日切后读取它，只在发现异常时向 **stdout** 输出：
+
+| 信号 | 含义 |
+|---|---|
+| 心跳超过 60 分钟 | 调度器停过，这段时间里的窗口可能没响 |
+| 昨天某窗口 `missed` 且 `fires == 0` | 该窗口整段没有一次触发，调度器当时不在 |
+| 完全没有心跳文件（非首次运行） | `rtc-due` 从未成功运行过 |
+
+没有异常时一个字符都不打印，因此 `rtc-plan` 可以设成 `--deliver <真实渠道>`：平时静默，出问题才发一条。这正是「空输出即静默」的正确用法——用异常文本当告警，不需要额外的告警通道。
+
+`rtc.py status` 也会打印心跳距现在多久，用于人工排查。
 
 ## 已验证的事实（2026-11，Hermes v0.23.0 / Windows）
 

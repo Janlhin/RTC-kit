@@ -109,6 +109,59 @@ def load_state() -> dict | None:
     return load_json(STATE) if STATE.exists() else None
 
 
+# ---------------------------------------------------------------- 心跳与自检
+
+HEARTBEAT_STALE_MIN = 60
+
+
+def hb_path() -> Path:
+    return WORKSPACE / "state" / "heartbeat.json"
+
+
+def touch_heartbeat(now: datetime) -> None:
+    """每次 due 都记一笔，无论响不响。这是「调度器还活着」的唯一证据。"""
+    p = hb_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"at": now.isoformat()}, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        print(f"heartbeat: 写入失败 {e}", file=sys.stderr)
+
+
+def read_heartbeat() -> datetime | None:
+    p = hb_path()
+    if not p.exists():
+        return None
+    try:
+        return datetime.fromisoformat(load_json(p)["at"])
+    except (ValueError, KeyError, TypeError, OSError):
+        return None
+
+
+def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]:
+    """只报告「任务在跑但可能没送达」的信号，正常时不输出任何东西。"""
+    probs: list[str] = []
+    hb = read_heartbeat()
+
+    if hb is None:
+        if not first_run:
+            probs.append("⚠️ 没有调度器心跳：rtc-due 可能从未成功运行过")
+    else:
+        gap_min = (now - hb).total_seconds() / 60
+        if gap_min > HEARTBEAT_STALE_MIN:
+            probs.append(
+                f"⚠️ 调度器最近一次心跳在 {gap_min / 60:.1f} 小时前，这段时间里的窗口可能没响"
+            )
+
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    for h in state.get("history", []):
+        if h.get("date") != yesterday:
+            continue
+        if h.get("state") == "missed" and int(h.get("fires", 0)) == 0:
+            probs.append(f"⚠️ 昨天「{h.get('id')}」整段没响过一次，当时调度器可能没在跑")
+    return probs
+
+
 # ---------------------------------------------------------------- 计划生成
 
 
@@ -203,8 +256,10 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
     plan_date = old.get("planDate", today_iso)
     for w in old.get("windows", []):
         state = w.get("state")
+        reason = w.get("missedReason")
         if state in {"pending", "ringing"}:
             state = "missed"
+            reason = reason or "day_rollover"
         hist.append(
             {
                 "date": plan_date,
@@ -212,6 +267,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
                 "state": state,
                 "fires": w.get("fireCount", 0),
                 "ackedAt": w.get("ackedAt"),
+                "missedReason": reason if state == "missed" else None,
             }
         )
     # 同 date+id 去重，后写覆盖先写
@@ -258,6 +314,10 @@ def cmd_plan(args) -> int:
         f"plan: {today} {kind} {len(windows)} 窗口 / {total} 次，rev={state['rev']}",
         file=sys.stderr,
     )
+
+    # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
+    for line in self_check(state, now, first_run=(old is None)):
+        print(line)
     return 0
 
 
@@ -268,6 +328,7 @@ def cmd_due(args) -> int:
     routine = load_routine()
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    touch_heartbeat(now)
 
     state = load_state()
     if not state or state.get("planDate") != now.date().isoformat():
@@ -388,6 +449,7 @@ def cmd_ack(args) -> int:
 
 
 def cmd_status(args) -> int:
+    routine = load_routine()
     state = load_state()
     if not state:
         print("尚无计划。先跑：python rtc.py plan")
@@ -409,6 +471,12 @@ def cmd_status(args) -> int:
         print(json.dumps({"planDate": state["planDate"], "rev": state["rev"], "windows": rows}, ensure_ascii=False, indent=2))
         return 0
     print(f"{state['planDate']}  {state['planKind']}  rev={state['rev']}")
+    hb = read_heartbeat()
+    if hb is None:
+        print("  调度器心跳：无记录")
+    else:
+        gap = (now_tz(routine["tzOffset"]) - hb).total_seconds() / 60
+        print(f"  调度器心跳：{gap:.0f} 分钟前")
     for r in rows:
         print(f"  {r['label']:<8} {r['window']}  {r['state']:<8} {r['fireCount']}/{r['expectFires']}")
     return 0
