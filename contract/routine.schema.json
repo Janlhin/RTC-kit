@@ -47,6 +47,16 @@
       "description": "需要重复响铃直到被确认的窗口。这是唯一描述『闹钟』的地方。",
       "items": { "$ref": "#/$defs/alarmWindow" }
     },
+    "weekendAlarms": {
+      "type": "boolean",
+      "default": true,
+      "description": "false = 周末不响闹钟（窗口集仍然存在，只是不生成）"
+    },
+    "holidayAlarms": {
+      "type": "boolean",
+      "default": true,
+      "description": "false = 节假日不响闹钟"
+    },
     "rollcalls": {
       "type": "array",
       "description": "例行播报（汇报/跟进/总结）。同一时点在不同日期类型可有不同语义，由 kindByDateType 决定。",
@@ -79,12 +89,16 @@
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
         "label": { "type": "string" },
-        "start": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$", "description": "本地时间 HH:MM" },
-        "end": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$", "description": "闭区间，含这一分钟" },
+        "start": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "description": "本地时间 HH:MM" },
+        "end": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "description": "闭区间，含这一分钟" },
         "intervalMin": { "type": "integer", "minimum": 1 },
         "expectFires": { "type": "integer", "minimum": 1, "description": "(end-start)/intervalMin + 1，生成时校验" },
         "ackHints": { "type": "array", "items": { "type": "string" }, "description": "用户说这些词即视为确认" },
-        "dateTypes": { "type": "array", "items": { "type": "string" }, "description": "空/省略 = 每天都生效" }
+        "dateTypes": {
+          "type": "array",
+          "items": { "enum": ["workday", "weekend", "holiday"] },
+          "description": "空/省略 = 每天都生效"
+        }
       }
     },
     "rollcall": {
@@ -107,8 +121,8 @@
       "required": ["name", "start", "end", "proactiveAllowed"],
       "properties": {
         "name": { "type": "string" },
-        "start": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$" },
-        "end": { "type": "string", "pattern": "^[0-9]{2}:[0-9]{2}$" },
+        "start": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+        "end": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
         "proactiveAllowed": { "type": "boolean" },
         "exception": { "type": "string", "description": "例如仅 P0 例外" }
       }
