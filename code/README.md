@@ -1,10 +1,34 @@
 # code — 确定性脚本
 
-这一层只放**不依赖模型**的代码。目前只有一个文件，它是可选的旁路，不参与提醒主链路。
+这一层只放**不依赖模型**的代码。两个文件，职责不同：
+
+| 文件 | 角色 | 依赖 |
+|---|---|---|
+| `rtc.py` | 提醒主链路：`plan` / `due` / `ack` / `status` / `metrics` | Python 3.10+，仅标准库 |
+| `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
+
+## rtc.py
+
+主链路的确定性实现。把「读状态 → 判断 → 写回」从模型手里拿走，宿主只负责按时调用、把 stdout 投递出去。
+
+```
+python rtc.py --workspace <dir> plan     # 生成/补建当天窗口（只增不改）
+python rtc.py --workspace <dir> due      # 该响就打印文案，不该响就什么都不打印
+python rtc.py --workspace <dir> ack      # 写入确认
+python rtc.py --workspace <dir> status   # 人读 / --json 机器读
+python rtc.py --workspace <dir> metrics  # sync / report
+```
+
+契约：**stdout 为空即静默**；诊断信息全部走 stderr；退出码 `0` 正常 / `2` 状态冲突 / `3` 校验失败 / `4` 无匹配窗口。
+写入是「临时文件 + 原子改名」，并在写入前比对 `rev`，不一致就放弃而不是覆盖。
+
+适配示例见 `platform/hermes.md`。
 
 ## metrics.mjs
 
 执行情况的统计账本。用运行时的内置 SQLite 模块，**零外部依赖、零构建步骤**（JSDoc + `// @ts-check` 提供类型检查）。
+
+> **运行时下限**：`node:sqlite` 自 Node 22.5 起提供（当时需 `--experimental-sqlite`），22.13 / 23.4 起不再需要该 flag。也就是说，不带 flag 直接跑的最低版本是 **Node 22.13 或 23.4**；Node 20 会直接 `ERR_UNKNOWN_BUILTIN_MODULE`。不想管版本下限就用 `rtc.py metrics`。
 
 ```
 node metrics.mjs init                 建表
