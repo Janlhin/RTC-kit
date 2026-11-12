@@ -41,7 +41,16 @@
         "missedAt": { "type": ["string", "null"], "format": "date-time" },
         "missedReason": { "type": ["string", "null"] },
         "ackHint": { "type": "string" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "acked" } }, "required": ["state"] },
+          "then": {
+            "required": ["ackedAt"],
+            "properties": { "ackedAt": { "type": "string", "format": "date-time" } }
+          }
+        }
+      ]
     },
     "state": {
       "enum": ["pending", "ringing", "acked", "missed", "skipped"],
@@ -56,7 +65,8 @@
         "id": { "type": "string" },
         "state": { "$ref": "#/$defs/state" },
         "fires": { "type": "integer", "minimum": 0 },
-        "ackedAt": { "type": ["string", "null"], "format": "date-time" }
+        "ackedAt": { "type": ["string", "null"], "format": "date-time" },
+        "missedReason": { "type": ["string", "null"], "description": "归档时保留原因，例如 window_expired / day_rollover / late_plan" }
       }
     }
   }

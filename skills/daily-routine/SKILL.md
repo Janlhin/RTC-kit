@@ -5,14 +5,14 @@ description: 例行播报。被 cron 在每个整点唤醒时，按"星期×小�
 
 # Daily Routine
 
-被 cron 唤醒（`isolated` 会话），时间点是 `{{ROLLCALL_HOURS}}` 点整（见 `rules/routines.example.md`）。
+被 cron 唤醒（`isolated` 会话），时间点是 `{{ROLLCALL_HOURS}}` 点整（见 `rules/routines.md`）。
 
 **同一套 cron 覆盖工作日和周末，差异全部靠门控判断。**
 
 ## §1 先判该不该说话
 
-1. 判今天的日期类型：读 `rules/routines.example.md` 的日期类型与覆盖表 → `workday` / `weekend` / `holiday`
-2. 查 `rules/routines.example.md` 的播报表，看**当前小时**有没有条目
+1. 判今天的日期类型：读 `rules/routines.md` 的日期类型与覆盖表 → `workday` / `weekend` / `holiday`
+2. 查 `rules/routines.md` 的播报表，看**当前小时**有没有条目
 3. 没有 → 输出 `NO_REPLY` 四个字，结束
 
 会静默的组合（记牢，别自作主张补发）：
@@ -24,7 +24,7 @@ description: 例行播报。被 cron 在每个整点唤醒时，按"星期×小�
 | `{{FOLLOW_HOUR_2}}` | 静默 |
 | `{{FOLLOW_HOUR_3}}` | 静默 |
 
-> 工作日与周末在同一时点可以有不同的播报类型，具体映射见 `rules/routines.example.md` 的表格。
+> 工作日与周末在同一时点可以有不同的播报类型，具体映射见 `rules/routines.md` 的表格。
 
 ## §2 再取数据
 
@@ -52,12 +52,12 @@ description: 例行播报。被 cron 在每个整点唤醒时，按"星期×小�
 **第一件：落账（只读旁路，失败不影响输出）**
 
 ```
-node {{CODE_DIR}}/metrics.mjs sync
+node {{CODE_DIR}}/metrics.mjs sync --state {{STATE_DIR}}
 ```
 
 成功会返回一行 `metrics: 写入 N 行…`。**如果这条命令报错，跳过，继续往下**——它只是记账，不参与提醒。别重试，别修它。
 
-工作目录不是工作区根时，先 `cd` 过去再加 `node {{CODE_DIR}}/metrics.mjs sync`。
+工作目录不是工作区根时，先 `cd` 过去再加 `node {{CODE_DIR}}/metrics.mjs sync --state {{STATE_DIR}}`。
 
 **第二件：自检行**
 
@@ -75,7 +75,7 @@ node {{CODE_DIR}}/metrics.mjs sync
 - 漏 = `state == "missed"` 的个数
 - 未到 = `state ∈ {pending, skipped}` 的个数
 
-如果窗口数 ≠ 4，或 `planDate` 不是今天，在这行后面补一句 `⚠️ 窗口表异常`，并往 `errors.md` 记一条。**但不要在 20:00 去修它。**
+如果窗口数 ≠ {{WINDOW_COUNT}}，或 `planDate` 不是今天，在这行后面补一句 `⚠️ 窗口表异常`，并往 `errors.md` 记一条。**但不要在 20:00 去修它。**
 
 **第三件：周日再加三行本周复盘**（格式见 `rules/formats.md`）：完成 / 顺延 / 反复没动的 ≥2 次的，最多各 3 条，最后一行给下周优先。数据从 `tasks-completed.md` 最近 7 天 + `tasks.md` 里连续多天没动的项来。
 
@@ -83,9 +83,9 @@ node {{CODE_DIR}}/metrics.mjs sync
 
 周六 14:00 汇报的末尾加一句{{SATURDAY_CHORE}}；周日 14:00 汇报的末尾加一句 {{SUNDAY_CHORE}}。各一句，不加感叹号。
 
-## §6 游戏签到（开关见 routines.md 第五节）
+## §6 习惯附加（开关见 routines.md 第三节）
 
-`game_checkin: true` 且今天是工作日时，每次播报末尾加一行：
+`weekdayHabit: true` 且今天是工作日时，每次播报末尾加一行：
 
 `🎮 顺带：{{WEEKDAY_HABIT}}`
 

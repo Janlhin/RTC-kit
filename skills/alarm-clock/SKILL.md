@@ -1,127 +1,101 @@
 ---
 name: alarm-clock
-description: 闹钟门控。每次被 cron 唤醒时判断当前该不该响：读 state/alarms.json，三个条件全真才响，否则静默。也负责接收用户 ack。
+description: 闹钟门控。判断「该不该响」由 code/rtc.py 完成，本技能负责确认、改期与解释。也负责接收用户 ack。
 ---
 
 # Alarm Clock
 
-被 cron 每 5 分钟唤醒一次（`isolated` 会话）。**只做一件事：判断这一分钟该不该响。**
+**判断不归你。** `rtc.py due` 每 5 分钟被定时器调用一次，纯代码判断；命中窗口就打印文案，没命中就什么都不打印。模型只在用户开口时被调用。
+
+如果你的宿主没有 `rtc.py` 的运行环境，见文末「无代码回退」。
 
 ## §0 只读一个文件
 
-醒来第一件事，也是唯一必读：`{{STATE_DIR}}/alarms.json`。
+需要看状态时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。
 
 不要读 `tasks.md`、`AGENTS.md`、`MEMORY.md`、`HEARTBEAT.md`。多读一个文件就多一份延迟，也多一次判断错误的可能。
 
-## §1 先处理日期
+## §1 用户说「起了 / 好了 / 别响了」
 
-读 `planDate`：
+先查有没有正在响的窗口：
 
-- **等于今天** → 进 §3
-- **不等于今天**（昨天、更早、或文件不存在/损坏）→ 进 §2 补建
+```
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status --json
+```
 
-判断"今天"用 `TOOLS.md` 里的时区（`{{TZ_OFFSET}}`）。不要用 UTC。
+挑 `state ∈ {pending, ringing}` 且当前时间落在窗口内的那一个，然后：
 
-## §2 补建（只增不改）
+```
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} ack --window <id> --text "<用户原话>"
+```
 
-按 `rules/routines.example.md` 的日切规则生成今天的窗口表：
+- 退出码 `0` → 回一句短的：`好，记上了。`
+- 退出码 `4` → `现在没有在响的提醒，你是说哪一个？`
+- 退出码 `2` → 有并发写入，说一句 `刚才有人同时改了状态，我这边没写进去，你再确认一次？`
 
-1. 判今天日期类型（workday / weekend / holiday）
-2. 生成 {{WINDOW_COUNT}} 个窗口：`{{WINDOW_IDS}}`
-3. 已经过去的窗口 → `state: "skipped"`，`missedReason: "late_plan"`，`fireCount: 0`
-4. 还没到的窗口 → `state: "pending"`
-5. `planDate` 换今天、`planKind` 换类型、`rev + 1`、`generatedBy: "alarm-clock:catchup"`
-6. 昨天以前遗留的 `pending`/`ringing` → 压进 `history`，`state: "missed"`，`reason: day_rollover`（`history` 只留 14 天）
-7. 往 `{{WORKSPACE_DIR}}/errors.md` 追加一条：`prep 没跑，alarm-clock 补建了 YYYY-MM-DD 的窗口`
+**不要自己改 `alarms.json`。** 写入有 `rev` 校验，手改会被下一次写入判成冲突。
 
-补建完继续往下判：如果当前时间正好落在某个窗口内，正常响。
+通用短语（「知道了」「别响了」）只在**当前窗口**内算确认；窗口没开时说这些，不要当成 ack。
 
-**补建是唯一允许的"跨窗口写操作"，且只能新增，绝不修改已有窗口。**
+## §2 改期
 
-## §3 三个判断条件
+v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改它会让已确认的记录失去意义。
 
-找到 `now ∈ [start, end]` 的窗口（闭区间，含 `end` 那一分钟）。可能命中的只有一个——窗口之间不重叠。
+1. 改 `rules/routines.md` 里对应窗口的时间（`HH:MM`），并同步 `rules/routines.json`（机器可读的那份）
+2. 改窗口长度时，`expectFires` 必须同步：`(end - start) ÷ intervalMin + 1`，否则 `rtc.py plan` 会拒绝
+3. 回一句：`改成 13:00 了，明天生效。`
 
-**全部为真才响：**
+## §3 一次性提醒
 
-1. 命中了某个窗口，且 `state ∈ {pending, ringing}`
-2. `fireCount < expectFires`
-3. `lastFiredAt` 为空，或 `now - lastFiredAt ≥ intervalMin 分钟 - 60 秒`
+**v1 不支持。** 用户说「下午三点提醒我一次」时：
 
-**有一个为假就不响。**
+> 这个要加进时刻表才会响，加吗？
 
-另外两种情况必须先改状态、然后静默：
-
-| 情况 | 动作 |
-|---|---|
-| `now > end` 且 `state ∈ {pending, ringing}` | 改 `state: "missed"`，`missedReason: "window_expired"`，静默 |
-| `state ∈ {acked, missed, skipped}` | 什么都不写，静默 |
+同意了就按 §2 加一个只在该日期类型生效的窗口。**不要自己建定时任务**，也不要往 `alarms.json` 里手写窗口。
 
 ## §4 响的时候说什么
 
-先算这是第几次：`fireCount + 1`。
+文案由 `rtc.py` 生成，格式固定：
 
 ```
 ☀️ 起床 —— 08:10（第 3 次）
 洗澡刷牙，有条件洗个头。
-回复「{{ACK_WORD}}」就不响了。
+回复「起了」就不响了。
 ```
 
-规则：
+规律：第 1 次带 `ackHint`，第 2 次起标「第 N 次」，每隔一次重提一次怎么停。不加强度、不加感叹号、不解释系统原理、整段 2–3 行。
 
-- **第 1 次**：必须带 `ackHint` 那句（`回复「{{ACK_WORD}}」就不响了`）
-- **第 2 次起**：开头加 `（第 N 次）`，`ackHint` 可以省，但**每隔一次要再提一次**怎么停
-- 不增加语气强度，不加感叹号，不写"已经提醒你很多次了"
-- 不解释系统原理，不写"这是自动提醒"
-- 整段控制在 2–3 行
+**改文案请改 `rtc.py`，不要在这里加措辞规则**——否则两个地方各说一套。
 
-**响铃分支里绝对不许出现 `NO_REPLY`、`HEARTBEAT_OK` 这两个词。** 出现一次这个提醒就没了。
+## §5 静默
 
-## §5 静默的时候说什么
+不响的时候，`rtc.py due` 不输出任何内容。宿主把「空输出」当作不投递。
 
-只输出四个字符：
+> 如果宿主用哨兵字符串表示静默（例如 `NO_REPLY`），**该响的分支里绝不能出现这个字符串**。它一旦出现在该响的分支，任务照跑、计数照涨、用户什么都收不到，且没有任何报错。
 
-```
-NO_REPLY
-```
+## §6 写状态
 
-不加解释、不加句号、不加"（今天已确认）"。平台会把 `NO_REPLY` 当作"无需投递"吞掉——这正是我们要的。
+只有 `rtc.py` 能写 `alarms.json`，且只写它负责的字段：
 
-> 这是整个系统最危险的机制：`NO_REPLY` 一旦出现在该响的分支里，任务照跑、`runCount` 照涨、`state` 一切正常，但你什么都收不到，且没有任何报错。
-> 所以：**响 = 绝不静默标记；不响 = 只有 NO_REPLY 四个字。**
-
-## §6 写状态（严格按字段所有权）
-
-响完之后写回 `{{STATE_DIR}}/alarms.json`，**只写这四个字段**：
-
-| 字段 | 写什么 |
+| 字段 | 谁写 |
 |---|---|
-| `state` | `"ringing"`（若是从 pending 来的）或保持 `"ringing"` |
-| `fireCount` | 原值 + 1 |
-| `lastFiredAt` | 现在的时间（带 `{{TZ_OFFSET}}`） |
-| `rev` | 原值 + 1 |
+| `state` / `fireCount` / `lastFiredAt` / `rev` | `rtc.py due` |
+| `ackedAt` / `ackText` / `state` / `rev` | `rtc.py ack` |
+| `planDate` / `planKind` / `windows` / `history` / `rev` | `rtc.py plan` |
 
-**你绝对不能写**：`ackedAt`、`ackText`、`start`、`end`、`expectFires`、`planDate`、`planKind`、其他窗口、`history`。
+写之前读 `rev`、写入后 `rev + 1`；发现 `rev` 已变则放弃写入、记一条 `concurrent_write`、不重试不合并。
 
-写之前先读一次 `rev` 并记住；写入后 `rev` 必须是你读到的值 + 1。如果发现文件里的 `rev` 已经变了（说明有人同时改了），**放弃写入，往 `errors.md` 记一条 `concurrent_write`，然后静默**。不要重试，不要合并。
+## §7 禁止
 
-## §7 收 ack（主会话里触发，不是 cron）
-
-用户在正常对话里说「起了」「吃了」「别响了」「知道了」，就是 ack：
-
-1. 找 `now ≤ end + 15 分钟` 的未确认窗口（`state ∈ {pending, ringing}`）
-2. 找到 → 写 `ackedAt`、`ackText`（用户的原话）、`state: "acked"`、`rev + 1`
-3. 回一句短的：`好，这顿记上了。`
-4. 找不到匹配窗口 → 问一句：`现在没有在响的提醒，你是说哪一顿？`
-5. 如果 `now > end + 15 分钟` → **不要改 state**（它可能已经被判 missed），只回：`这个窗口已经过了，记下了。` 并往 `errors.md` 记一条迟到的 ack
-
-**ack 只写 `{{STATE_DIR}}/alarms.json`，绝不写 `tasks.md`。** 提醒和任务是两回事，不要顺手帮我勾任务。
-
-## §8 禁止
-
-- ❌ 新建、删除、修改 cron（cron 条数必须恒定）
-- ❌ 改 `tasks.md`、`rules/routines.example.md`、`rules/priority-map.md`
-- ❌ 读到文件不一致就"顺手修好"
+- ❌ 自己判断「现在该不该响」
+- ❌ 新建、删除、修改定时任务（条数必须恒定）
+- ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
+- ❌ 读到文件不一致就「顺手修好」
 - ❌ 连续响超过 `expectFires` 次（到上限就判 missed）
 - ❌ 在非窗口时间发任何消息
-- ❌ 一次唤醒里处理多个窗口（只处理命中的那一个）
+
+## 无代码回退
+
+宿主没有 Python 或不允许跑脚本时，本技能可以退化为「模型门控」：读 `alarms.json`，按上面 §1/§4 的规则自行判断与措辞。
+
+**这是降级路径，不是默认路径。** 模型判断会带来两类确定性代价：同样的输入不保证同样的输出；静默标记一旦写错分支，该响不响且无报错。`ARCHITECTURE.md` 第四节记录了这条教训。

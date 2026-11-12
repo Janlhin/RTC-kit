@@ -81,6 +81,7 @@ cancel     取消
 |---|---|
 | `README.md` | 本文件 |
 | `ARCHITECTURE.md` | 分层架构、职责边界、为什么这样切、演进路径 |
+| `AUDIT-2026-11-09-RESPONSE.md` | 对 2026-11-09 外部审计的逐条处置记录 |
 | `CONTRIBUTING.md` | 怎么改、怎么填占位符、什么不能提交 |
 | `ATTRIBUTION.md` | 与上游项目的关系、许可边界 |
 | `LICENSE` | AGPL-3.0（仅适用于本仓库原创内容） |
@@ -88,7 +89,7 @@ cancel     取消
 | `rules/` | 声明式规则（`routines` / `priority-map` / `auto-resolver` / `formats`） |
 | `skills/` | 5 个技能说明 |
 | `templates/` | 工作区模板（全部 `*.example.md`） |
-| `code/` | `metrics.mjs` 与说明 |
+| `code/` | `rtc.py`（主链路实现）与 `metrics.mjs`（旁路统计） |
 | `platform/` | 运行时适配示例 |
 
 ## 包路径 → 运行时工作区路径
@@ -107,6 +108,7 @@ cancel     取消
 | `templates/tasks.example.md` | `tasks.md` | 之后由你增删任务 |
 | `contract/examples/alarms.example.json` | `{{STATE_DIR}}/alarms.json` | 运行时状态，不入库 |
 | `contract/examples/tasks.example.json` | 可选 | 逻辑结构的机器可读示例 |
+| `code/rtc.py` | `{{CODE_DIR}}/rtc.py` | 提醒主链路：plan / due / ack / status / metrics |
 | `code/metrics.mjs` | `{{CODE_DIR}}/metrics.mjs` | 统计旁路，可选 |
 | `skills/*/SKILL.md` | `skills/<name>/SKILL.md` | 由运行时加载 |
 | `platform/jobs.example.json` | 不部署 | 只作参数参考，按平台文档建任务 |

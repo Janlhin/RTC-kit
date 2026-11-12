@@ -39,7 +39,7 @@ YYYY-MM-DD holiday   说明
 - 第二次及以后的响铃开头标「第 N 次」
 - **确认（`ack`）是一个状态字段，不是「删掉剩余几条任务」**
 
-开关：`weekend_alarms: true` / `holiday_alarms: true`（false = 该日期类型不响闹钟）。
+开关：`weekendAlarms: true` / `holidayAlarms: true`（false = 该日期类型不响闹钟）。
 
 ---
 
@@ -59,7 +59,7 @@ cron 只能给一套触发表达式，**日期类型差异由技能按「星期 
 
 周末专项挂在周末汇报末尾各一句，不单独发消息：周六 `{{SATURDAY_CHORE}}`，周日 `{{SUNDAY_CHORE}}`。
 
-开关：`weekday_habit: false`（播报末尾是否附带 `{{WEEKDAY_HABIT}}`）。
+开关：`weekdayHabit: false`（播报末尾是否附带 `{{WEEKDAY_HABIT}}`）。
 
 ---
 

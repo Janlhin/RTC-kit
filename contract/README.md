@@ -18,9 +18,12 @@
 ```bash
 # 1. 复制并填好占位符
 cp contract/examples/routines.example.json /tmp/routines.json
-# 2. 用任意 JSON Schema 校验器验证
-npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json --spec=draft2020
+# 2. 用任意 JSON Schema 校验器验证，**必须开启 format 断言**
+npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json \
+    --spec=draft2020 -c ajv-formats
 ```
+
+`format` 断言必须开。默认关闭时，`date` / `date-time` 字段里的占位符不会被拦下——同一个文件在两个校验器下可能得出相反结论，「通过校验」也就失去了意义。
 
 ## 双表示的同步规则
 
@@ -33,8 +36,9 @@ npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json --spe
 
 - 时间：`YYYY-MM-DDTHH:MM:SS{{TZ_OFFSET}}`（带偏移的 ISO 8601）
 - 日期：`YYYY-MM-DD`
-- 全小写 snake_case；状态用枚举字符串，不用布尔
-- 所有可选字段显式标 `nullable` 或放进 `required` 之外
+- 全小写 camelCase（`planDate` / `expectFires` / `ackHints`）；状态用枚举字符串，不用布尔
+- 可空字段写成 `"type": ["string", "null"]`。**不要用 `nullable`**——那是 OpenAPI 3.0 的关键字，JSON Schema 2020-12 不认识它，写了不报错也不生效
+- 小时分钟写成 `^([01][0-9]|2[0-3]):[0-5][0-9]$`，别用 `^[0-9]{2}:[0-9]{2}$`——后者会放过 `99:99`
 
 ## 契约稳定性
 

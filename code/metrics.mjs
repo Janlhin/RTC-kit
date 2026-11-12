@@ -14,6 +14,10 @@
  *   node metrics.mjs sync past               只补今天以前（prep 用）
  *   node metrics.mjs report [天数]            看汇总（默认 30 天）
  *   node metrics.mjs today                  只看今天一行
+ *
+ * 状态文件位置：
+ *   --state <dir> 参数 > 环境变量 RTC_STATE > 脚本所在目录。
+ *   放错目录时会明确列出尝试过的路径并退出，不会静默生成空账本。
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -22,8 +26,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(HERE, "metrics.db");
-const ALARMS_PATH = join(HERE, "alarms.json");
+
+const argv = process.argv.slice(2);
+const stateIdx = argv.indexOf("--state");
+const STATE_ARG = stateIdx > -1 ? argv[stateIdx + 1] : null;
+if (stateIdx > -1) argv.splice(stateIdx, 2);
+
+const STATE_DIR = STATE_ARG || process.env.RTC_STATE || HERE;
+const DB_PATH = join(STATE_DIR, "metrics.db");
+const ALARMS_PATH = join(STATE_DIR, "alarms.json");
 
 /**
  * @typedef {Object} Window
@@ -65,7 +76,10 @@ function open() {
 
 function readAlarms() {
   if (!existsSync(ALARMS_PATH)) {
-    throw new Error(`找不到 ${ALARMS_PATH}`);
+    throw new Error(
+      `找不到 ${ALARMS_PATH}\n` +
+        `  状态文件默认从脚本所在目录读取。用 --state <dir> 或环境变量 RTC_STATE 指定状态目录。`
+    );
   }
   return /** @type {Alarms} */ (JSON.parse(readFileSync(ALARMS_PATH, "utf8")));
 }
@@ -172,10 +186,14 @@ function cmdReport(days) {
     return;
   }
 
-  const rate = overall.acked / overall.rows;
+  const resolved = overall.acked + overall.missed;
+  const rate = resolved ? overall.acked / resolved : 0;
   console.log(`周期：最近 ${days} 天（有数据 ${overall.days} 天）`);
-  console.log(`确认率：${(rate * 100).toFixed(1)}%  (${overall.acked}/${overall.rows})`);
-  console.log(`漏响：${overall.missed} 次   总响铃：${overall.fires} 次`);
+  console.log(
+    `确认率（按已结算口径）：${(rate * 100).toFixed(1)}%  (${overall.acked}/${resolved})`
+  );
+  console.log(`未结算 ${overall.rows - resolved} 行（pending / skipped，不进分母）`);
+  console.log(`漏响：${overall.missed} 次   发送尝试合计：${overall.fires} 次`);
   console.log(`平均响 ${overall.avg_fires_to_ack ?? "-"} 次才确认`);
 
   const byWindow = db
@@ -192,9 +210,10 @@ function cmdReport(days) {
 
   console.log("\n按窗口：");
   for (const r of byWindow) {
-    const pct = ((r.acked / r.total) * 100).toFixed(0);
+    const wResolved = r.acked + r.missed;
+    const pct = wResolved ? `${((r.acked / wResolved) * 100).toFixed(0)}%` : "—";
     console.log(
-      `  ${String(r.label).padEnd(10)} ${String(r.window).padEnd(12)} 确认 ${pct}%  (${r.acked}/${r.total})  漏 ${r.missed}  平均 ${r.avg_fires ?? "-"} 响`
+      `  ${String(r.label).padEnd(10)} ${String(r.window).padEnd(12)} 确认 ${pct}  (${r.acked}/${wResolved})  漏 ${r.missed}  平均 ${r.avg_fires ?? "-"} 响`
     );
   }
 
@@ -233,7 +252,7 @@ function cmdToday() {
 
 // ---------- 入口 ----------
 
-const [, , cmd = "report", arg] = process.argv;
+const [cmd = "report", arg] = argv;
 
 try {
   switch (cmd) {

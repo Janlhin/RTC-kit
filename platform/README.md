@@ -7,6 +7,7 @@
 | 文件 | 内容 |
 |---|---|
 | `openclaw.md` | 以某个 OpenClaw 版本为例，说明触发器、载荷类型、投递约束 |
+| `hermes.md` | 以 Hermes Agent 为例：`--no-agent` 脚本载荷、空输出即静默、入口包装器 |
 | `jobs.example.json` | 四条触发器的声明式参数（**模板，不是可直接执行的配置**） |
 | `README.md` | 本文件 |
 
