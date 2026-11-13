@@ -20,8 +20,8 @@
       "ackHints": ["{{ACK_WORD_A}}", "{{ACK_WORD_B}}"]
     },
     {
-      "id": "meds-am",
-      "label": "例行事项 A",
+      "id": "vitamin-bc-am",
+      "label": "维生素B/C",
       "start": "{{MORNING_TIME}}",
       "end": "{{MORNING_END}}",
       "intervalMin": 5,
@@ -29,8 +29,8 @@
       "ackHints": ["{{ACK_WORD_C}}", "{{ACK_WORD_D}}"]
     },
     {
-      "id": "meds-noon",
-      "label": "例行事项 B",
+      "id": "vitamin-bc-noon",
+      "label": "维生素B/C",
       "start": "{{NOON_TIME}}",
       "end": "{{NOON_END}}",
       "intervalMin": 5,
@@ -38,8 +38,8 @@
       "ackHints": ["{{ACK_WORD_C}}", "{{ACK_WORD_D}}"]
     },
     {
-      "id": "meds-pm",
-      "label": "例行事项 C",
+      "id": "vitamin-bc-pm",
+      "label": "维生素B/C",
       "start": "{{EVENING_TIME}}",
       "end": "{{EVENING_END}}",
       "intervalMin": 5,
@@ -57,8 +57,9 @@
     { "hour": 20, "minute": 0, "kindByDateType": { "workday": "summary", "weekend": "summary", "holiday": "summary" } }
   ],
   "phases": [
-    { "name": "active", "start": "{{ACTIVE_START}}", "end": "{{ACTIVE_END}}", "proactiveAllowed": true },
-    { "name": "quiet", "start": "{{ACTIVE_END}}", "end": "{{ACTIVE_START}}", "proactiveAllowed": false, "exception": "仅 P0" }
+    { "name": "活跃", "start": "{{ACTIVE_START}}", "end": "{{ACTIVE_END}}", "proactiveAllowed": true },
+    { "name": "收尾", "start": "{{SUMMARY_HOUR}}", "end": "{{ACTIVE_END}}", "proactiveAllowed": true, "exception": "只有总结可以" },
+    { "name": "安静", "start": "{{ACTIVE_END}}", "end": "{{ACTIVE_START}}", "proactiveAllowed": false, "exception": "仅 P0" }
   ],
   "weeklyChores": [
     { "dayOfWeek": 6, "label": "{{SATURDAY_CHORE}}", "attachToRollcallHour": 14 },
