@@ -295,7 +295,8 @@ def day_disabled(routine: dict, kind: str) -> bool:
     return False
 
 
-def build_windows(routine: dict, d: date, kind: str, now: datetime) -> list[dict]:
+def build_windows(routine: dict, d: date, kind: str, now: datetime,
+                  strict: bool = True) -> list[dict]:
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
@@ -344,7 +345,9 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime) -> list[dict
             # 所有窗口都不在有效期内：还没开始，或已经结束。合法空日，静默。
             return []
         # 有窗口在有效期内，却被 dateTypes 全部排除 → 多半是 dateTypes 写错了
-        raise Validation("今天没有任何窗口：检查 routines.json 的 dateTypes")
+        if strict:
+            raise Validation("今天没有任何窗口：检查 routines.json 的 dateTypes")
+        return []
     return out
 
 
@@ -583,6 +586,24 @@ def cmd_ack(args) -> int:
 # ---------------------------------------------------------------- 历史日程查询
 
 
+def preview_schedule(routine: dict, day_iso: str) -> dict | None:
+    """按配置推算某天的安排——用于未来日期（那时还没有快照）。
+
+    快照回答「那天实际是什么」，推算回答「那天将会是什么」。两者不混。
+    """
+    try:
+        d = date.fromisoformat(day_iso)
+    except ValueError:
+        return None
+    kind = plan_kind(d, routine)
+    if day_disabled(routine, kind):
+        return None
+    tz = tz_of(routine["tzOffset"])
+    now = datetime.combine(d, time(0, 0), tzinfo=tz)
+    windows = build_windows(routine, d, kind, now, strict=False)
+    return schedule_snapshot(routine, kind, windows, day_iso, "")
+
+
 def cmd_schedule(args) -> int:
     """查历史某天（或某月）的日程安排。
 
@@ -613,17 +634,30 @@ def cmd_schedule(args) -> int:
         print("用法：rtc.py schedule <YYYY-MM-DD> | --month YYYY-MM [--json]", file=sys.stderr)
         return 4
     path = SCHEDULE_DIR / f"{args.date}.json"
-    if not path.exists():
-        print(f"schedule: 没有 {args.date} 的快照", file=sys.stderr)
-        return 4
-    s = json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        s = json.loads(path.read_text(encoding="utf-8"))
+        source = "快照"
+    else:
+        # 没有快照：该日期还没到（或那天没跑 plan）。按配置推算。
+        try:
+            s = preview_schedule(load_routine(), args.date)
+        except Validation:
+            s = None
+        if s is None:
+            print(f"schedule: 没有 {args.date} 的快照，也推算不出安排", file=sys.stderr)
+            return 4
+        source = "配置推算"
     if args.json:
+        if not args.json_only:
+            s = dict(s)
+            s["_source"] = source
         print(json.dumps(s, ensure_ascii=False, indent=2))
         return 0
 
     d = date.fromisoformat(s["date"])
     dow = "一二三四五六日"[d.weekday()]
-    print(f"{s['date']}（周{dow}）{s['planKind']}  时区 {s.get('timezone')}")
+    tag = "" if source == "快照" else "  （未来日期，按配置推算）"
+    print(f"{s['date']}（周{dow}）{s['planKind']}  时区 {s.get('timezone')}{tag}")
     if s["windows"]:
         print("窗口：")
         for w in s["windows"]:
@@ -843,6 +877,7 @@ def main(argv=None) -> int:
     ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")
     ssch.add_argument("--month", help="YYYY-MM")
     ssch.add_argument("--json", action="store_true")
+    ssch.add_argument("--json-only", action="store_true", help=argparse.SUPPRESS)
     ssch.set_defaults(func=cmd_schedule)
 
     ss = sub.add_parser("status")
