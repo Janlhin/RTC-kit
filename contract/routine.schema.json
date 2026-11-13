@@ -123,6 +123,10 @@
           "items": { "type": "string", "format": "date" },
           "description": "这些日期不响这个窗口。给周期窗口用——推迟某一天时记在这里（否则周期窗口会继续每天响）"
         },
+        "disabled": {
+          "type": "boolean",
+          "description": "true = 永久停用这个窗口：以后任何日期都不生成。用于「以后别提醒我了」与「这件事完成了」。省略 = 启用"
+        },
         "dueDate": {
           "type": "string",
           "format": "date",

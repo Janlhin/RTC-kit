@@ -238,6 +238,43 @@ python rtc.py postpone --window travel --deadline --to 2026-06-01  # 移动截�
 会拒绝的情况（退出码 `3`）：目标日期不晚于今天、目标日与该窗口的 `dateTypes` 冲突、
 目标日是显式禁用的日期类型。宁可当场报错，也不要「推迟成功但明天不响」。
 
+### 取消 / 完成 / 永不提醒
+
+三个不同的意图，三条命令。**别混用**：
+
+| 用户说 | 命令 | 效果 |
+|---|---|---|
+| 「那个会不去了」 | `cancel` | 取消**一个安排** |
+| 「这件事做完了」 | `complete` | 记录完成 + 以后不再提醒 |
+| 「以后都别提醒我了」 | `disable` | 永久停用**一类提醒**（可用 `enable` 撤销） |
+
+```bash
+python rtc.py cancel   --window travel              # 取消今天这个安排
+python rtc.py cancel   --window travel --date 2027-03-01   # 取消未来某天那次
+python rtc.py complete --window pack --text "打完了"  # 完成 + 停用
+python rtc.py disable  --window tea                  # 永不提醒
+python rtc.py enable   --window tea                  # 又想起来了
+```
+
+`cancel` 对不同窗口的含义不同：
+
+| 窗口类型 | cancel 的效果 |
+|---|---|
+| 一次性（`oneOff`） | 这件事不做了 → 彻底不生成 |
+| 倒计时（`dueDate`） | 截止日截断到今天 → 以后不再生成 |
+| 有效期区间 | 有效期截断到今天 → 以后不再生成 |
+| 周期（无限期） | **只取消今天这一次**，明天照常 |
+
+最后一行是重点：周期窗口没有「这件事」可以取消——它每天都在。
+要永久停用请用 `disable`。
+
+`complete` 与 `ack` 的区别：
+
+- `ack` = 「这次我知道了，别再响了」→ 只停今天，明天照常
+- `complete` = 「这件事做完了，以后也不用提醒」→ 记录完成 + 永久停用
+
+`disabled: true` 是配置里的永久开关。全部窗口都被停用时，那一天是**合法空日**（静默），不是配置错误。
+
 ### 空日的两种含义
 
 | 情况 | 行为 |

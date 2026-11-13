@@ -711,5 +711,301 @@ class TestPostponeCountdown(RtcCase):
         self.assertEqual(out, "")
 
 
+class TestCancelCompleteDisable(RtcCase):
+    """取消 / 完成 / 永不提醒"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {"id": "meeting", "label": "临时会议", "start": "11:00", "end": "11:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "tea", "label": "喝茶", "start": "15:00", "end": "15:25",
+             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+        ]
+        self.write_routine(r)
+
+    def routine(self) -> dict:
+        return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+
+    def window_def(self, wid):
+        return next(w for w in self.routine()["alarmWindows"] if w["id"] == wid)
+
+    # ---------- cancel ----------
+
+    def test_cancel_one_off_stops_it_forever(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, out, err = self.cli("cancel", "--window", "meeting",
+                                 now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "", "cancel 由用户触发，stdout 不该被投递出去")
+
+        rc, out, _ = self.cli("due", now="2026-11-13T11:00:00+08:00")
+        self.assertEqual(out, "", "取消后今天不该响")
+
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.assertNotIn("meeting", [w["id"] for w in self.state().get("windows", [])],
+                         "一次性窗口取消后不该再生成")
+
+    def test_cancel_marks_state_cancelled(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "meeting", now="2026-11-13T08:00:00+08:00")
+        w = self.window("meeting")
+        self.assertEqual(w["state"], "cancelled")
+        self.assertEqual(w["missedReason"], "cancelled")
+        self.assertIsNotNone(w.get("cancelledAt"))
+
+    def test_cancel_keeps_reason_in_history(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "meeting", now="2026-11-13T08:00:00+08:00")
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        hist = self.state().get("history", [])
+        entry = next((h for h in hist if h["id"] == "meeting"), None)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["state"], "cancelled")
+        self.assertEqual(entry["missedReason"], "cancelled",
+                         "取消的原因要进归档，不能丢")
+
+    def test_cancel_recurring_only_today(self):
+        """周期窗口没有「这件事」可取消，只取消今天这一次。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, _, err = self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("明天照常", err, "周期窗口的取消语义要说清")
+
+        rc, out, _ = self.cli("due", now="2026-11-13T15:00:00+08:00")
+        self.assertEqual(out, "", "今天不该响")
+
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-14T15:00:00+08:00")
+        self.assertIn("喝茶", out, "明天照常响")
+
+    def test_cancel_future_date(self):
+        """取消还没到的一次性安排。"""
+        r = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        r["alarmWindows"].append({
+            "id": "future", "label": "季度汇报", "start": "09:00", "end": "09:15",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "oneOff": True, "validFrom": "2027-03-01", "validUntil": "2027-03-01"})
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, _, err = self.cli("cancel", "--window", "future", "--date", "2027-03-01",
+                               now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.window_def("future").get("disabled"),
+                        "取消未来那次 = 那个窗口不再生成")
+
+    def test_cancel_date_window_does_not_exist(self):
+        """那天根本没有这个窗口 → 退 4 并说明，不静默无效。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, _, err = self.cli("cancel", "--window", "meeting", "--date", "2026-11-20",
+                               now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertIn("不存在", err)
+        self.assertFalse(self.window_def("meeting").get("disabled"),
+                         "取消失败就不该改动配置")
+
+    def test_cancel_unknown_window(self):
+        rc, _, err = self.cli("cancel", "--window", "nope", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertIn("没有", err)
+
+    def test_cancel_twice(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "meeting", now="2026-11-13T08:00:00+08:00")
+        rc, _, err = self.cli("cancel", "--window", "meeting", now="2026-11-13T08:05:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertIn("已经", err)
+
+    # ---------- complete ----------
+
+    def test_complete_acknowledges_and_disables(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, out, err = self.cli("complete", "--window", "tea", "--text", "喝完了",
+                                 now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        w = self.window("tea")
+        self.assertEqual(w["state"], "acked")
+        self.assertEqual(w["ackText"], "喝完了")
+        self.assertTrue(self.window_def("tea").get("disabled"),
+                        "完成 = 以后不再提醒")
+
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.assertNotIn("tea", [w["id"] for w in self.state().get("windows", [])])
+
+    def test_complete_vs_ack_difference(self):
+        """complete 与 ack 的区别：ack 只停今天，complete 连以后也停。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("ack", "--window", "tea", "--text", "好了", now="2026-11-13T08:00:00+08:00")
+        self.assertFalse(self.window_def("tea").get("disabled"),
+                         "ack 不该停用窗口")
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.assertIn("tea", [w["id"] for w in self.state().get("windows", [])],
+                      "ack 之后明天照常响")
+
+    # ---------- disable / enable ----------
+
+    def test_disable_stops_forever(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, out, err = self.cli("disable", "--window", "tea",
+                                 now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertTrue(self.window_def("tea").get("disabled"))
+
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.assertNotIn("tea", [w["id"] for w in self.state().get("windows", [])])
+        rc, out, _ = self.cli("due", now="2026-11-14T15:00:00+08:00")
+        self.assertEqual(out, "")
+
+    def test_disable_marks_today_occurrence_cancelled(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("disable", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        w = self.window("tea")
+        self.assertEqual(w["state"], "cancelled", "停用时今天这次也不该再响")
+        rc, out, _ = self.cli("due", now="2026-11-13T15:00:00+08:00")
+        self.assertEqual(out, "")
+
+    def test_enable_restores(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("disable", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        rc, _, err = self.cli("enable", "--window", "tea")
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.window_def("tea").get("disabled"))
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.assertIn("tea", [w["id"] for w in self.state().get("windows", [])])
+
+    def test_enable_already_enabled(self):
+        rc, _, err = self.cli("enable", "--window", "tea")
+        self.assertEqual(rc, 4)
+        self.assertIn("本来就是", err)
+
+    def test_all_disabled_is_legal_empty_day(self):
+        """全部窗口被停用 = 合法空日，不是配置错误。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("disable", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.cli("disable", "--window", "meeting", now="2026-11-13T08:00:00+08:00")
+        rc, out, err = self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.assertEqual(rc, 0, "全部停用不该报配置错误")
+        self.assertEqual(self.state().get("windows"), [])
+
+    def test_disabled_window_not_counted_in_plan(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("disable", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        ids = [w["id"] for w in self.state().get("windows", [])]
+        self.assertNotIn("tea", ids)
+
+
+class TestSevenOpsSameDay(RtcCase):
+    """七种操作挤在同一天：创建一次性 / 取消 / 推迟 / 倒计时 / 预约 / 完成 / 永不提醒"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {"id": "travel", "label": "旅游", "start": "09:00", "end": "09:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "cancel-me", "label": "临时会议", "start": "11:00", "end": "11:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "postpone-me", "label": "取件", "start": "14:00", "end": "14:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "zzz", "label": "限时活动", "start": "20:00", "end": "20:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "dueDate": "2026-11-15",
+             "validFrom": "2026-11-13", "validUntil": "2026-11-15"},
+            {"id": "future", "label": "季度汇报", "start": "09:00", "end": "09:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2027-03-01", "validUntil": "2027-03-01"},
+            {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
+             "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]},
+            {"id": "tea", "label": "喝茶", "start": "15:00", "end": "15:25",
+             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+        ]
+        self.write_routine(r)
+
+    def test_all_seven_ops_in_one_day(self):
+        T = "2026-11-13"
+        self.cli("plan", now=f"{T}T06:00:00+08:00")
+
+        # ⑥ 完成
+        self.cli("complete", "--window", "wake", "--text", "起了", now=f"{T}T07:05:00+08:00")
+        # ② 取消
+        self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
+        # ③ 推迟
+        self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14",
+                 now=f"{T}T08:20:00+08:00")
+        # ⑦ 永不提醒
+        self.cli("disable", "--window", "tea", now=f"{T}T08:50:00+08:00")
+        # ⑤ 取消未来的预约
+        self.cli("cancel", "--window", "future", "--date", "2027-03-01",
+                 now=f"{T}T08:55:00+08:00")
+
+        # 当天：只有旅游（09:00）和倒计时（20:00）该响
+        expected = {
+            "07:00": "",        # wake 已完成
+            "09:00": "旅游",     # travel 一次性
+            "11:00": "",       # cancel-me 已取消
+            "14:00": "",       # postpone-me 已推迟
+            "15:00": "",       # tea 已停用
+            "20:00": "限时活动",  # zzz 倒计时
+        }
+        for t, want in expected.items():
+            rc, out, _ = self.cli("due", now=f"{T}T{t}:00+08:00")
+            if want:
+                self.assertIn(want, out, t)
+            else:
+                self.assertEqual(out, "", f"{t} 应静默")
+
+        # 次日：只有取件（推迟过来的）与倒计时
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        ids = [w["id"] for w in self.state().get("windows", [])]
+        self.assertEqual(sorted(ids), ["postpone-me", "zzz"])
+        rc, out, _ = self.cli("due", now="2026-11-14T14:00:00+08:00")
+        self.assertIn("取件", out, "推迟的那次在明天同一时间响")
+        rc, out, _ = self.cli("due", now="2026-11-14T20:00:00+08:00")
+        self.assertIn("明天截止", out)
+
+        # 倒计时走到最后一天
+        self.cli("plan", now="2026-11-15T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-15T20:00:00+08:00")
+        self.assertIn("最后一天", out)
+        # 之后彻底消失
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [])
+
+    def test_seven_ops_keep_state_contract_valid(self):
+        """七操作之后，状态文件仍要符合契约（additionalProperties: false）。"""
+        import jsonschema
+        schema = json.loads(
+            (REPO / "contract" / "alarm-state.schema.json").read_text(encoding="utf-8"))
+        T = "2026-11-13"
+        self.cli("plan", now=f"{T}T06:00:00+08:00")
+        self.cli("complete", "--window", "wake", now=f"{T}T07:05:00+08:00")
+        self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
+        self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14",
+                 now=f"{T}T08:20:00+08:00")
+        self.cli("disable", "--window", "tea", now=f"{T}T08:50:00+08:00")
+        errs = list(jsonschema.Draft202012Validator(schema).iter_errors(self.state()))
+        self.assertEqual(errs, [], f"状态文件违反契约：{errs[:1]}")
+
+    def test_cancelled_does_not_trigger_self_check_alarm(self):
+        """被取消的窗口不算「整段没响」；确实没响过的窗口仍要报。"""
+        T = "2026-11-13"
+        self.cli("plan", now=f"{T}T06:00:00+08:00")
+        self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        rc, out, _ = self.cli("plan", "--force", now="2026-11-14T06:00:00+08:00")
+        self.assertNotIn("cancel-me", out,
+                         "取消 ≠ 漏响，不该触发「整段没响」告警")
+        self.assertIn("travel", out,
+                      "确实整段没响过的窗口仍要报出来——否则真漏了就没人知道")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

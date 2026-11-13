@@ -64,6 +64,35 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} postpone --window <id> 
 
 **用户说「推迟」但没给日期时，先问一句「推到哪天？」**——别猜。
 
+### 取消 / 完成 / 永不提醒
+
+三件事，三条命令，**别混用**：
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} cancel   --window <id>
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} complete --window <id> --text "<用户原话>"
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} disable  --window <id>
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
+```
+
+| 用户说 | 用哪条 | 回一句 |
+|---|---|---|
+| 「那个不去了」 | `cancel` | `好，那次取消了。` |
+| 「这件事做完了」 | `complete` | `好，完成了，以后不提醒了。` |
+| 「以后都别提醒我了」 | `disable` | `好，以后不提醒了。` |
+| 「又想起来了」 | `enable` | `好，重新开起来了。` |
+
+区别：
+
+- `cancel` 取消**一个安排**。周期窗口（每天都响的）只能取消今天这一次——
+  它没有「这件事」可取消。一次性 / 倒计时 / 有期限的安排则是彻底取消。
+- `complete` = 完成 + 永久停用。`ack` 只停今天。
+- `disable` 停用**一类**提醒；`enable` 可以撤销。
+
+退出码：`0` 成功 · `3` 参数不合法 · `4` 没有这个窗口（或那天不存在这个窗口）。
+
+**这些命令的 stdout 是空的**——不要把它们当提醒投递出去。结果看退出码，细节在 stderr。
+
 一次性窗口的「改期」= 改 `validFrom` / `validUntil`；窗口本身已经只存在于那一天。
 
 修改时刻表**不需要额外仪式**——它就是一份数据文件，改动在版本控制里可见即可。
@@ -175,6 +204,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 
 - ❌ 自己判断「现在该不该响」
 - ❌ 手改 `rules/routines.json` 里的日期（推迟用 `postpone` 命令）
+- ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
 - ❌ 读到文件不一致就「顺手修好」

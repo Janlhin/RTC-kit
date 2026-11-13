@@ -24,6 +24,10 @@
   python rtc.py --workspace <dir> schedule <YYYY-MM-DD> | --month YYYY-MM [--json]
   python rtc.py --workspace <dir> check --window <ID> --item <序号或名称> [--undo]
   python rtc.py --workspace <dir> postpone --window <ID> [--to YYYY-MM-DD | --days N] [--deadline]
+  python rtc.py --workspace <dir> cancel   --window <ID> [--date YYYY-MM-DD]
+  python rtc.py --workspace <dir> complete --window <ID> [--text TXT]
+  python rtc.py --workspace <dir> disable  --window <ID>
+  python rtc.py --workspace <dir> enable   --window <ID>
   python rtc.py --workspace <dir> metrics sync|report|schedule [--date YYYY-MM-DD]
 
 环境变量 RTC_WORKSPACE 可代替 --workspace；都不给时用当前目录。
@@ -317,7 +321,9 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
-    ranged = [w for w in routine["alarmWindows"] if in_valid_range(w, day_iso)]
+    # 永久停用的窗口：任何日期都不生成（「以后别提醒我了」/「这件事完成了」）
+    enabled = [w for w in routine["alarmWindows"] if not w.get("disabled")]
+    ranged = [w for w in enabled if in_valid_range(w, day_iso)]
     # 显式跳过的日期（推迟产生的）——这一天不响
     skipped = [w for w in ranged if day_iso in (w.get("skipDates") or [])]
     dated = [w for w in ranged if day_iso not in (w.get("skipDates") or [])]
@@ -365,6 +371,8 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
                 "ackHint": (w.get("ackHints") or ["知道了"])[0],
                 "oneOff": one_off,
                 "dueDate": due,
+                "disabled": False,
+                "cancelledAt": None,
                 "checklist": [
                     {"id": str(i + 1), "label": str(label)}
                     for i, label in enumerate(w.get("checklist") or [])
@@ -373,6 +381,9 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
             }
         )
     if not out:
+        if not ranged and len(enabled) < len(routine["alarmWindows"]):
+            # 所有窗口都被永久停用：合法空日，静默。
+            return []
         if not dated:
             # 所有窗口都不在有效期内，或都被显式跳过：合法空日，静默。
             return []
@@ -386,7 +397,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
     return out
 
 
-TERMINAL = {"acked", "missed", "skipped"}
+TERMINAL = {"acked", "missed", "skipped", "cancelled"}
 
 
 def _migrate_checklist(prev: dict, w: dict) -> None:
@@ -415,8 +426,8 @@ def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
     for w in fresh:
         p = prev.get(w["id"])
         keep = bool(p) and p.get("state") in TERMINAL
-        if keep and w.get("dueDate"):
-            keep = False          # 倒计时：每天重新开始，直到截止日
+        if keep and w.get("dueDate") and p.get("state") != "cancelled":
+            keep = False          # 倒计时：每天重新开始，直到截止日（但被取消的不重开）
         if keep and w.get("checklist"):
             # 清单：只有全部打完才保留终态；没打完就次日继续（勾选状态带过去）
             done = set(w.get("checked") or [])
@@ -451,7 +462,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
                 "state": state,
                 "fires": w.get("fireCount", 0),
                 "ackedAt": w.get("ackedAt"),
-                "missedReason": reason if state in {"missed", "skipped"} else None,
+                "missedReason": reason if state in {"missed", "skipped", "cancelled"} else None,
             }
         )
     # 同 date+id 去重，后写覆盖先写
@@ -923,6 +934,244 @@ def cmd_postpone(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 取消 / 完成 / 停用
+
+CANCELLED_REASON = "cancelled"
+
+
+def _write_routine(routine: dict, digest: str | None) -> None:
+    """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。"""
+    atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+
+
+def _find_window(routine: dict, wid: str) -> dict | None:
+    for w in routine.get("alarmWindows", []) or []:
+        if w["id"] == wid:
+            return w
+    return None
+
+
+def _mark_state(state: dict | None, wid: str, new_state: str,
+                now: datetime, reason: str) -> str:
+    """把今天 state 里某个窗口改成给定终态。返回结果标记。"""
+    if not state:
+        return "not_planned"
+    hit = next((w for w in state.get("windows", []) if w["id"] == wid), None)
+    if hit is None:
+        return "not_planned"
+    if hit["state"] in {"acked", "delivered", "cancelled"}:
+        return "already_final"
+    if new_state == "cancelled":
+        hit["state"] = "cancelled"
+        hit["cancelledAt"] = now.isoformat()
+        hit["missedAt"] = now.isoformat()
+        hit["missedReason"] = reason
+    elif new_state == "acked":
+        hit["state"] = "acked"
+        hit["ackedAt"] = now.isoformat()
+        hit["ackText"] = reason or ""
+        hit["missedAt"] = None
+        hit["missedReason"] = None
+    return "changed"
+
+
+def cmd_cancel(args) -> int:
+    """取消一个安排。
+
+    两层含义，按窗口类型自动判断：
+      - 有期限的窗口（一次性 / 倒计时 / 有效期区间）→ 取消整个安排：
+        有效期截断到今天，今天这次标 `cancelled`，以后不再生成
+      - 无限期的周期窗口 → 只取消今天这一次（明天照常）。
+        周期窗口没有「结束」，想永久停用请用 `disable`。
+
+    stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
+    """
+    digest = file_digest(ROUTINE)
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    today = now.date().isoformat()
+
+    w = _find_window(routine, args.window)
+    if w is None:
+        print(f"cancel: 时刻表里没有窗口 {args.window}", file=sys.stderr)
+        return 4
+    if w.get("disabled"):
+        print(f"cancel: {args.window} 已经停用了", file=sys.stderr)
+        return 4
+
+    # 未来某天的一次性安排 —— 直接停用那个窗口
+    if args.date:
+        try:
+            target = date.fromisoformat(args.date)
+        except ValueError:
+            print(f"cancel: --date 应为 YYYY-MM-DD，收到 {args.date}", file=sys.stderr)
+            return 3
+        if target.isoformat() != today:
+            # 先确认那天真的有这个窗口 —— 否则「取消」会静默无效
+            if not in_valid_range(w, target.isoformat()):
+                print(
+                    f"cancel: {args.window} 在 {target.isoformat()} 不存在"
+                    f"（有效期 {w.get('validFrom') or '不限'} ~ {w.get('validUntil') or '不限'}）",
+                    file=sys.stderr,
+                )
+                return 4
+            if w.get("oneOff") and w.get("validFrom") == target.isoformat():
+                # 这个窗口只存在于那一天 → 整件事取消
+                w["disabled"] = True
+                _write_routine(routine, digest)
+                print(f"cancel: {args.window} 在 {target.isoformat()} 的那次已取消",
+                      file=sys.stderr)
+                return 0
+            skip = set(w.get("skipDates") or [])
+            skip.add(target.isoformat())
+            w["skipDates"] = sorted(skip)
+            _write_routine(routine, digest)
+            print(f"cancel: {args.window} 在 {target.isoformat()} 不再响", file=sys.stderr)
+            return 0
+
+    # 取消今天这一次
+    state = load_state()
+    outcome = _mark_state(state, args.window, "cancelled", now, CANCELLED_REASON)
+    if outcome == "changed":
+        rev = int(state["rev"])
+        state["rev"] = rev + 1
+        try:
+            atomic_write(STATE, state, expected_rev=rev)
+        except Conflict as e:
+            print(f"cancel: 状态冲突（{e}）", file=sys.stderr)
+            return 2
+
+    # 安排本身的去留
+    # 一次性窗口：取消 = 这件事不做了 → 彻底停用（它本来也只存在于某一天）
+    # 有期限的安排（倒计时 / 有效期区间）：有效期截断到今天 → 以后不再生成
+    # 无限期的周期窗口：没有「这件事」可取消，只取消今天这一次
+    truncated = False
+    if w.get("oneOff"):
+        w["disabled"] = True
+        truncated = True
+    elif w.get("dueDate"):
+        w["dueDate"] = today
+        if w.get("validUntil") and w["validUntil"] > today:
+            w["validUntil"] = today
+        truncated = True
+    elif w.get("validUntil"):
+        if w["validUntil"] > today:
+            w["validUntil"] = today
+            truncated = True
+        else:
+            truncated = True      # 已经到期的安排，截断后等于不再生成
+    if truncated:
+        _write_routine(routine, digest)
+
+    if outcome == "already_final":
+        note = "这一轮已经结束了"
+    elif truncated:
+        note = "已取消，以后不再提醒"
+    else:
+        note = "今天这次已取消（明天照常；要永久停用请用 disable）"
+    print(f"cancel: {args.window} {note}", file=sys.stderr)
+    return 0
+
+
+def cmd_complete(args) -> int:
+    """完成一件事。
+
+    语义 = 「做完了，以后不用提醒我」：记录确认 + 永久停用这个窗口。
+    这与 `ack` 的区别：`ack` 只停今天这一次，`complete` 连以后也不再提醒。
+
+    stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
+    """
+    digest = file_digest(ROUTINE)
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+
+    w = _find_window(routine, args.window)
+    if w is None:
+        print(f"complete: 时刻表里没有窗口 {args.window}", file=sys.stderr)
+        return 4
+
+    state = load_state()
+    outcome = _mark_state(state, args.window, "acked", now, args.text or "")
+    if outcome == "changed":
+        rev = int(state["rev"])
+        state["rev"] = rev + 1
+        try:
+            atomic_write(STATE, state, expected_rev=rev)
+        except Conflict as e:
+            print(f"complete: 状态冲突（{e}）", file=sys.stderr)
+            return 2
+
+    w["disabled"] = True
+    _write_routine(routine, digest)
+
+    notes = {
+        "changed": "已完成，以后不再提醒",
+        "already_final": "已完成（这一轮已结束），以后不再提醒",
+        "not_planned": "已完成，以后不再提醒",
+    }
+    print(f"complete: {args.window} {notes[outcome]}", file=sys.stderr)
+    return 0
+
+
+def cmd_disable(args) -> int:
+    """永久停用一个窗口（「以后别提醒我了」）。
+
+    与 `cancel` 的区别：cancel 取消一个安排，disable 关掉一类提醒。
+    disable 可以随时用 `enable` 撤销。
+
+    stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
+    """
+    digest = file_digest(ROUTINE)
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+
+    w = _find_window(routine, args.window)
+    if w is None:
+        print(f"disable: 时刻表里没有窗口 {args.window}", file=sys.stderr)
+        return 4
+    if w.get("disabled"):
+        print(f"disable: {args.window} 已经停用了", file=sys.stderr)
+        return 4
+
+    # 今天已生成的那次也不能再响
+    state = load_state()
+    outcome = _mark_state(state, args.window, "cancelled", now, CANCELLED_REASON)
+    if outcome == "changed":
+        rev = int(state["rev"])
+        state["rev"] = rev + 1
+        try:
+            atomic_write(STATE, state, expected_rev=rev)
+        except Conflict as e:
+            print(f"disable: 状态冲突（{e}）", file=sys.stderr)
+            return 2
+
+    w["disabled"] = True
+    _write_routine(routine, digest)
+    print(f"disable: {args.window} 已停用，以后不再提醒", file=sys.stderr)
+    return 0
+
+
+def cmd_enable(args) -> int:
+    """重新启用一个被停用的窗口。"""
+    digest = file_digest(ROUTINE)
+    routine = load_routine()
+    # --now 接受但不使用：启用不涉及时间判断，留着是为了与其它命令的参数约定一致
+    w = _find_window(routine, args.window)
+    if w is None:
+        print(f"enable: 时刻表里没有窗口 {args.window}", file=sys.stderr)
+        return 4
+    if not w.get("disabled"):
+        print(f"enable: {args.window} 本来就是启用的", file=sys.stderr)
+        return 4
+    w["disabled"] = False
+    _write_routine(routine, digest)
+    print(f"enable: {args.window} 已重新启用", file=sys.stderr)
+    return 0
+
+
 # ---------------------------------------------------------------- 历史日程查询
 
 
@@ -1227,6 +1476,28 @@ def main(argv=None) -> int:
     spo.add_argument("--deadline", action="store_true", help="移动截止日而不是生效日")
     spo.add_argument("--now")
     spo.set_defaults(func=cmd_postpone)
+
+    scan = sub.add_parser("cancel")
+    scan.add_argument("--window", required=True, help="窗口 id")
+    scan.add_argument("--date", help="取消未来某天的那次（YYYY-MM-DD）")
+    scan.add_argument("--now")
+    scan.set_defaults(func=cmd_cancel)
+
+    scom = sub.add_parser("complete")
+    scom.add_argument("--window", required=True, help="窗口 id")
+    scom.add_argument("--text", help="完成时的备注")
+    scom.add_argument("--now")
+    scom.set_defaults(func=cmd_complete)
+
+    sdis = sub.add_parser("disable")
+    sdis.add_argument("--window", required=True, help="窗口 id")
+    sdis.add_argument("--now")
+    sdis.set_defaults(func=cmd_disable)
+
+    sen = sub.add_parser("enable")
+    sen.add_argument("--window", required=True, help="窗口 id")
+    sen.add_argument("--now")
+    sen.set_defaults(func=cmd_enable)
 
     ssch = sub.add_parser("schedule")
     ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")

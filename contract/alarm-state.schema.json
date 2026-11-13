@@ -39,6 +39,8 @@
         "ackedAt": { "type": ["string", "null"], "format": "date-time" },
         "ackText": { "type": ["string", "null"] },
         "missedAt": { "type": ["string", "null"], "format": "date-time" },
+        "cancelledAt": { "type": ["string", "null"], "format": "date-time", "description": "被取消的时刻" },
+        "disabled": { "type": "boolean", "description": "这个窗口已被永久停用（完成 / 永不提醒）" },
         "missedReason": { "type": ["string", "null"] },
         "ackHint": { "type": "string" },
         "oneOff": { "type": "boolean", "description": "是否一次性提醒（送达即完成）" },
@@ -73,8 +75,8 @@
       ]
     },
     "state": {
-      "enum": ["pending", "ringing", "acked", "delivered", "missed", "skipped"],
-      "description": "pending→ringing→(acked|delivered|missed)；delivered = 一次性窗口已送达（无需确认）；补建时窗口已过则 skipped"
+      "enum": ["pending", "ringing", "acked", "delivered", "missed", "skipped", "cancelled"],
+      "description": "pending→ringing→(acked|delivered|missed|cancelled)；delivered = 一次性窗口已送达（无需确认）；cancelled = 被用户取消；补建时窗口已过则 skipped"
     },
     "historyEntry": {
       "type": "object",

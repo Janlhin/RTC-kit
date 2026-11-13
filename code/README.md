@@ -21,6 +21,10 @@ python rtc.py --workspace <dir> check --window <ID> --item <名称或序号>   #
 python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日程
 python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
 python rtc.py --workspace <dir> postpone travel --to 2026-12-16  # 把提醒挪到别的日子
+python rtc.py --workspace <dir> cancel   travel                # 取消一个安排
+python rtc.py --workspace <dir> complete travel --text "打完了"  # 完成 + 停用
+python rtc.py --workspace <dir> disable  tea                   # 永不提醒
+python rtc.py --workspace <dir> enable   tea                   # 又想起来了
 ```
 
 契约：**stdout 为空即静默**；诊断信息全部走 stderr；退出码 `0` 正常 / `2` 状态冲突 / `3` 校验失败 / `4` 无匹配窗口。
@@ -104,6 +108,55 @@ python rtc.py postpone --window travel --days 3             # 往后推 3 天
 
 `postpone` 的 **stdout 保持为空**：它由用户交互触发，不是定时任务，不该被投递出去。
 结果看退出码，细节在 stderr。
+
+## 取消 / 完成 / 永不提醒
+
+三个不同意图，三条命令：
+
+| 用户说 | 命令 | 效果 |
+|---|---|---|
+| 「那个不去了」 | `cancel` | 取消**一个安排** |
+| 「这件事做完了」 | `complete` | 记录完成 + 永久停用 |
+| 「以后都别提醒我了」 | `disable` | 永久停用**一类**提醒（`enable` 可撤销） |
+
+### cancel 对不同窗口的含义不同
+
+| 窗口类型 | cancel 的效果 |
+|---|---|
+| 一次性（`oneOff`） | 这件事不做了 → 彻底不生成 |
+| 倒计时（`dueDate`） | 截止日截断到今天 → 以后不再生成 |
+| 有效期区间 | 有效期截断到今天 → 以后不再生成 |
+| 周期（无限期） | **只取消今天这一次**，明天照常 |
+
+最后一格是重点：周期窗口没有「这件事」可以取消——它每天都在响。
+要永久停用请用 `disable`。
+
+`cancel --date YYYY-MM-DD` 取消未来某天的那次。先检查那天确实有这个窗口，
+不存在则退 `4` 并说明——否则「取消」会静默无效。
+
+### complete 与 ack 的区别
+
+- `ack` = 「这次我知道了，别再响了」→ 只停今天，明天照常
+- `complete` = 「这件事做完了，以后也不用提醒」→ 记录完成 + 永久停用
+
+### 契约
+
+| 字段 | 位置 | 含义 |
+|---|---|---|
+| `disabled` | `routine.alarmWindows[]` | `true` = 永久停用，任何日期都不生成 |
+| `disabled` | `alarm-state.windows[]` | 状态快照里的记录 |
+| `cancelled` | `alarm-state` 的 `state` 枚举 | 新终态：被用户取消 |
+| `cancelledAt` | `alarm-state.windows[]` | 被取消的时刻 |
+
+全部窗口都被停用时，那一天是**合法空日**（静默），不是配置错误。
+
+`cancelled` 与 `missed` 的区别很重要：被取消不是漏响，所以
+`self_check` 不会把它报成「整段没响」（归档里保留 `missedReason: cancelled`）。
+
+### stdout 约定
+
+`cancel` / `complete` / `disable` / `enable` / `check` 的 **stdout 保持为空**：
+它们由用户交互触发，不是定时任务，不该被投递出去。结果看退出码，细节在 stderr。
 
 ## 测试
 
