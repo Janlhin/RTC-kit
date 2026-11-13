@@ -397,5 +397,61 @@ class TestScheduleArchive(RtcCase):
         self.assertIn("起床", out)
 
 
+class TestCountdown(RtcCase):
+    """倒计时提醒（dueDate）：剩余天数由代码算，不由模型判断"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "zzz", "label": "限时活动", "start": "20:00", "end": "20:15",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "dueDate": "2026-05-10",
+            "validFrom": "2026-05-08", "validUntil": "2026-05-10"}]
+        self.write_routine(r)
+
+    def test_counts_down_in_text(self):
+        self.cli("plan", now="2026-05-08T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-08T20:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("限时活动", out)
+        self.assertIn("距截止还有 2 天", out)
+
+    def test_tomorrow_and_last_day(self):
+        self.cli("plan", now="2026-05-09T06:00:00+08:00")
+        _, out, _ = self.cli("due", now="2026-05-09T20:00:00+08:00")
+        self.assertIn("明天截止", out)
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        _, out, _ = self.cli("due", now="2026-05-10T20:00:00+08:00")
+        self.assertIn("最后一天", out)
+
+    def test_fires_once_per_day(self):
+        self.cli("plan", now="2026-05-08T06:00:00+08:00")
+        self.cli("due", now="2026-05-08T20:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-08T20:05:00+08:00")
+        self.assertEqual(out, "", "倒计时窗口每天只提醒一次")
+
+    def test_reminds_again_next_day_after_ack(self):
+        """确认过这次提醒 ≠ 事情做完了：次日仍要提醒。"""
+        self.cli("plan", now="2026-05-08T06:00:00+08:00")
+        self.cli("due", now="2026-05-08T20:00:00+08:00")
+        self.cli("ack", "--window", "zzz", "--text", "好了", now="2026-05-08T20:06:00+08:00")
+        self.cli("plan", now="2026-05-09T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-09T20:00:00+08:00")
+        self.assertIn("限时活动", out, "倒计时任务次日仍应提醒")
+
+    def test_stops_after_valid_until(self):
+        self.cli("plan", now="2026-05-11T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [], "有效期过后不再生成窗口")
+        rc, out, _ = self.cli("due", now="2026-05-11T20:00:00+08:00")
+        self.assertEqual(out, "")
+
+    def test_snapshot_records_due_date(self):
+        self.cli("plan", now="2026-05-08T06:00:00+08:00")
+        snap = json.loads((self.ws / "state" / "schedule" / "2026-05-08.json")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(snap["windows"][0]["dueDate"], "2026-05-10")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

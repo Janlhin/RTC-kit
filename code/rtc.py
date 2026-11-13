@@ -216,6 +216,7 @@ def schedule_snapshot(routine: dict, kind: str, windows: list[dict],
                 "intervalMin": w["intervalMin"],
                 "expectFires": w["expectFires"],
                 "oneOff": bool(w.get("oneOff")),
+                "dueDate": w.get("dueDate"),
                 "ackHint": w.get("ackHint"),
                 "validFrom": defs.get(w["id"], {}).get("validFrom"),
                 "validUntil": defs.get(w["id"], {}).get("validUntil"),
@@ -311,7 +312,11 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
         start = datetime.combine(d, time(sh, sm), tzinfo=tz)
         end = datetime.combine(d, time(eh, em), tzinfo=tz)
         one_off = bool(w.get("oneOff"))
-        if one_off:
+        due = w.get("dueDate")
+        if due:
+            # 倒计时窗口：每天只提醒一次。剩余天数由代码算，文案里带上。
+            exp = 1
+        elif one_off:
             # 一次性提醒只响一次，不做算术校验（end 可比 start 晚，用于容忍错过 start 那一分钟）
             exp = 1
         else:
@@ -338,6 +343,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
                 "missedReason": "late_plan" if expired else None,
                 "ackHint": (w.get("ackHints") or ["知道了"])[0],
                 "oneOff": one_off,
+                "dueDate": due,
             }
         )
     if not out:
@@ -362,7 +368,8 @@ def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
     merged = []
     for w in fresh:
         p = prev.get(w["id"])
-        if p and p.get("state") in TERMINAL:
+        # 倒计时窗口每天重新开始：昨天 missed/acked 都不该让它停止提醒
+        if p and p.get("state") in TERMINAL and not w.get("dueDate"):
             merged.append(p)
         else:
             merged.append(w)
@@ -525,6 +532,16 @@ def cmd_due(args) -> int:
 
     n = hit["fireCount"]
     head = f"{hit['label']} —— {now.strftime('%H:%M')}"
+    if hit.get("dueDate"):
+        days = (date.fromisoformat(hit["dueDate"]) - now.date()).days
+        if days == 0:
+            head += "（最后一天！）"
+        elif days == 1:
+            head += "（明天截止）"
+        elif days > 1:
+            head += f"（距截止还有 {days} 天）"
+        else:
+            head += f"（已过期 {-days} 天）"
     if n > 1:
         head += f"（第 {n} 次）"
     lines = [head]

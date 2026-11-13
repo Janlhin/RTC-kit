@@ -41,7 +41,8 @@
         "missedAt": { "type": ["string", "null"], "format": "date-time" },
         "missedReason": { "type": ["string", "null"] },
         "ackHint": { "type": "string" },
-        "oneOff": { "type": "boolean", "description": "是否一次性提醒（送达即完成）" }
+        "oneOff": { "type": "boolean", "description": "是否一次性提醒（送达即完成）" },
+        "dueDate": { "type": ["string", "null"], "format": "date", "description": "截止日（倒计时提醒用）" }
       },
       "allOf": [
         {
