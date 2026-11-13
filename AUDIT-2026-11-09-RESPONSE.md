@@ -439,7 +439,97 @@ complete 的确认+停用、与 ack 的差别、disable/enable 的往返、
 之后  最后一天 → 彻底消失
 ```
 
-## 十四、复现方式
+## 十四、2026-11-13 追加：执行结果留档（推迟 / 取消 / 未完成查得到吗）
+
+用户问：「推迟取消未完成会留档吗？假设我一年后回来查是否能查到记录」。
+
+### 实测发现的缺口
+
+四种结局在 `state/alarms.json` 的 `history` 里都留了记录，但那份 history **只有 14 天**，
+一年后必然查不到。永久存档只有 `state/schedule/*.json`——而它**只记「计划」，不记「结果」**。
+
+实测（模拟一年后查 2026-11-13）：
+
+```
+2026-11-13（周五）workday  时区 Asia/Shanghai
+窗口：
+  11:00–11:15  临时会议   每 5 分钟 × 1 次  …   ← 看不出被取消了
+  16:00–16:15  没做完的事  每 5 分钟 × 1 次  …   ← 看不出没做成
+  09:00–09:15  正常响的   每 5 分钟 × 1 次  …   ← 看不出响过了
+```
+
+三个问题：
+
+1. **快照没有结果层**——只说「那天计划了什么」，不说「实际怎么了」。
+   推迟、取消、未完成这三类信息**完全查不到**。
+2. **被推迟的窗口整个不在快照里**——快照在 `plan` 时写，而推迟发生在之后，
+   那一项凭空消失。
+3. **`metrics.daily` 的 label 是 id 不是名字**（`h["id"]` 当 label 用），
+   `missed` 字段硬编码成 `"history"`，三种原因混成一个。
+
+### 处置
+
+**快照从「一层」变「两层」**：
+
+```json
+{
+  "date": "2026-11-13",
+  "windows": [ … ],          // 计划
+  "results": {               // 结果 —— 新增
+    "postponed": {"state": "skipped",   "fires": 0, "missedReason": "postponed",
+                  "label": "取件", "expect": 1},
+    "cancelled": {"state": "cancelled", "fires": 0, "missedReason": "cancelled",
+                  "label": "临时会议", "expect": 1},
+    "unfinished": {"state": "missed",   "fires": 0, "missedReason": "window_expired",
+                   "label": "没做完的事", "expect": 1},
+    "ok":        {"state": "delivered", "fires": 1, "missedReason": null,
+                  "label": "正常响的", "expect": 1}
+  }
+}
+```
+
+`results` 是**后补**的：`plan` 写下计划，次日归档（`rollover`）时回填。
+补跑 `plan` 也会回填——机器关机跨过日切、次日才开机时 `rollover` 只发生一次，
+靠这条保证前一天的快照最终也带上结果。
+
+**新增 `rtc.py history` 命令**，与 `schedule` 互补：
+
+| 命令 | 回答什么 |
+|---|---|
+| `schedule <date>` | 那天**计划**了什么（现在顺带显示结果） |
+| `history <date>` | 那天**实际**怎么了 |
+
+```
+$ python rtc.py history 2026-11-13
+2026-11-13 的执行结果（4 项）：
+    取件             已跳过（推迟到别处）
+    临时会议           已取消（被取消）
+    没做完的事          漏响（窗口过期）
+    正常响的           已送达（一次性，无需确认），响 1 次
+```
+
+**顺带修掉三处**：
+
+1. `metrics.daily` 的 label 改用真实的 `label`（不再拿 id 当名字），
+   `missed` 字段改记真实原因（`postponed` / `cancelled` / `window_expired` …）
+   ——三种「没响成」从此能分开统计。
+2. `metrics` 的 `schedule` 表索引「有结果但已不在计划里」的条目
+   （当天被推迟走的窗口），否则那一项在 SQL 查询里凭空消失。
+3. `metrics schedule` 的显示遇到 `start`/`end` 为 NULL 会崩
+   （`r[3][11:16]` 对 None 取切片）——现在显示「（已移出计划）」。
+
+**契约**：`alarm-state` 的 `historyEntry` 增加 `label` 与 `expect`（可空），
+让归档条目自己带着名字，不必回查时刻表。
+
+### 验证
+
+`code/tests/test_rtc.py` 增至 **86 个用例**，新增 11 个：
+快照记录四种结果、结果带 label、`history` 单日与月度、
+`schedule` 内联显示结果、没有结果时的提示、缺快照退 4、
+快照不受 14 天截断影响、`metrics` 的 label 与原因是真实值、
+被推迟的条目进索引、跨多天开机后补跑 plan 仍回填结果。
+
+## 十五、复现方式
 
 ```bash
 # Schema（开启 format 断言，与 CI 一致）

@@ -240,6 +240,10 @@ python rtc.py postpone --window travel --deadline --to 2026-06-01  # 移动截�
 
 ### 取消 / 完成 / 永不提醒
 
+> 这三种操作都会**留档**：次日起，永久快照 `state/schedule/<日期>.json` 的 `results` 层
+> 会记下每个窗口的实际状态与原因（推迟 / 取消 / 漏响）。
+> 一年后用 `rtc.py history <日期>` 查得到。
+
 三个不同的意图，三条命令。**别混用**：
 
 | 用户说 | 命令 | 效果 |

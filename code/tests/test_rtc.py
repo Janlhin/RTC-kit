@@ -1007,5 +1007,144 @@ class TestSevenOpsSameDay(RtcCase):
                       "确实整段没响过的窗口仍要报出来——否则真漏了就没人知道")
 
 
+class TestExecutionArchive(RtcCase):
+    """推迟 / 取消 / 未完成 的记录留档——一年后查得到"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {"id": "postponed", "label": "取件", "start": "14:00", "end": "14:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "cancelled", "label": "临时会议", "start": "11:00", "end": "11:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "unfinished", "label": "没做完的事", "start": "16:00", "end": "16:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {"id": "ok", "label": "正常响的", "start": "09:00", "end": "09:15",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+        ]
+        self.write_routine(r)
+
+    def snapshot(self, day: str) -> dict:
+        p = self.ws / "state" / "schedule" / f"{day}.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    def make_day(self):
+        """跑出四种结局：推迟 / 取消 / 未完成 / 正常。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("postpone", "--window", "postponed", "--to", "2026-11-14",
+                 now="2026-11-13T08:00:00+08:00")
+        self.cli("cancel", "--window", "cancelled", now="2026-11-13T08:10:00+08:00")
+        self.cli("due", now="2026-11-13T09:00:00+08:00")
+        self.cli("due", now="2026-11-13T20:00:00+08:00")
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+
+    def test_snapshot_records_execution_results(self):
+        """快照要有 results 层：那天实际怎么了。"""
+        self.make_day()
+        snap = self.snapshot("2026-11-13")
+        res = snap.get("results")
+        self.assertIsNotNone(res, "快照必须记录执行结果")
+        self.assertEqual(sorted(res.keys()), ["cancelled", "ok", "postponed", "unfinished"])
+        self.assertEqual(res["postponed"]["state"], "skipped")
+        self.assertEqual(res["postponed"]["missedReason"], "postponed")
+        self.assertEqual(res["cancelled"]["state"], "cancelled")
+        self.assertEqual(res["cancelled"]["missedReason"], "cancelled")
+        self.assertEqual(res["unfinished"]["state"], "missed")
+        self.assertEqual(res["unfinished"]["missedReason"], "window_expired")
+        self.assertEqual(res["ok"]["state"], "delivered")
+        self.assertEqual(res["ok"]["fires"], 1)
+
+    def test_snapshot_result_has_label(self):
+        self.make_day()
+        res = self.snapshot("2026-11-13")["results"]
+        self.assertEqual(res["postponed"]["label"], "取件")
+        self.assertEqual(res["cancelled"]["label"], "临时会议")
+
+    def test_history_command_lists_outcomes(self):
+        self.make_day()
+        rc, out, _ = self.cli("history", "2026-11-13")
+        self.assertEqual(rc, 0)
+        self.assertIn("推迟到别处", out)
+        self.assertIn("被取消", out)
+        self.assertIn("窗口过期", out)
+        self.assertIn("已送达", out)
+
+    def test_history_month_summary(self):
+        self.make_day()
+        rc, out, _ = self.cli("history", "--month", "2026-11")
+        self.assertEqual(rc, 0)
+        self.assertIn("2026-11-13", out)
+
+    def test_schedule_shows_results_inline(self):
+        """schedule 查那天，窗口行后面要带结果。"""
+        self.make_day()
+        rc, out, _ = self.cli("schedule", "2026-11-13")
+        self.assertEqual(rc, 0)
+        self.assertIn("已取消", out)
+        self.assertIn("漏响", out)
+        self.assertIn("推迟到别处", out, "被推迟走的窗口也要出现在结果里")
+
+    def test_history_for_day_without_results(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, out, err = self.cli("history", "2026-11-13")
+        self.assertEqual(rc, 0)
+        self.assertIn("还没有归档", out + err)
+
+    def test_history_missing_snapshot(self):
+        rc, _, err = self.cli("history", "2026-11-30")
+        self.assertEqual(rc, 4)
+        self.assertIn("没有", err)
+
+    def test_results_survive_beyond_history_window(self):
+        """快照是永久的，不受 14 天截断影响。"""
+        self.make_day()
+        snap = self.snapshot("2026-11-13")
+        self.assertIn("results", snap)
+        # state 的 history 只有 14 天，但快照一直在
+        self.assertTrue((self.ws / "state" / "schedule" / "2026-11-13.json").exists())
+
+    def test_metrics_label_and_reason_are_real(self):
+        """metrics.daily 的 label 要是真实名字，missed 要是真实原因。"""
+        self.make_day()
+        self.cli("metrics", "sync")
+        import sqlite3
+        con = sqlite3.connect(self.ws / "state" / "metrics.db")
+        rows = dict(con.execute(
+            "SELECT window, label FROM daily WHERE date='2026-11-13'").fetchall())
+        reasons = dict(con.execute(
+            "SELECT window, missed FROM daily WHERE date='2026-11-13'").fetchall())
+        con.close()
+        self.assertEqual(rows.get("cancelled"), "临时会议", "label 不该是 id")
+        self.assertEqual(rows.get("unfinished"), "没做完的事")
+        self.assertEqual(reasons.get("postponed"), "postponed", "原因要真实")
+        self.assertEqual(reasons.get("cancelled"), "cancelled")
+        self.assertEqual(reasons.get("unfinished"), "window_expired")
+
+    def test_metrics_schedule_indexes_postponed_entry(self):
+        """被推迟走的窗口也要进索引，否则查历史时凭空消失。"""
+        self.make_day()
+        self.cli("metrics", "sync")
+        rc, out, _ = self.cli("metrics", "schedule", "--date", "2026-11-13")
+        self.assertEqual(rc, 0)
+        self.assertIn("postponed", out)
+        self.assertIn("已移出计划", out)
+
+    def test_results_backfilled_on_late_plan(self):
+        """机器关机跨过日切，次日才开机——补跑 plan 也要把结果回填上。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "cancelled", now="2026-11-13T08:10:00+08:00")
+        # 直接跳到 11-15，跨了两天
+        self.cli("plan", now="2026-11-15T06:00:00+08:00")
+        snap = self.snapshot("2026-11-13")
+        res = snap.get("results") or {}
+        self.assertIn("cancelled", res, "跨多天开机也要回填前一天的快照")
+        self.assertEqual(res["cancelled"]["state"], "cancelled")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

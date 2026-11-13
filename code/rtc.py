@@ -22,6 +22,7 @@
   python rtc.py --workspace <dir> ack    [--window ID] [--text TXT] [--now ISO]
   python rtc.py --workspace <dir> status [--json]
   python rtc.py --workspace <dir> schedule <YYYY-MM-DD> | --month YYYY-MM [--json]
+  python rtc.py --workspace <dir> history  <YYYY-MM-DD> | --month YYYY-MM [--json]
   python rtc.py --workspace <dir> check --window <ID> --item <序号或名称> [--undo]
   python rtc.py --workspace <dir> postpone --window <ID> [--to YYYY-MM-DD | --days N] [--deadline]
   python rtc.py --workspace <dir> cancel   --window <ID> [--date YYYY-MM-DD]
@@ -204,10 +205,15 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
 # ---------------------------------------------------------------- 日程快照
 
 def schedule_snapshot(routine: dict, kind: str, windows: list[dict],
-                      day_iso: str, generated_at: str) -> dict:
+                      day_iso: str, generated_at: str,
+                      results: dict | None = None) -> dict:
     """当天完整计划的快照。写一次，留永久——回答「那天到底是什么安排」。
 
     窗口的 start/end 用生成时的实际值（含日期），有效期从时刻表定义取回。
+
+    `results` 是「实际怎么了」：窗口 id → {state, fires, ackedAt, missedReason}。
+    plan 时还没有结果（空），rollover 归档时回填。
+    两者合起来才回答得了「那天发生了什么」——只记计划，推迟/取消/未完成就永远查不出来。
     """
     defs = {w["id"]: w for w in routine.get("alarmWindows", [])}
     calls = []
@@ -227,6 +233,7 @@ def schedule_snapshot(routine: dict, kind: str, windows: list[dict],
         "planKind": kind,
         "timezone": routine.get("timezone"),
         "generatedAt": generated_at,
+        "results": results or {},
         "windows": [
             {
                 "id": w["id"],
@@ -246,6 +253,32 @@ def schedule_snapshot(routine: dict, kind: str, windows: list[dict],
         "rollcalls": calls,
         "weeklyChores": chores,
     }
+
+
+def fill_snapshot_results(day_iso: str, results: dict) -> bool:
+    """把「实际结果」回填进某天的快照。返回是否写入成功。
+
+    快照是永久存档：plan 时写计划、rollover 时补结果。
+    回填失败不阻断主链路——快照补不回来，下次还能再试。
+    """
+    path = SCHEDULE_DIR / f"{day_iso}.json"
+    if not path.exists():
+        return False
+    try:
+        snap = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    existing = snap.get("results") or {}
+    merged = dict(existing)
+    merged.update(results or {})
+    if merged == existing:
+        return True
+    snap["results"] = merged
+    try:
+        write_schedule_snapshot(snap)
+    except OSError:
+        return False
+    return True
 
 
 def write_schedule_snapshot(snap: dict) -> Path:
@@ -459,6 +492,8 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
             {
                 "date": plan_date,
                 "id": w["id"],
+                "label": w.get("label"),
+                "expect": w.get("expectFires", 0),
                 "state": state,
                 "fires": w.get("fireCount", 0),
                 "ackedAt": w.get("ackedAt"),
@@ -470,6 +505,24 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
     for h in hist:
         dedup[(h.get("date"), h.get("id"))] = h
     cutoff = (date.fromisoformat(today_iso) - timedelta(days=14)).isoformat()
+
+    # 回填前一天的快照：把「实际怎么了」写进永久存档。
+    # 快照只有计划没有结果，推迟/取消/未完成就永远查不出来。
+    if plan_date and plan_date != today_iso:
+        results = {
+            w["id"]: {
+                "state": w.get("state"),
+                "fires": w.get("fireCount", 0),
+                "ackedAt": w.get("ackedAt"),
+                "missedReason": w.get("missedReason"),
+                "label": w.get("label"),
+                "expect": w.get("expectFires", 0),
+            }
+            for w in old.get("windows", [])
+        }
+        if results:
+            fill_snapshot_results(plan_date, results)
+
     return [h for k, h in sorted(dedup.items()) if h.get("date", "") >= cutoff]
 
 
@@ -527,6 +580,24 @@ def cmd_plan(args) -> int:
         write_schedule_snapshot(snap)
     except OSError as e:
         print(f"schedule: 快照写入失败 {e}", file=sys.stderr)
+
+    # 补跑 plan 时也把前一天的「实际结果」回填进它的快照。
+    # 机器关机跨过日切、次日才第一次开机时，rollover 只发生一次；
+    # 靠这里保证前一天的快照最终也带上结果。
+    if old and old.get("planDate") and old.get("planDate") != today:
+        prev_results = {
+            w["id"]: {
+                "state": w.get("state"),
+                "fires": w.get("fireCount", 0),
+                "ackedAt": w.get("ackedAt"),
+                "missedReason": w.get("missedReason"),
+                "label": w.get("label"),
+                "expect": w.get("expectFires", 0),
+            }
+            for w in old.get("windows", [])
+        }
+        if prev_results:
+            fill_snapshot_results(old["planDate"], prev_results)
 
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
     for line in self_check(state, now, first_run=(old is None)):
@@ -1193,6 +1264,35 @@ def preview_schedule(routine: dict, day_iso: str) -> dict | None:
     return schedule_snapshot(routine, kind, windows, day_iso, "")
 
 
+def outcome_text(r: dict) -> str:
+    """把一条执行结果说成人话。"""
+    st = r.get("state")
+    reason = r.get("missedReason")
+    fires = int(r.get("fires") or 0)
+    names = {
+        "delivered": "已送达（一次性，无需确认）",
+        "acked": "已确认",
+        "cancelled": "已取消",
+        "skipped": "已跳过",
+        "missed": "漏响",
+        "pending": "没响成",
+        "ringing": "响过但没确认",
+    }
+    base = names.get(st, st or "?")
+    if reason:
+        reasons = {
+            "postponed": "推迟到别处",
+            "cancelled": "被取消",
+            "window_expired": "窗口过期",
+            "day_rollover": "跨日未确认",
+            "late_plan": "补建时已过",
+        }
+        base += f"（{reasons.get(reason, reason)}）"
+    if fires:
+        base += f"，响 {fires} 次"
+    return base
+
+
 def cmd_schedule(args) -> int:
     """查历史某天（或某月）的日程安排。
 
@@ -1248,6 +1348,7 @@ def cmd_schedule(args) -> int:
     tag = "" if source == "快照" else "  （未来日期，按配置推算）"
     print(f"{s['date']}（周{dow}）{s['planKind']}  时区 {s.get('timezone')}{tag}")
     if s["windows"]:
+        results = s.get("results") or {}
         print("窗口：")
         for w in s["windows"]:
             t0 = w["start"][11:16]
@@ -1256,8 +1357,18 @@ def cmd_schedule(args) -> int:
             span = ""
             if w.get("validFrom") or w.get("validUntil"):
                 span = f"  有效期 {w.get('validFrom') or '不限'} ~ {w.get('validUntil') or '不限'}"
-            print(f"  {t0}–{t1}  {w['label']:<12} 每 {w['intervalMin']} 分钟 × {w['expectFires']} 次"
-                  f"  确认词：{w.get('ackHint')}{tag}{span}")
+            line = (f"  {t0}–{t1}  {w['label']:<12} 每 {w['intervalMin']} 分钟 × {w['expectFires']} 次"
+                    f"  确认词：{w.get('ackHint')}{tag}{span}")
+            # 结果：那天实际怎么了
+            r = results.get(w["id"])
+            if r:
+                line += "  → " + outcome_text(r)
+            print(line)
+        # 快照里可能有「结果」，但窗口已不在计划里（如当天被推迟走了）
+        extra = [k for k in results if k not in {w["id"] for w in s["windows"]}]
+        for k in extra:
+            print(f"  {'—':<13} {'':<12} （计划里没有，但有结果）"
+                  f"  → {outcome_text(results[k])}")
     else:
         print("窗口：（无）")
     if s["rollcalls"]:
@@ -1272,6 +1383,68 @@ def cmd_schedule(args) -> int:
             print(f"  {c.get('label')}  挂在 {c.get('attachToRollcallHour')}:00 播报末尾")
     else:
         print("周专项：（无）")
+    return 0
+
+
+# ---------------------------------------------------------------- 执行结果查询
+
+
+def cmd_history(args) -> int:
+    """查某天（或某月）每个提醒的实际结果。
+
+    快照的 `results` 层——推过、取消、没做成、响了几次、确认没确认。
+    这是「那天到底发生了什么」的答案，与 `schedule`（那天计划了什么）互补。
+    """
+    if args.month:
+        files = sorted(SCHEDULE_DIR.glob(f"{args.month}-*.json"))
+        if not files:
+            print(f"history: 没有 {args.month} 的快照", file=sys.stderr)
+            return 4
+        if args.json:
+            out = []
+            for f in files:
+                s = json.loads(f.read_text(encoding="utf-8"))
+                res = s.get("results") or {}
+                if res:
+                    out.append({"date": s["date"], "results": res})
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
+        any_row = False
+        for f in files:
+            s = json.loads(f.read_text(encoding="utf-8"))
+            res = s.get("results") or {}
+            if not res:
+                continue
+            any_row = True
+            d = date.fromisoformat(s["date"])
+            dow = "一二三四五六日"[d.weekday()]
+            done = sum(1 for r in res.values() if r.get("state") in {"acked", "delivered"})
+            print(f"{s['date']}（周{dow}）{len(res)} 项，完成 {done}，未成 {len(res) - done}")
+            for wid, r in res.items():
+                print(f"    {r.get('label') or wid:<14} {outcome_text(r)}")
+        if not any_row:
+            print(f"history: {args.month} 没有已归档的执行结果")
+        return 0
+
+    if not args.date:
+        print("用法：rtc.py history <YYYY-MM-DD> | --month YYYY-MM [--json]", file=sys.stderr)
+        return 4
+    path = SCHEDULE_DIR / f"{args.date}.json"
+    if not path.exists():
+        print(f"history: 没有 {args.date} 的快照", file=sys.stderr)
+        return 4
+    s = json.loads(path.read_text(encoding="utf-8"))
+    res = s.get("results") or {}
+    if args.json:
+        print(json.dumps({"date": s["date"], "results": res}, ensure_ascii=False, indent=2))
+        return 0
+    if not res:
+        print(f"history: {args.date} 还没有归档的执行结果"
+              f"（快照只有计划——结果在次日归档时回填）")
+        return 0
+    print(f"{args.date} 的执行结果（{len(res)} 项）：")
+    for wid, r in res.items():
+        print(f"    {r.get('label') or wid:<14} {outcome_text(r)}")
     return 0
 
 
@@ -1349,7 +1522,7 @@ def cmd_metrics(args) -> int:
                     w["expectFires"],
                     w["fireCount"],
                     w.get("ackedAt"),
-                    w.get("missedReason") if w["state"] == "missed" else None,
+                    w.get("missedReason"),
                 ),
             )
         for h in state.get("history", []):
@@ -1357,15 +1530,16 @@ def cmd_metrics(args) -> int:
                 """INSERT INTO daily (date, window, label, expect, fired, acked_at, missed)
                    VALUES (?,?,?,?,?,?,?)
                    ON CONFLICT(date, window) DO UPDATE SET
+                     label=excluded.label, expect=excluded.expect,
                      fired=excluded.fired, acked_at=excluded.acked_at, missed=excluded.missed""",
                 (
                     h["date"],
                     h["id"],
-                    h["id"],
-                    None or 0,
+                    h.get("label") or h["id"],
+                    int(h.get("expect", 0)),
                     h.get("fires", 0),
                     h.get("ackedAt"),
-                    "history" if h.get("state") == "missed" else None,
+                    h.get("missedReason"),
                 ),
             )
         # schedule 表：从每日快照目录补齐。快照文件是权威存档，这里只做索引。
@@ -1390,6 +1564,21 @@ def cmd_metrics(args) -> int:
                          w.get("validFrom"), w.get("validUntil")),
                     )
                     snap_count += 1
+                # 「有结果但已不在计划里」的条目（如当天被推迟走的窗口）也要进索引，
+                # 否则查历史时那一项凭空消失。
+                planned = {w["id"] for w in s.get("windows", [])}
+                for wid, r in (s.get("results") or {}).items():
+                    if wid in planned:
+                        continue
+                    con.execute(
+                        """INSERT INTO schedule (date, window, label, start, end, expect,
+                                                one_off, valid_from, valid_until)
+                           VALUES (?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(date, window) DO UPDATE SET label=excluded.label""",
+                        (s.get("date"), wid, r.get("label") or wid, None, None,
+                         int(r.get("expect") or 0), 0, None, None),
+                    )
+                    snap_count += 1
         con.commit()
         print(f"metrics: 已同步（schedule 索引 {snap_count} 行）", file=sys.stderr)
         con.close()
@@ -1406,7 +1595,9 @@ def cmd_metrics(args) -> int:
                 con.close()
                 return 4
             for r in rows:
-                print(f"{r[0]}  {r[1]:<12} {r[2]:<12} {r[3][11:16]}–{r[4][11:16]}"
+                # start/end 可能为 NULL：「有结果但已不在计划里」的条目（当天被推迟走的）
+                span = f"{r[3][11:16]}–{r[4][11:16]}" if r[3] and r[4] else "（已移出计划）"
+                print(f"{r[0]}  {r[1]:<12} {r[2]:<12} {span}"
                       f"  ×{r[5]}" + ("  [一次性]" if r[6] else "")
                       + (f"  {r[7]}~{r[8]}" if r[7] or r[8] else ""))
         else:
@@ -1505,6 +1696,12 @@ def main(argv=None) -> int:
     ssch.add_argument("--json", action="store_true")
     ssch.add_argument("--json-only", action="store_true", help=argparse.SUPPRESS)
     ssch.set_defaults(func=cmd_schedule)
+
+    shis = sub.add_parser("history")
+    shis.add_argument("date", nargs="?", help="YYYY-MM-DD")
+    shis.add_argument("--month", help="YYYY-MM")
+    shis.add_argument("--json", action="store_true")
+    shis.set_defaults(func=cmd_history)
 
     ss = sub.add_parser("status")
     ss.add_argument("--json", action="store_true")

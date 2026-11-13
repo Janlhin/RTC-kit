@@ -85,6 +85,8 @@
       "properties": {
         "date": { "type": "string", "format": "date" },
         "id": { "type": "string" },
+        "label": { "type": ["string", "null"], "description": "窗口名字（历史归档里带上，免得查账时只看到 id）" },
+        "expect": { "type": ["integer", "null"], "minimum": 0, "description": "当天期望响几次" },
         "state": { "$ref": "#/$defs/state" },
         "fires": { "type": "integer", "minimum": 0 },
         "ackedAt": { "type": ["string", "null"], "format": "date-time" },
