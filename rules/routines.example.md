@@ -121,8 +121,8 @@ cron 只能给一套触发表达式，**日期类型差异由技能按「星期 
 
 ```
 {
-  "id": "trip-shenzhen",
-  "label": "深圳行程",
+  "id": "travel",
+  "label": "旅游",
   "start": "09:00", "end": "09:15", "intervalMin": 5, "expectFires": 1,
   "ackHints": ["好了"],
   "oneOff": true,
