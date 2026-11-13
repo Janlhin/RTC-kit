@@ -530,5 +530,186 @@ class TestChecklist(RtcCase):
         self.assertEqual(self.state()["windows"][0]["checked"], [])
 
 
+class TestPostpone(RtcCase):
+    """推迟：今天不响，明天同一时间自动重新创建并提醒"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "thermos", "label": "洗保温杯", "start": "20:00", "end": "20:15",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "oneOff": True, "validFrom": "2026-05-10", "validUntil": "2026-05-10"}]
+        self.write_routine(r)
+
+    def test_today_is_skipped_and_tomorrow_fires_at_same_time(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        rc, out, err = self.cli("postpone", "--window", "thermos",
+                                 now="2026-05-10T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "", "postpone 由用户触发，stdout 不该被投递出去")
+
+        rc, out, _ = self.cli("due", now="2026-05-10T20:00:00+08:00")
+        self.assertEqual(out, "", "推迟后今天不该再响")
+
+        self.cli("plan", now="2026-05-11T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-11T20:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("洗保温杯", out, "明天同一时间应自动创建并提醒")
+        self.assertIn("20:00", out, "时刻不变")
+
+    def test_state_records_postponed_reason(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "thermos", now="2026-05-10T08:00:00+08:00")
+        w = self.window("thermos")
+        self.assertEqual(w["state"], "skipped")
+        self.assertEqual(w["missedReason"], "postponed")
+
+    def test_history_keeps_postponed_reason(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "thermos", now="2026-05-10T08:00:00+08:00")
+        self.cli("plan", now="2026-05-11T06:00:00+08:00")
+        hist = self.state().get("history", [])
+        entry = next((h for h in hist if h["id"] == "thermos"), None)
+        self.assertIsNotNone(entry, "推迟的窗口也要进归档")
+        self.assertEqual(entry["state"], "skipped")
+        self.assertEqual(entry["missedReason"], "postponed",
+                         "归档要保留推迟原因，不能丢")
+
+    def test_does_not_repeat_next_day(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "thermos", now="2026-05-10T08:00:00+08:00")
+        self.cli("plan", now="2026-05-11T06:00:00+08:00")
+        self.cli("due", now="2026-05-11T20:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-11T20:05:00+08:00")
+        self.assertEqual(out, "", "一次性提醒推迟后仍只响一次")
+
+    def test_disappears_after_target_day(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "thermos", now="2026-05-10T08:00:00+08:00")
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [], "目标日过后不再生成窗口")
+
+    def test_days_moves_further(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        rc, _, err = self.cli("postpone", "--window", "thermos", "--days", "3",
+                               now="2026-05-10T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        w = next(x for x in routine["alarmWindows"] if x["id"] == "thermos")
+        self.assertEqual(w["validFrom"], "2026-05-13")
+        self.assertEqual(w["validUntil"], "2026-05-13")
+
+    def test_unknown_window(self):
+        rc, _, err = self.cli("postpone", "--window", "nope",
+                               now="2026-05-10T08:00:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertIn("没有", err)
+
+    def test_target_not_later_than_today(self):
+        for target in ("2026-05-09", "2026-05-10"):
+            rc, _, err = self.cli("postpone", "--window", "thermos", "--to", target,
+                                   now="2026-05-10T08:00:00+08:00")
+            self.assertEqual(rc, 3, target)
+            self.assertIn("不晚于今天", err)
+
+    def test_bad_date_format(self):
+        rc, _, err = self.cli("postpone", "--window", "thermos", "--to", "05-11",
+                               now="2026-05-10T08:00:00+08:00")
+        self.assertEqual(rc, 3)
+        self.assertIn("YYYY-MM-DD", err)
+
+    def test_target_conflicting_with_date_types(self):
+        """推迟到该窗口不生效的日期类型 → 拒绝，而不是明天静默不响。"""
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "thermos", "label": "洗保温杯", "start": "20:00", "end": "20:15",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "oneOff": True, "dateTypes": ["workday"],
+            "validFrom": "2026-05-10", "validUntil": "2026-05-10"}]
+        self.write_routine(r)
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        # 2026-05-16 是周六，dateTypes=["workday"] 不生效
+        rc, _, err = self.cli("postpone", "--window", "thermos", "--to", "2026-05-16",
+                               now="2026-05-10T08:00:00+08:00")
+        self.assertEqual(rc, 3)
+        self.assertIn("dateTypes", err)
+
+
+class TestPostponePeriodic(RtcCase):
+    """周期窗口的推迟：跳过某一天，之后照常"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
+            "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]}]
+        self.write_routine(r)
+
+    def test_skips_today_only(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        rc, _, err = self.cli("postpone", "--window", "wake",
+                               now="2026-05-10T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("跳过", err)
+
+        rc, out, _ = self.cli("due", now="2026-05-10T07:00:00+08:00")
+        self.assertEqual(out, "", "今天应被跳过")
+
+        self.cli("plan", now="2026-05-11T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-11T07:00:00+08:00")
+        self.assertIn("起床", out, "明天应照常响")
+
+    def test_skip_dates_recorded(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "wake", now="2026-05-10T08:00:00+08:00")
+        routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        w = next(x for x in routine["alarmWindows"] if x["id"] == "wake")
+        self.assertEqual(w.get("skipDates"), ["2026-05-10"])
+
+    def test_skipped_day_does_not_trigger_self_check(self):
+        """被推迟的窗口不算「整段没响」，不该触发次日告警。"""
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "wake", now="2026-05-10T08:00:00+08:00")
+        rc, out, _ = self.cli("plan", now="2026-05-11T06:00:00+08:00")
+        self.assertNotIn("一次都没响过", out, "推迟不等于漏响，不该告警")
+
+
+class TestPostponeCountdown(RtcCase):
+    """倒计时窗口的推迟：截止日平移，天数由代码重算"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "zzz", "label": "限时活动", "start": "20:00", "end": "20:15",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "dueDate": "2026-05-12",
+            "validFrom": "2026-05-10", "validUntil": "2026-05-12"}]
+        self.write_routine(r)
+
+    def test_deadline_moves_and_countdown_recomputes(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        rc, _, err = self.cli("postpone", "--window", "zzz", "--to", "2026-05-13",
+                               now="2026-05-10T21:00:00+08:00")
+        self.assertEqual(rc, 0)
+
+        for day, expect in (("2026-05-11", "距截止还有 2 天"),
+                            ("2026-05-12", "明天截止"),
+                            ("2026-05-13", "最后一天")):
+            self.cli("plan", now=f"{day}T06:00:00+08:00")
+            _, out, _ = self.cli("due", now=f"{day}T20:00:00+08:00")
+            self.assertIn(expect, out, day)
+
+    def test_stops_after_new_deadline(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        self.cli("postpone", "--window", "zzz", "--to", "2026-05-13",
+                 now="2026-05-10T21:00:00+08:00")
+        self.cli("plan", now="2026-05-14T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-14T20:00:00+08:00")
+        self.assertEqual(out, "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -23,6 +23,7 @@
   python rtc.py --workspace <dir> status [--json]
   python rtc.py --workspace <dir> schedule <YYYY-MM-DD> | --month YYYY-MM [--json]
   python rtc.py --workspace <dir> check --window <ID> --item <序号或名称> [--undo]
+  python rtc.py --workspace <dir> postpone --window <ID> [--to YYYY-MM-DD | --days N] [--deadline]
   python rtc.py --workspace <dir> metrics sync|report|schedule [--date YYYY-MM-DD]
 
 环境变量 RTC_WORKSPACE 可代替 --workspace；都不给时用当前目录。
@@ -30,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -98,14 +100,27 @@ def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def atomic_write(path: Path, data: dict, expected_rev: int | None) -> None:
-    """写入前比对 rev；不一致则抛 Conflict，绝不覆盖别人的写入。"""
+def file_digest(path: Path) -> str | None:
+    """文件内容摘要。检测「读取之后被手改过」——比 rev 更严，适合人会编辑的文件。"""
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def atomic_write(path: Path, data: dict, expected_rev: int | None,
+                 expected_digest: str | None = None) -> None:
+    """写入前比对 rev 与内容摘要；不一致则抛 Conflict，绝不覆盖别人的写入。
+
+    rev 适合程序自己写的账本；摘要适合人会手改的配置文件（时刻表）。
+    """
+    if expected_digest is not None and file_digest(path) != expected_digest:
+        raise Conflict(f"{path.name} 在读取之后被改动过")
     if expected_rev is not None and path.exists():
         current = load_json(path)
         if int(current.get("rev", 0)) != expected_rev:
             raise Conflict(f"rev 已变：期望 {expected_rev}，实际 {current.get('rev')}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".alarms.", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -303,8 +318,11 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
     ranged = [w for w in routine["alarmWindows"] if in_valid_range(w, day_iso)]
+    # 显式跳过的日期（推迟产生的）——这一天不响
+    skipped = [w for w in ranged if day_iso in (w.get("skipDates") or [])]
+    dated = [w for w in ranged if day_iso not in (w.get("skipDates") or [])]
     out = []
-    for w in ranged:
+    for w in dated:
         allowed = w.get("dateTypes") or []
         if allowed and kind not in allowed:
             continue
@@ -355,8 +373,11 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
             }
         )
     if not out:
-        if not ranged:
-            # 所有窗口都不在有效期内：还没开始，或已经结束。合法空日，静默。
+        if not dated:
+            # 所有窗口都不在有效期内，或都被显式跳过：合法空日，静默。
+            return []
+        if skipped:
+            # 今天有窗口被显式跳过，其余的又被 dateTypes 排除 → 合法空日
             return []
         # 有窗口在有效期内，却被 dateTypes 全部排除 → 多半是 dateTypes 写错了
         if strict:
@@ -430,7 +451,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
                 "state": state,
                 "fires": w.get("fireCount", 0),
                 "ackedAt": w.get("ackedAt"),
-                "missedReason": reason if state == "missed" else None,
+                "missedReason": reason if state in {"missed", "skipped"} else None,
             }
         )
     # 同 date+id 去重，后写覆盖先写
@@ -714,6 +735,191 @@ def cmd_check(args) -> int:
     atomic_write(STATE, state, expected_rev=rev)
     verb = "已取消" if args.undo else "已打勾"
     print(f"check: {target['label']} {verb}（{len(checked)}/{len(items)}）", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------- 推迟改期
+
+POSTPONE_REASON = "postponed"
+
+
+def cmd_postpone(args) -> int:
+    """把一个窗口推迟到目标日期。
+
+    一次做完三件事：
+      1. 时刻表的日期字段平移到目标日 —— 时刻（HH:MM）不动，所以是「同一时间」
+      2. 今天已生成的那一次标为 skipped —— 否则今天仍会响
+      3. 明天由 plan 从时刻表重新生成 —— 自动创建，不需要动任何定时任务
+
+    stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
+    """
+    # 摘要先取，再读内容：这样「读取之后被改过」一定会被发现
+    digest = file_digest(ROUTINE)
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    today = now.date()
+
+    defs = routine.get("alarmWindows") or []
+    w = next((x for x in defs if x["id"] == args.window), None)
+    if w is None:
+        print(f"postpone: 时刻表里没有窗口 {args.window}", file=sys.stderr)
+        return 4
+
+    # --- 目标日期
+    if args.to:
+        try:
+            target = date.fromisoformat(args.to)
+        except ValueError:
+            print(f"postpone: --to 应为 YYYY-MM-DD，收到 {args.to}", file=sys.stderr)
+            return 3
+    else:
+        target = today + timedelta(days=1 if args.days is None else int(args.days))
+    if target <= today:
+        print(f"postpone: 目标日期 {target.isoformat()} 不晚于今天", file=sys.stderr)
+        return 3
+
+    # --- 目标日该窗口会不会被过滤掉（否则明天它根本不会响）
+    kind = plan_kind(target, routine)
+    allowed = w.get("dateTypes") or []
+    if allowed and kind not in allowed:
+        names = {"workday": "工作日", "weekend": "周末", "holiday": "节假日"}
+        print(
+            f"postpone: {target.isoformat()} 是{names.get(kind, kind)}，"
+            f"而该窗口的 dateTypes 只在 {'/'.join(allowed)} 生效",
+            file=sys.stderr,
+        )
+        return 3
+    if (kind == "weekend" and routine.get("weekendAlarms") is False) or (
+        kind == "holiday" and routine.get("holidayAlarms") is False
+    ):
+        print(
+            f"postpone: {target.isoformat()} 是"
+            f"{'周末' if kind == 'weekend' else '节假日'}，该日期类型被显式禁用",
+            file=sys.stderr,
+        )
+        return 3
+
+    vf = w.get("validFrom")
+    vu = w.get("validUntil")
+    due = w.get("dueDate")
+    changes: dict = {}
+
+    def _shift(d: str, delta: int) -> str:
+        return (date.fromisoformat(d) + timedelta(days=delta)).isoformat()
+
+    def _too_early(what: str) -> int:
+        print(f"postpone: 目标日期早于当前的{what}，这是提前不是推迟", file=sys.stderr)
+        return 3
+
+    if due:
+        # 倒计时窗口：目标日期 = 新的截止日。剩余天数由代码重算。
+        old_due = date.fromisoformat(due)
+        if target < old_due:
+            return _too_early("截止日")
+        changes["dueDate"] = target.isoformat()
+        if vu and date.fromisoformat(vu) == old_due:
+            changes["validUntil"] = target.isoformat()
+    elif vf and vu:
+        # 一次性窗口（validFrom == validUntil）或区间窗口
+        old_from, old_to = date.fromisoformat(vf), date.fromisoformat(vu)
+        if args.deadline:
+            # 移动截止日：整体平移，时长不变
+            if target < old_to:
+                return _too_early("截止日")
+            delta = (target - old_to).days
+            changes["validUntil"] = target.isoformat()
+            changes["validFrom"] = _shift(vf, delta)
+        else:
+            # 移动生效日：整体平移，时长不变
+            if target < old_from:
+                return _too_early("生效日")
+            delta = (target - old_from).days
+            changes["validFrom"] = target.isoformat()
+            changes["validUntil"] = _shift(vu, delta)
+    elif vf:
+        # 只有生效日：整个窗口挪过去
+        if target < date.fromisoformat(vf):
+            return _too_early("生效日")
+        changes["validFrom"] = target.isoformat()
+    else:
+        # 周期窗口（每天都响）：推迟 = 跳过今天这几天，之后照常
+        skip = set(w.get("skipDates") or [])
+        for i in range((target - today).days):
+            skip.add((today + timedelta(days=i)).isoformat())
+        changes["skipDates"] = sorted(skip)
+
+    if not changes:
+        print(f"postpone: {args.window} 无需改动", file=sys.stderr)
+        return 0
+
+    old_values = {k: (k in w, w.get(k)) for k in changes}
+
+    # --- 1. 改时刻表（先改这个：明天有没有提醒取决于它）
+    for k, v in changes.items():
+        w[k] = v
+    try:
+        atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+    except Conflict as e:
+        print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
+        return 2
+
+    # --- 2. 今天这一次不再响
+    state = load_state()
+    outcome = "not_planned"
+    if state:
+        srev = int(state["rev"])
+        hit = next((x for x in state.get("windows", []) if x["id"] == args.window), None)
+        if hit is None:
+            outcome = "not_planned"
+        elif hit["state"] in {"pending", "ringing"}:
+            hit["state"] = "skipped"
+            hit["missedAt"] = now.isoformat()
+            hit["missedReason"] = POSTPONE_REASON
+            # 倒计时窗口：缓存里的截止日也要跟着改，否则今天的文案还写「最后一天」
+            if "dueDate" in changes:
+                hit["dueDate"] = changes["dueDate"]
+            state["rev"] = srev + 1
+            try:
+                atomic_write(STATE, state, expected_rev=srev)
+                outcome = "skipped"
+            except Conflict as e:
+                # 回滚时刻表：宁可今天照响，也不要明天没有
+                for k, (present, val) in old_values.items():
+                    if present:
+                        w[k] = val
+                    else:
+                        w.pop(k, None)
+                try:
+                    atomic_write(ROUTINE, routine, expected_rev=None,
+                                 expected_digest=file_digest(ROUTINE))
+                except Conflict:
+                    pass
+                print(f"postpone: 状态冲突（{e}），已回滚，未推迟", file=sys.stderr)
+                return 2
+        else:
+            outcome = "already_fired"
+
+    # --- 3. 今天的快照同步：被跳过的那一次不再出现在当天安排里
+    if outcome == "skipped":
+        try:
+            rest = [x for x in state.get("windows", [])
+                    if not (x["id"] == args.window and x.get("state") == "skipped")]
+            write_schedule_snapshot(schedule_snapshot(
+                routine, state.get("planKind", "workday"), rest,
+                state["planDate"], now.isoformat()))
+        except OSError as e:
+            print(f"postpone: 快照更新失败 {e}", file=sys.stderr)
+
+    notes = {
+        "skipped": "今天这一次已跳过",
+        "already_fired": "今天这一轮已经结束，明天会再提醒一次",
+        "not_planned": "今天没有这一次的计划，明天第一次响",
+    }
+    print(
+        f"postpone: {args.window} → {target.isoformat()}（同一时刻），{notes[outcome]}",
+        file=sys.stderr,
+    )
     return 0
 
 
@@ -1013,6 +1219,14 @@ def main(argv=None) -> int:
     schk.add_argument("--undo", action="store_true", help="取消勾选")
     schk.add_argument("--now")
     schk.set_defaults(func=cmd_check)
+
+    spo = sub.add_parser("postpone")
+    spo.add_argument("--window", required=True, help="窗口 id")
+    spo.add_argument("--to", help="目标日期 YYYY-MM-DD（默认明天）")
+    spo.add_argument("--days", type=int, help="往后推几天（默认 1）")
+    spo.add_argument("--deadline", action="store_true", help="移动截止日而不是生效日")
+    spo.add_argument("--now")
+    spo.set_defaults(func=cmd_postpone)
 
     ssch = sub.add_parser("schedule")
     ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")

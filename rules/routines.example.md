@@ -211,6 +211,33 @@ python rtc.py --workspace <dir> check --window pack --item "电饭煲" --undo
 - `check` 的 **stdout 保持为空**：它由用户交互触发，不是定时任务，不该被投递出去；
   结果看退出码（0 成功），细节在 stderr
 
+### 推迟（改到别的日子）
+
+推迟不是「改时间」，是**改日期**：时间不变，整件事挪到另一天。
+
+```bash
+python rtc.py postpone --window travel --to 2026-05-11   # 挪到指定日期
+python rtc.py postpone --window travel --days 3             # 往后推 3 天
+python rtc.py postpone --window travel --deadline --to 2026-06-01  # 移动截止日
+```
+
+三种窗口的推迟语义各不相同：
+
+| 窗口类型 | 推迟做了什么 |
+|---|---|
+| 一次性（`oneOff`） | `validFrom` / `validUntil` 一起挪到目标日；今天那次标 `skipped` |
+| 有效期区间 | 整个区间平移，时长不变（`--deadline` 则移动截止日） |
+| 倒计时（`dueDate`） | 截止日挪到目标日，剩余天数由代码重算 |
+| 周期（无日期字段） | 目标日之前的日期写进 `skipDates`，**跳过这几天**，之后照常 |
+
+共同点：**时刻（`start` / `end`）一律不变**，所以是「明天同一时间」。
+
+推迟后今天那次不会再响（状态记为 `skipped` + 原因 `postponed`），
+明天由 `plan` 从时刻表重新生成——**不需要重建任何定时任务**。
+
+会拒绝的情况（退出码 `3`）：目标日期不晚于今天、目标日与该窗口的 `dateTypes` 冲突、
+目标日是显式禁用的日期类型。宁可当场报错，也不要「推迟成功但明天不响」。
+
 ### 空日的两种含义
 
 | 情况 | 行为 |

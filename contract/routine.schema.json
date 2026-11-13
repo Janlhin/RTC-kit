@@ -118,6 +118,11 @@
           "items": { "type": "string" },
           "description": "该窗口要逐项打勾的清单。给了就按清单提醒：文案带进度，未完成项逐条列出；每项的 id 按序号自动生成（1、2、3…）"
         },
+        "skipDates": {
+          "type": "array",
+          "items": { "type": "string", "format": "date" },
+          "description": "这些日期不响这个窗口。给周期窗口用——推迟某一天时记在这里（否则周期窗口会继续每天响）"
+        },
         "dueDate": {
           "type": "string",
           "format": "date",

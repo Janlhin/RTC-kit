@@ -47,6 +47,23 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 2. 改窗口长度时，`expectFires` 必须同步：`(end - start) ÷ intervalMin + 1`，否则 `rtc.py plan` 会拒绝
 3. 回一句：`改成 13:00 了，明天生效。`
 
+**改期（挪到别的日子）用 `postpone` 命令，不要手改 JSON：**
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} postpone --window <id> --to YYYY-MM-DD
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} postpone --window <id> --days 3
+```
+
+- 时刻不变——推迟到明天就是明天同一时间响
+- 今天那次不会再响（记为 `skipped`），明天自动重新创建
+- 一次性窗口推迟 = 挪 `validFrom` / `validUntil`；倒计时窗口推迟 = 挪截止日
+- 周期窗口推迟 = 跳过这几天，之后照常
+- 退出码 `0` → 回一句 `推到明天了，还是那个点。`
+- 退出码 `3` → 配置有冲突，说一句 `这个日子它不响，换一天？`
+- 退出码 `4` → `没有这个提醒项。`
+
+**用户说「推迟」但没给日期时，先问一句「推到哪天？」**——别猜。
+
 一次性窗口的「改期」= 改 `validFrom` / `validUntil`；窗口本身已经只存在于那一天。
 
 修改时刻表**不需要额外仪式**——它就是一份数据文件，改动在版本控制里可见即可。
@@ -157,6 +174,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 ## §7 禁止
 
 - ❌ 自己判断「现在该不该响」
+- ❌ 手改 `rules/routines.json` 里的日期（推迟用 `postpone` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
 - ❌ 读到文件不一致就「顺手修好」

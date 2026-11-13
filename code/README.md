@@ -20,6 +20,7 @@ python rtc.py --workspace <dir> metrics  # sync / report / schedule
 python rtc.py --workspace <dir> check --window <ID> --item <名称或序号>   # 清单打勾
 python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日程
 python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
+python rtc.py --workspace <dir> postpone travel --to 2026-12-16  # 把提醒挪到别的日子
 ```
 
 契约：**stdout 为空即静默**；诊断信息全部走 stderr；退出码 `0` 正常 / `2` 状态冲突 / `3` 校验失败 / `4` 无匹配窗口。
@@ -66,6 +67,43 @@ python rtc.py schedule 2026-12-15 --json # 机器可读
 
 快照由主链路（`plan`）写，不是旁路——旁路可能没跑，快照不会缺。写失败不阻断提醒，
 但会在 stderr 留一行诊断。
+
+## 推迟（改到别的日子）
+
+推迟 = **改日期，不改时间**。一条命令做完三件事：
+
+```bash
+python rtc.py postpone --window travel --to 2026-05-11   # 挪到指定日期
+python rtc.py postpone --window travel --days 3             # 往后推 3 天
+```
+
+| 步骤 | 做什么 |
+|---|---|
+| 1 | 时刻表的日期字段平移到目标日（`start` / `end` 一律不动） |
+| 2 | 今天已生成的那一次标为 `skipped` + 原因 `postponed` |
+| 3 | 明天由 `plan` 从时刻表重新生成——**不需要重建任何定时任务** |
+
+三种窗口的语义：
+
+| 窗口类型 | 推迟做了什么 |
+|---|---|
+| 一次性（`oneOff`） | `validFrom` / `validUntil` 一起挪；今天那次标 `skipped` |
+| 有效期区间 | 整个区间平移，时长不变（`--deadline` 则移动截止日） |
+| 倒计时（`dueDate`） | 截止日挪到目标日，剩余天数由代码重算 |
+| 周期（无日期字段） | 目标日之前的日期写进 `skipDates`，跳过这几天，之后照常 |
+
+**写入时刻表时用内容摘要做守卫**（`file_digest`）：读完之后若有人手改过
+`routines.json`，拒绝写入并退出 `2`。`routines.json` 是人会编辑的文件，
+只用 `rev` 挡不住「读—改—写」之间的手改。
+
+**会拒绝的情况**（退出码 `3`），宁可当场报错也不「推迟成功但明天不响」：
+
+- 目标日期不晚于今天
+- 目标日的日期类型与该窗口的 `dateTypes` 冲突（例如窗口只在工作日生效，却推到周六）
+- 目标日是显式禁用的日期类型（`weekendAlarms` / `holidayAlarms` 为 `false`）
+
+`postpone` 的 **stdout 保持为空**：它由用户交互触发，不是定时任务，不该被投递出去。
+结果看退出码，细节在 stderr。
 
 ## 测试
 
