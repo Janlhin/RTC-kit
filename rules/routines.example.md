@@ -173,6 +173,44 @@ cron 只能给一套触发表达式，**日期类型差异由技能按「星期 
 - 出了 `validUntil` 就不再生成窗口
 - `validFrom` 可以留出提前量：距截止还有 2 天时就开始提醒
 
+### 带清单的提醒（逐项打勾）
+
+窗口加 `checklist` 就是一份要逐项打勾的单子。到点提醒会把整张单子发给你，并标出还剩几项。
+
+```
+{
+  "id": "pack",
+  "label": "清点并带走",
+  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
+  "ackHints": ["好了"],
+  "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"]
+}
+```
+
+到点提醒长这样：
+
+```
+清点并带走 —— 20:00（还剩 4 项）
+☐ 电饭煲 ☐ 电脑 ☐ 被子枕头 ☐ 牙膏
+逐项打勾说「电饭煲拿到了」；全部拿到说「好了」
+```
+
+逐项打勾：
+
+```bash
+python rtc.py --workspace <dir> check --window pack --item "电饭煲"   # 按名称
+python rtc.py --workspace <dir> check --window pack --item 2          # 按序号
+python rtc.py --workspace <dir> check --window pack --item "电饭煲" --undo
+```
+
+规则：
+
+- 清单窗口**每天只提醒一次**（`expectFires` 固定为 1）
+- **勾选状态跨天延续**——昨天打了 3 项，今天还剩 15 项，清单不因日切重置
+- 全部打完 → 窗口自动置为 `acked`，之后不再提醒
+- `check` 的 **stdout 保持为空**：它由用户交互触发，不是定时任务，不该被投递出去；
+  结果看退出码（0 成功），细节在 stderr
+
 ### 空日的两种含义
 
 | 情况 | 行为 |

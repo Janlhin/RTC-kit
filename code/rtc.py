@@ -22,6 +22,7 @@
   python rtc.py --workspace <dir> ack    [--window ID] [--text TXT] [--now ISO]
   python rtc.py --workspace <dir> status [--json]
   python rtc.py --workspace <dir> schedule <YYYY-MM-DD> | --month YYYY-MM [--json]
+  python rtc.py --workspace <dir> check --window <ID> --item <序号或名称> [--undo]
   python rtc.py --workspace <dir> metrics sync|report|schedule [--date YYYY-MM-DD]
 
 环境变量 RTC_WORKSPACE 可代替 --workspace；都不给时用当前目录。
@@ -313,8 +314,10 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
         end = datetime.combine(d, time(eh, em), tzinfo=tz)
         one_off = bool(w.get("oneOff"))
         due = w.get("dueDate")
-        if due:
-            # 倒计时窗口：每天只提醒一次。剩余天数由代码算，文案里带上。
+        items_def = w.get("checklist") or []
+        if due or items_def:
+            # 倒计时 / 清单窗口：每天只提醒一次。
+            # 倒计时的剩余天数由代码算；清单要逐项打勾，都不该每 5 分钟响。
             exp = 1
         elif one_off:
             # 一次性提醒只响一次，不做算术校验（end 可比 start 晚，用于容忍错过 start 那一分钟）
@@ -344,6 +347,11 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
                 "ackHint": (w.get("ackHints") or ["知道了"])[0],
                 "oneOff": one_off,
                 "dueDate": due,
+                "checklist": [
+                    {"id": str(i + 1), "label": str(label)}
+                    for i, label in enumerate(w.get("checklist") or [])
+                ],
+                "checked": [],
             }
         )
     if not out:
@@ -360,6 +368,23 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
 TERMINAL = {"acked", "missed", "skipped"}
 
 
+def _migrate_checklist(prev: dict, w: dict) -> None:
+    """把旧窗口的勾选状态与「已打完」终态迁移到新窗口上。
+
+    清单不会因为日切而重置——昨天打了 3 项，今天还剩 15 项。
+    """
+    if not w.get("checklist"):
+        return
+    w["checked"] = list(prev.get("checked") or [])
+    items = w["checklist"]
+    done = set(w["checked"])
+    if prev.get("state") == "acked" and len(done) >= len(items):
+        # 已经全部打完 → 保持完成状态，之后不再提醒
+        w["state"] = "acked"
+        w["ackedAt"] = prev.get("ackedAt")
+        w["fireCount"] = int(prev.get("fireCount", 0))
+
+
 def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
     """只增不改：同日同 id 的终态窗口原样带回，避免重建冲掉确认。"""
     if not old:
@@ -368,10 +393,17 @@ def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
     merged = []
     for w in fresh:
         p = prev.get(w["id"])
-        # 倒计时窗口每天重新开始：昨天 missed/acked 都不该让它停止提醒
-        if p and p.get("state") in TERMINAL and not w.get("dueDate"):
+        keep = bool(p) and p.get("state") in TERMINAL
+        if keep and w.get("dueDate"):
+            keep = False          # 倒计时：每天重新开始，直到截止日
+        if keep and w.get("checklist"):
+            # 清单：只有全部打完才保留终态；没打完就次日继续（勾选状态带过去）
+            done = set(w.get("checked") or [])
+            keep = p.get("state") == "acked" and len(done) >= len(w["checklist"])
+        if keep:
             merged.append(p)
         else:
+            _migrate_checklist(p or {}, w)
             merged.append(w)
     return merged
 
@@ -427,7 +459,14 @@ def cmd_plan(args) -> int:
     else:
         fresh = build_windows(routine, now.date(), kind, now)
 
-    windows = carry_forward(old, fresh) if old and old.get("planDate") == today else fresh
+    if old and old.get("planDate") == today:
+        windows = carry_forward(old, fresh)
+    else:
+        # 跨日：窗口全部重建，但清单的勾选状态要带过去
+        prev_windows = {x["id"]: x for x in (old or {}).get("windows", [])}
+        for w in fresh:
+            _migrate_checklist(prev_windows.get(w["id"], {}), w)
+        windows = fresh
     history = rollover(old, today) if not (old and old.get("planDate") == today) else list(old.get("history", []))
     total = sum(w["expectFires"] for w in windows)
     if len(windows) != len(fresh):
@@ -545,7 +584,21 @@ def cmd_due(args) -> int:
     if n > 1:
         head += f"（第 {n} 次）"
     lines = [head]
-    if n == 1 or n % 2 == 1:
+    items = hit.get("checklist") or []
+    if items:
+        done = set(hit.get("checked") or [])
+        left = [i for i in items if i["id"] not in done]
+        head = lines[0]
+        head += f"（还剩 {len(left)} 项）"
+        lines[0] = head
+        row = []
+        for it in items:
+            mark = "☑" if it["id"] in done else "☐"
+            row.append(f"{mark} {it['label']}")
+        for i in range(0, len(row), 6):
+            lines.append(" ".join(row[i:i + 6]))
+        lines.append(f"逐项打勾说「{items[0]['label']}拿到了」；全部拿到说「{hit['ackHint']}」")
+    elif n == 1 or n % 2 == 1:
         lines.append(f"回复「{hit['ackHint']}」就不响了。")
     print("\n".join(lines))
     return 0
@@ -597,6 +650,70 @@ def cmd_ack(args) -> int:
         print(f"ack: 写入冲突（{e}）", file=sys.stderr)
         return 2
     print(f"ack: {hit['id']} 已确认", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------- 清单打勾
+
+
+def cmd_check(args) -> int:
+    """勾选 / 取消勾选清单里的某一项。
+
+    stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
+    结果看退出码（0 成功），细节在 stderr。
+    """
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    state = load_state()
+    if not state:
+        print("check: 今天还没有计划", file=sys.stderr)
+        return 4
+    hit = None
+    for w in state["windows"]:
+        if args.window and w["id"] == args.window:
+            hit = w
+            break
+    if hit is None:
+        print(f"check: 没有匹配的窗口 {args.window}", file=sys.stderr)
+        return 4
+    items = hit.get("checklist") or []
+    if not items:
+        print("check: 该窗口没有清单", file=sys.stderr)
+        return 4
+
+    target = None
+    for it in items:
+        if args.item == it["id"] or args.item == it["label"]:
+            target = it
+            break
+    if target is None:
+        try:
+            idx = int(args.item) - 1
+            if 0 <= idx < len(items):
+                target = items[idx]
+        except ValueError:
+            pass
+    if target is None:
+        print(f"check: 清单里没有「{args.item}」", file=sys.stderr)
+        return 4
+
+    checked = set(hit.get("checked") or [])
+    if args.undo:
+        checked.discard(target["id"])
+    else:
+        checked.add(target["id"])
+    hit["checked"] = sorted(checked, key=lambda x: int(x) if x.isdigit() else 0)
+
+    rev = int(state["rev"])
+    state["rev"] = rev + 1
+    # 全部打完 → 该窗口视为完成
+    if len(checked) == len(items) and not args.undo:
+        hit["state"] = "acked"
+        hit["ackedAt"] = now.isoformat()
+    atomic_write(STATE, state, expected_rev=rev)
+    verb = "已取消" if args.undo else "已打勾"
+    print(f"check: {target['label']} {verb}（{len(checked)}/{len(items)}）", file=sys.stderr)
     return 0
 
 
@@ -889,6 +1006,13 @@ def main(argv=None) -> int:
     sa.add_argument("--text")
     sa.add_argument("--now")
     sa.set_defaults(func=cmd_ack)
+
+    schk = sub.add_parser("check")
+    schk.add_argument("--window", required=True, help="窗口 id")
+    schk.add_argument("--item", required=True, help="清单项：序号或名称")
+    schk.add_argument("--undo", action="store_true", help="取消勾选")
+    schk.add_argument("--now")
+    schk.set_defaults(func=cmd_check)
 
     ssch = sub.add_parser("schedule")
     ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")

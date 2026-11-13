@@ -113,6 +113,11 @@
           "format": "date",
           "description": "该窗口到哪一天失效（含）。省略 = 无限期。一次性提醒 = validFrom 与 validUntil 同日"
         },
+        "checklist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "该窗口要逐项打勾的清单。给了就按清单提醒：文案带进度，未完成项逐条列出；每项的 id 按序号自动生成（1、2、3…）"
+        },
         "dueDate": {
           "type": "string",
           "format": "date",

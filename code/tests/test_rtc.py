@@ -453,5 +453,82 @@ class TestCountdown(RtcCase):
         self.assertEqual(snap["windows"][0]["dueDate"], "2026-05-10")
 
 
+class TestChecklist(RtcCase):
+    """带清单的提醒：逐项打勾"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "pack", "label": "清点并带走", "start": "20:00", "end": "20:15",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"]}]
+        self.write_routine(r)
+
+    def test_due_lists_all_items(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-05-12T20:00:00+08:00")
+        self.assertIn("清点并带走", out)
+        self.assertIn("还剩 4 项", out)
+        for label in ["电饭煲", "电脑", "被子枕头", "牙膏"]:
+            self.assertIn(label, out, "提醒里必须列出全部清单项")
+
+    def test_check_by_label_or_index(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        rc, out, err = self.cli("check", "--window", "pack", "--item", "电饭煲",
+                                 now="2026-05-12T20:05:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "", "check 的 stdout 必须为空——它由用户交互触发，不该被投递")
+        rc, _, _ = self.cli("check", "--window", "pack", "--item", "2",
+                             now="2026-05-12T20:06:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.state()["windows"][0]["checked"], ["1", "2"])
+
+    def test_checked_survives_next_day(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        self.cli("due", now="2026-05-12T20:00:00+08:00")
+        self.cli("check", "--window", "pack", "--item", "电饭煲", now="2026-05-12T20:05:00+08:00")
+        self.cli("plan", now="2026-05-13T06:00:00+08:00")
+        w = self.state()["windows"][0]
+        self.assertEqual(w["checked"], ["1"], "清单不因日切重置")
+        rc, out, _ = self.cli("due", now="2026-05-13T20:00:00+08:00")
+        self.assertIn("还剩 3 项", out)
+        self.assertIn("☑ 电饭煲", out, "已勾的项要显示 ☑")
+
+    def test_all_checked_completes_window(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        for i in range(1, 5):
+            self.cli("check", "--window", "pack", "--item", str(i),
+                     now="2026-05-12T20:05:00+08:00")
+        w = self.state()["windows"][0]
+        self.assertEqual(w["state"], "acked", "全部打完即视为完成")
+        self.assertEqual(len(w["checked"]), 4)
+
+    def test_completed_list_stops_reminding(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        for i in range(1, 5):
+            self.cli("check", "--window", "pack", "--item", str(i),
+                     now="2026-05-12T20:05:00+08:00")
+        self.cli("plan", now="2026-05-13T06:00:00+08:00")
+        self.assertEqual(self.state()["windows"][0]["state"], "acked")
+        rc, out, _ = self.cli("due", now="2026-05-13T20:00:00+08:00")
+        self.assertEqual(out, "", "清单打完就不再提醒")
+
+    def test_unknown_item(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        rc, _, err = self.cli("check", "--window", "pack", "--item", "不存在的东西",
+                               now="2026-05-12T20:05:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertIn("没有", err)
+
+    def test_undo(self):
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        self.cli("check", "--window", "pack", "--item", "电饭煲", now="2026-05-12T20:05:00+08:00")
+        rc, _, _ = self.cli("check", "--window", "pack", "--item", "电饭煲", "--undo",
+                             now="2026-05-12T20:06:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.state()["windows"][0]["checked"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

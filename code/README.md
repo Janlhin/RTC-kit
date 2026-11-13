@@ -17,6 +17,7 @@ python rtc.py --workspace <dir> due      # 该响就打印文案，不该响就�
 python rtc.py --workspace <dir> ack      # 写入确认
 python rtc.py --workspace <dir> status   # 人读 / --json 机器读
 python rtc.py --workspace <dir> metrics  # sync / report / schedule
+python rtc.py --workspace <dir> check --window <ID> --item <名称或序号>   # 清单打勾
 python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日程
 python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
 ```
