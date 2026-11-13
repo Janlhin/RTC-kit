@@ -21,7 +21,8 @@
   python rtc.py --workspace <dir> due    [--now ISO]
   python rtc.py --workspace <dir> ack    [--window ID] [--text TXT] [--now ISO]
   python rtc.py --workspace <dir> status [--json]
-  python rtc.py --workspace <dir> metrics sync|report
+  python rtc.py --workspace <dir> schedule <YYYY-MM-DD> | --month YYYY-MM [--json]
+  python rtc.py --workspace <dir> metrics sync|report|schedule [--date YYYY-MM-DD]
 
 环境变量 RTC_WORKSPACE 可代替 --workspace；都不给时用当前目录。
 """
@@ -44,6 +45,7 @@ WORKSPACE = Path(os.environ.get("RTC_WORKSPACE") or Path.cwd())
 STATE = WORKSPACE / "state" / "alarms.json"
 ROUTINE = WORKSPACE / "rules" / "routines.json"
 DB = WORKSPACE / "state" / "metrics.db"
+SCHEDULE_DIR = WORKSPACE / "state" / "schedule"
 GRACE_MIN = 15
 
 
@@ -75,6 +77,20 @@ def tz_of(offset: str) -> timezone:
     sign = 1 if offset[0] == "+" else -1
     hh, mm = offset[1:].split(":")
     return timezone(sign * timedelta(hours=int(hh), minutes=int(mm)))
+
+
+def set_workspace(path: Path) -> None:
+    """切换工作区。
+
+    所有派生路径必须在这里一起更新——漏掉任何一个，命令就会写到别处
+    （曾经踩过：快照目录漏更新，结果写到进程 cwd 下）。
+    """
+    global WORKSPACE, STATE, ROUTINE, DB, SCHEDULE_DIR
+    WORKSPACE = path
+    STATE = WORKSPACE / "state" / "alarms.json"
+    ROUTINE = WORKSPACE / "rules" / "routines.json"
+    DB = WORKSPACE / "state" / "metrics.db"
+    SCHEDULE_DIR = WORKSPACE / "state" / "schedule"
 
 
 def load_json(path: Path):
@@ -163,6 +179,72 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
         if h.get("state") == "missed" and int(h.get("fires", 0)) == 0:
             probs.append(f"⚠️ 昨天「{h.get('id')}」一次都没响过，当时调度器可能没在跑")
     return probs
+
+
+# ---------------------------------------------------------------- 日程快照
+
+def schedule_snapshot(routine: dict, kind: str, windows: list[dict],
+                      day_iso: str, generated_at: str) -> dict:
+    """当天完整计划的快照。写一次，留永久——回答「那天到底是什么安排」。
+
+    窗口的 start/end 用生成时的实际值（含日期），有效期从时刻表定义取回。
+    """
+    defs = {w["id"]: w for w in routine.get("alarmWindows", [])}
+    calls = []
+    for r in routine.get("rollcalls") or []:
+        act = (r.get("kindByDateType") or {}).get(kind)
+        if not act or act == "none":
+            continue
+        calls.append({"hour": r["hour"], "minute": r.get("minute", 0), "kind": act})
+    dow = (date.fromisoformat(day_iso).weekday() + 1) % 7
+    chores = [
+        {"label": c.get("label"), "attachToRollcallHour": c.get("attachToRollcallHour")}
+        for c in (routine.get("weeklyChores") or [])
+        if int(c.get("dayOfWeek", -1)) == dow
+    ]
+    return {
+        "date": day_iso,
+        "planKind": kind,
+        "timezone": routine.get("timezone"),
+        "generatedAt": generated_at,
+        "windows": [
+            {
+                "id": w["id"],
+                "label": w["label"],
+                "start": w["start"],
+                "end": w["end"],
+                "intervalMin": w["intervalMin"],
+                "expectFires": w["expectFires"],
+                "oneOff": bool(w.get("oneOff")),
+                "ackHint": w.get("ackHint"),
+                "validFrom": defs.get(w["id"], {}).get("validFrom"),
+                "validUntil": defs.get(w["id"], {}).get("validUntil"),
+            }
+            for w in windows
+        ],
+        "rollcalls": calls,
+        "weeklyChores": chores,
+    }
+
+
+def write_schedule_snapshot(snap: dict) -> Path:
+    """原子写一份每日快照。永久保留，不做清理。"""
+    d = SCHEDULE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{snap['date']}.json"
+    fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".schedule.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(snap, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return path
 
 
 # ---------------------------------------------------------------- 计划生成
@@ -358,6 +440,13 @@ def cmd_plan(args) -> int:
         file=sys.stderr,
     )
 
+    # 每日快照：主链路写，写一次留永久。失败不阻断提醒，但必须留下诊断。
+    try:
+        snap = schedule_snapshot(routine, kind, windows, today, now.isoformat())
+        write_schedule_snapshot(snap)
+    except OSError as e:
+        print(f"schedule: 快照写入失败 {e}", file=sys.stderr)
+
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
     for line in self_check(state, now, first_run=(old is None)):
         print(line)
@@ -491,6 +580,78 @@ def cmd_ack(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 历史日程查询
+
+
+def cmd_schedule(args) -> int:
+    """查历史某天（或某月）的日程安排。
+
+    读的是每日快照目录 state/schedule/，永久保留，不受 14 天截断影响。
+    """
+    if args.month:
+        files = sorted(SCHEDULE_DIR.glob(f"{args.month}-*.json"))
+        if not files:
+            print(f"schedule: 没有 {args.month} 的快照", file=sys.stderr)
+            return 4
+        if args.json:
+            out = []
+            for f in files:
+                out.append(json.loads(f.read_text(encoding="utf-8")))
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
+        for f in files:
+            s = json.loads(f.read_text(encoding="utf-8"))
+            d = date.fromisoformat(s["date"])
+            dow = "一二三四五六日"[d.weekday()]
+            fires = sum(w["expectFires"] for w in s["windows"])
+            print(f"{s['date']}（周{dow}）{s['planKind']:<8} "
+                  f"{len(s['windows'])} 窗口 / {fires} 次  "
+                  f"播报 {len(s['rollcalls'])}  周专项 {len(s['weeklyChores'])}")
+        return 0
+
+    if not args.date:
+        print("用法：rtc.py schedule <YYYY-MM-DD> | --month YYYY-MM [--json]", file=sys.stderr)
+        return 4
+    path = SCHEDULE_DIR / f"{args.date}.json"
+    if not path.exists():
+        print(f"schedule: 没有 {args.date} 的快照", file=sys.stderr)
+        return 4
+    s = json.loads(path.read_text(encoding="utf-8"))
+    if args.json:
+        print(json.dumps(s, ensure_ascii=False, indent=2))
+        return 0
+
+    d = date.fromisoformat(s["date"])
+    dow = "一二三四五六日"[d.weekday()]
+    print(f"{s['date']}（周{dow}）{s['planKind']}  时区 {s.get('timezone')}")
+    if s["windows"]:
+        print("窗口：")
+        for w in s["windows"]:
+            t0 = w["start"][11:16]
+            t1 = w["end"][11:16]
+            tag = "  [一次性]" if w.get("oneOff") else ""
+            span = ""
+            if w.get("validFrom") or w.get("validUntil"):
+                span = f"  有效期 {w.get('validFrom') or '不限'} ~ {w.get('validUntil') or '不限'}"
+            print(f"  {t0}–{t1}  {w['label']:<12} 每 {w['intervalMin']} 分钟 × {w['expectFires']} 次"
+                  f"  确认词：{w.get('ackHint')}{tag}{span}")
+    else:
+        print("窗口：（无）")
+    if s["rollcalls"]:
+        print("播报：")
+        for c in s["rollcalls"]:
+            print(f"  {c['hour']:02d}:{c.get('minute', 0):02d}  {c['kind']}")
+    else:
+        print("播报：（无）")
+    if s["weeklyChores"]:
+        print("周专项：")
+        for c in s["weeklyChores"]:
+            print(f"  {c.get('label')}  挂在 {c.get('attachToRollcallHour')}:00 播报末尾")
+    else:
+        print("周专项：（无）")
+    return 0
+
+
 # ---------------------------------------------------------------- 状态与指标
 
 
@@ -541,6 +702,15 @@ def cmd_metrics(args) -> int:
              acked_at TEXT, missed TEXT,
              PRIMARY KEY (date, window))"""
     )
+    # schedule 表：每日快照的 SQL 索引。快照文件是权威存档，这张表只为查询方便。
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS schedule (
+             date TEXT NOT NULL, window TEXT NOT NULL, label TEXT,
+             start TEXT, end TEXT, expect INTEGER NOT NULL,
+             one_off INTEGER NOT NULL DEFAULT 0,
+             valid_from TEXT, valid_until TEXT,
+             PRIMARY KEY (date, window))"""
+    )
     if args.action == "sync":
         for w in state["windows"]:
             con.execute(
@@ -575,8 +745,52 @@ def cmd_metrics(args) -> int:
                     "history" if h.get("state") == "missed" else None,
                 ),
             )
+        # schedule 表：从每日快照目录补齐。快照文件是权威存档，这里只做索引。
+        snap_count = 0
+        if SCHEDULE_DIR.exists():
+            for f in sorted(SCHEDULE_DIR.glob("*.json")):
+                try:
+                    s = json.loads(f.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                for w in s.get("windows", []):
+                    con.execute(
+                        """INSERT INTO schedule (date, window, label, start, end, expect,
+                                                one_off, valid_from, valid_until)
+                           VALUES (?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(date, window) DO UPDATE SET
+                             label=excluded.label, start=excluded.start, end=excluded.end,
+                             expect=excluded.expect, one_off=excluded.one_off,
+                             valid_from=excluded.valid_from, valid_until=excluded.valid_until""",
+                        (s.get("date"), w["id"], w.get("label"), w.get("start"), w.get("end"),
+                         int(w.get("expectFires", 0)), 1 if w.get("oneOff") else 0,
+                         w.get("validFrom"), w.get("validUntil")),
+                    )
+                    snap_count += 1
         con.commit()
-        print("metrics: 已同步", file=sys.stderr)
+        print(f"metrics: 已同步（schedule 索引 {snap_count} 行）", file=sys.stderr)
+        con.close()
+        return 0
+
+    if args.action == "schedule":
+        if args.date:
+            rows = con.execute(
+                """SELECT date, window, label, start, end, expect, one_off,
+                          valid_from, valid_until
+                   FROM schedule WHERE date=?""", (args.date,)).fetchall()
+            if not rows:
+                print(f"metrics: schedule 表里没有 {args.date}", file=sys.stderr)
+                con.close()
+                return 4
+            for r in rows:
+                print(f"{r[0]}  {r[1]:<12} {r[2]:<12} {r[3][11:16]}–{r[4][11:16]}"
+                      f"  ×{r[5]}" + ("  [一次性]" if r[6] else "")
+                      + (f"  {r[7]}~{r[8]}" if r[7] or r[8] else ""))
+        else:
+            rows = con.execute(
+                "SELECT date, COUNT(*) FROM schedule GROUP BY date ORDER BY date").fetchall()
+            print(f"schedule 表覆盖 {len(rows)} 天"
+                  + (f"：{rows[0][0]} ~ {rows[-1][0]}" if rows else ""))
         con.close()
         return 0
 
@@ -595,6 +809,9 @@ def cmd_metrics(args) -> int:
     if resolved:
         print(f"确认率（按已结算口径）{acked}/{resolved} = {acked / resolved * 100:.1f}%")
     print(f"确认 {acked}  漏响 {missed}  响铃尝试合计 {fires}")
+    span = con.execute("SELECT MIN(date), MAX(date), COUNT(DISTINCT date) FROM schedule").fetchone()
+    if span and span[0]:
+        print(f"日程快照索引：{span[0]} ~ {span[1]}（{span[2]} 天）")
     con.close()
     return 0
 
@@ -622,22 +839,25 @@ def main(argv=None) -> int:
     sa.add_argument("--now")
     sa.set_defaults(func=cmd_ack)
 
+    ssch = sub.add_parser("schedule")
+    ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")
+    ssch.add_argument("--month", help="YYYY-MM")
+    ssch.add_argument("--json", action="store_true")
+    ssch.set_defaults(func=cmd_schedule)
+
     ss = sub.add_parser("status")
     ss.add_argument("--json", action="store_true")
     ss.set_defaults(func=cmd_status)
 
     sm = sub.add_parser("metrics")
-    sm.add_argument("action", choices=["sync", "report"])
+    sm.add_argument("action", choices=["sync", "report", "schedule"])
     sm.add_argument("--days", type=int, default=30)
+    sm.add_argument("--date", help="YYYY-MM-DD（用于 metrics schedule）")
     sm.set_defaults(func=cmd_metrics)
 
     args = p.parse_args(argv)
     if args.workspace:
-        global WORKSPACE, STATE, ROUTINE, DB
-        WORKSPACE = Path(args.workspace)
-        STATE = WORKSPACE / "state" / "alarms.json"
-        ROUTINE = WORKSPACE / "rules" / "routines.json"
-        DB = WORKSPACE / "state" / "metrics.db"
+        set_workspace(Path(args.workspace))
 
     try:
         return args.func(args)

@@ -279,5 +279,85 @@ class TestMainlineRegression(RtcCase):
         self.assertIsNotNone(hist[0]["ackedAt"], "归档要保留 ackedAt")
 
 
+class TestScheduleArchive(RtcCase):
+    """每日日程快照与历史查询"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["rollcalls"] = [{"hour": 20, "minute": 0,
+                           "kindByDateType": {"workday": "summary", "holiday": "summary",
+                                              "weekend": "summary"}}]
+        r["weeklyChores"] = [{"dayOfWeek": 6, "label": "洗衣服", "attachToRollcallHour": 14}]
+        self.write_routine(r)
+
+    def snapshot(self, day: str) -> Path:
+        return self.ws / "state" / "schedule" / f"{day}.json"
+
+    def test_snapshot_written_into_workspace(self):
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        sp = self.snapshot("2026-12-15")
+        self.assertTrue(sp.exists(), "plan 必须写每日快照")
+        self.assertTrue(sp.is_relative_to(self.ws),
+                        "快照必须落在 --workspace 指定的目录里，不能写到进程 cwd 下")
+        snap = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(snap["date"], "2026-12-15")
+        self.assertEqual(snap["planKind"], "workday")
+        self.assertEqual(len(snap["windows"]), 1)
+        self.assertEqual(snap["windows"][0]["label"], "起床")
+        self.assertEqual(snap["windows"][0]["expectFires"], 6)
+        self.assertEqual(len(snap["rollcalls"]), 1)
+        self.assertEqual(snap["rollcalls"][0]["kind"], "summary")
+
+    def test_snapshot_records_weekly_chore(self):
+        self.cli("plan", now="2026-12-19T06:00:00+08:00")   # 周六
+        snap = json.loads(self.snapshot("2026-12-19").read_text(encoding="utf-8"))
+        self.assertEqual(len(snap["weeklyChores"]), 1)
+        self.assertEqual(snap["weeklyChores"][0]["label"], "洗衣服")
+
+    def test_snapshot_records_one_off_and_validity(self):
+        r = base_routine()
+        r["alarmWindows"][0].update({"oneOff": True, "expectFires": 1,
+                                      "validFrom": "2026-12-15", "validUntil": "2026-12-15"})
+        self.write_routine(r)
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        w = json.loads(self.snapshot("2026-12-15").read_text(encoding="utf-8"))["windows"][0]
+        self.assertTrue(w["oneOff"])
+        self.assertEqual(w["validFrom"], "2026-12-15")
+        self.assertEqual(w["validUntil"], "2026-12-15")
+
+    def test_query_day_and_month(self):
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        self.cli("plan", now="2026-12-16T06:00:00+08:00")
+        rc, out, _ = self.cli("schedule", "2026-12-15")
+        self.assertEqual(rc, 0)
+        self.assertIn("2026-12-15", out)
+        self.assertIn("起床", out)
+        rc, out, _ = self.cli("schedule", "--month", "2026-12")
+        self.assertEqual(rc, 0)
+        self.assertIn("2026-12-15", out)
+        self.assertIn("2026-12-16", out)
+
+    def test_query_missing_day(self):
+        rc, _, err = self.cli("schedule", "2026-11-30")
+        self.assertEqual(rc, 4)
+        self.assertIn("没有", err)
+
+    def test_snapshots_survive_many_days(self):
+        days = ["2026-12-14", "2026-12-15", "2026-12-16", "2027-01-11"]
+        for d in days:
+            self.cli("plan", now=f"{d}T06:00:00+08:00")
+        for d in days:
+            self.assertTrue(self.snapshot(d).exists(), f"{d} 的快照必须永久保留")
+
+    def test_metrics_indexes_schedule_table(self):
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        rc, _, err = self.cli("metrics", "sync")
+        self.assertEqual(rc, 0)
+        rc, out, _ = self.cli("metrics", "schedule", "--date", "2026-12-15")
+        self.assertEqual(rc, 0)
+        self.assertIn("起床", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
