@@ -7,6 +7,9 @@
   3. 时刻表只有一份：<workspace>/rules/routines.json，符合 contract/routine.schema.json。
   4. 写入是原子的：临时文件 + os.replace，并在写入前比对 rev。
   5. plan 只增不改：已有 acked/missed/skipped 的窗口原样保留。
+  6. 窗口可以是一次性的（oneOff）或有有效期（validFrom/validUntil）。
+     一次性窗口送达即完成（state=delivered），不需要确认。
+     有效期内没有任何窗口 = 合法空日，静默。
 
 宿主契约（这是与运行时唯一的耦合面）：
   - stdout 只有两种形态：要投递的正文，或空（空 = 静默）
@@ -158,7 +161,7 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
         if h.get("date") != yesterday:
             continue
         if h.get("state") == "missed" and int(h.get("fires", 0)) == 0:
-            probs.append(f"⚠️ 昨天「{h.get('id')}」整段没响过一次，当时调度器可能没在跑")
+            probs.append(f"⚠️ 昨天「{h.get('id')}」一次都没响过，当时调度器可能没在跑")
     return probs
 
 
@@ -187,10 +190,36 @@ def expect_fires(start: time, end: time, interval: int) -> int:
     return minutes // interval + 1
 
 
+def in_valid_range(w: dict, day_iso: str) -> bool:
+    """窗口是否在有效期内（闭区间）。任一端省略 = 无限期。"""
+    vf = w.get("validFrom")
+    vu = w.get("validUntil")
+    if vf and day_iso < vf:
+        return False
+    if vu and day_iso > vu:
+        return False
+    return True
+
+
+def day_disabled(routine: dict, kind: str) -> bool:
+    """该日期类型被契约显式禁用（weekendAlarms / holidayAlarms = false）。
+
+    禁用日 = 合法空日：静默，不报配置错误。
+    """
+    if kind == "weekend" and routine.get("weekendAlarms") is False:
+        return True
+    if kind == "holiday" and routine.get("holidayAlarms") is False:
+        return True
+    return False
+
+
 def build_windows(routine: dict, d: date, kind: str, now: datetime) -> list[dict]:
     tz = tz_of(routine["tzOffset"])
+    day_iso = d.isoformat()
+    # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
+    ranged = [w for w in routine["alarmWindows"] if in_valid_range(w, day_iso)]
     out = []
-    for w in routine["alarmWindows"]:
+    for w in ranged:
         allowed = w.get("dateTypes") or []
         if allowed and kind not in allowed:
             continue
@@ -198,11 +227,16 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime) -> list[dict
         eh, em = (int(x) for x in w["end"].split(":"))
         start = datetime.combine(d, time(sh, sm), tzinfo=tz)
         end = datetime.combine(d, time(eh, em), tzinfo=tz)
-        exp = expect_fires(time(sh, sm), time(eh, em), int(w["intervalMin"]))
-        if w.get("expectFires") and int(w["expectFires"]) != exp:
-            raise Validation(
-                f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符"
-            )
+        one_off = bool(w.get("oneOff"))
+        if one_off:
+            # 一次性提醒只响一次，不做算术校验（end 可比 start 晚，用于容忍错过 start 那一分钟）
+            exp = 1
+        else:
+            exp = expect_fires(time(sh, sm), time(eh, em), int(w["intervalMin"]))
+            if w.get("expectFires") and int(w["expectFires"]) != exp:
+                raise Validation(
+                    f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符"
+                )
         expired = now > end
         out.append(
             {
@@ -220,9 +254,14 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime) -> list[dict
                 "missedAt": None,
                 "missedReason": "late_plan" if expired else None,
                 "ackHint": (w.get("ackHints") or ["知道了"])[0],
+                "oneOff": one_off,
             }
         )
     if not out:
+        if not ranged:
+            # 所有窗口都不在有效期内：还没开始，或已经结束。合法空日，静默。
+            return []
+        # 有窗口在有效期内，却被 dateTypes 全部排除 → 多半是 dateTypes 写错了
         raise Validation("今天没有任何窗口：检查 routines.json 的 dateTypes")
     return out
 
@@ -290,7 +329,11 @@ def cmd_plan(args) -> int:
         return 0
 
     kind = plan_kind(now.date(), routine)
-    fresh = build_windows(routine, now.date(), kind, now)
+    if day_disabled(routine, kind):
+        # 契约里显式禁用的日期类型 → 合法空日：静默，但照常落盘 state
+        fresh = []
+    else:
+        fresh = build_windows(routine, now.date(), kind, now)
 
     windows = carry_forward(old, fresh) if old and old.get("planDate") == today else fresh
     history = rollover(old, today) if not (old and old.get("planDate") == today) else list(old.get("history", []))
@@ -378,6 +421,9 @@ def cmd_due(args) -> int:
     hit["state"] = "ringing"
     hit["fireCount"] += 1
     hit["lastFiredAt"] = now.isoformat()
+    if hit.get("oneOff"):
+        # 一次性提醒：送达即完成，不需要等确认（对应旧系统 deleteAfterRun 语义）
+        hit["state"] = "delivered"
     state["rev"] = rev + 1
     try:
         atomic_write(STATE, state, expected_rev=rev)
@@ -419,7 +465,7 @@ def cmd_ack(args) -> int:
         else:
             if not (start <= now <= grace_end):
                 continue
-        if w["state"] == "acked":
+        if w["state"] in {"acked", "delivered"}:
             continue
         cands.append(w)
 
