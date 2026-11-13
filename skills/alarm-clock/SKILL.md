@@ -62,8 +62,8 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 
 ```json
 {
-  "id": "trip-<日期>",
-  "label": "<用户说的事>",
+  "id": "travel",
+  "label": "旅游",
   "start": "15:00", "end": "15:15", "intervalMin": 5, "expectFires": 1,
   "ackHints": ["好了"],
   "oneOff": true,

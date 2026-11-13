@@ -83,7 +83,7 @@ class TestOneOff(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [{
-            "id": "trip", "label": "深圳行程", "start": "09:00", "end": "09:15",
+            "id": "travel", "label": "旅游", "start": "09:00", "end": "09:15",
             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
             "oneOff": True, "validFrom": "2026-11-10", "validUntil": "2026-11-10",
         }]
@@ -96,8 +96,8 @@ class TestOneOff(RtcCase):
 
         rc, out, _ = self.cli("due", now="2026-11-10T09:00:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertIn("深圳行程", out, "一次性提醒必须产出投递文案")
-        w = self.window("trip")
+        self.assertIn("旅游", out, "一次性提醒必须产出投递文案")
+        w = self.window("travel")
         self.assertEqual(w["state"], "delivered", "送达即完成，不需要等确认")
         self.assertEqual(w["fireCount"], 1)
         self.assertEqual(w["expectFires"], 1)
@@ -114,14 +114,14 @@ class TestOneOff(RtcCase):
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
         rc, out, _ = self.cli("due", now="2026-11-10T09:03:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertIn("深圳行程", out, "错过 start 那一分钟不应导致漏送")
+        self.assertIn("旅游", out, "错过 start 那一分钟不应导致漏送")
 
     def test_gone_next_day(self):
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
         self.cli("due", now="2026-11-10T09:00:00+08:00")
         rc, out, _ = self.cli("plan", now="2026-11-11T06:00:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertNotIn("深圳行程", out, "有效期过后不应再有提醒文案")
+        self.assertNotIn("旅游", out, "有效期过后不应再有提醒文案")
         self.assertEqual(self.state().get("windows"), [], "有效期过后不再生成窗口")
         self.assertEqual(self.state().get("planDate"), "2026-11-11", "空日也要落盘 state")
 
