@@ -76,6 +76,7 @@ grep -rniE 'token|secret|password|api[_-]?key|C:\\Users|/home/' .
 
 ## 建议的贡献顺序
 
+0. **改 `code/` 或契约前先跑 `python code/tests/test_rtc.py`**，新增行为配一条用例
 1. 补 `contract/` 的校验与更多示例
 2. 补 `platform/` 下其他运行时的适配示例
 3. 把 `code/metrics.mjs` 的查询做得更有用
