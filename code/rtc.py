@@ -14,7 +14,7 @@
 宿主契约（这是与运行时唯一的耦合面）：
   - stdout 只有两种形态：要投递的正文，或空（空 = 静默）
   - stderr 承载全部诊断信息
-  - 退出码 0 正常 / 2 状态冲突 / 3 校验失败 / 4 无匹配窗口
+  - 退出码 0 正常 / 2 状态冲突 / 3 校验失败或部分应用 / 4 无匹配窗口
 
 用法：
   python rtc.py --workspace <dir> plan   [--now ISO] [--force]
@@ -44,6 +44,7 @@ import sqlite3
 import sys
 import tempfile
 import time as _time
+import uuid as _uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -118,38 +119,92 @@ _LOCK_STALE_S = 30
 _LOCK_WAIT_S = 10
 
 
+def _lock_token() -> str:
+    """本持有者的唯一令牌：进程号 + 随机串，确保全局唯一、不可预测。"""
+    return f"{os.getpid()}.{_uuid.uuid4().hex}"
+
+
+def _try_acquire_lock(lock: Path, token: str, candidate: Path) -> bool:
+    """尝试获取一次锁（不阻塞）。成功返回 True 并令 lock 内容为 token。
+
+    - 锁不存在：O_EXCL 干净创建，成功。
+    - 锁存在且仍新鲜（未超 ``_LOCK_STALE_S``）：返回 False，由调用方等待。
+    - 锁存在且已陈旧：用唯一候选文件做 ``os.replace`` 原子接管，再校验
+      「lock 内容是否等于自己的 token」——只有接管的胜出者读到自己的 token、
+      返回 True；落败的一方读到的是别人的 token，返回 False。这保证两个写入者
+      不会同时认为自己持有锁、从而同时进入临界区（审计发现 ①：stale-lock 接管
+      会丢失写入）。
+    """
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, token.encode("ascii"))
+        finally:
+            os.close(fd)
+        return True
+    except (FileExistsError, PermissionError):
+        # Windows 上锁文件被另一进程/线程短暂持有时，O_EXCL 会抛 PermissionError
+        # （共享冲突）而非 FileExistsError；一律当作「锁被占用，稍后重试」。
+        pass
+    try:
+        if _time.time() - lock.stat().st_mtime <= _LOCK_STALE_S:
+            return False
+    except OSError:
+        return False
+    try:
+        fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(fd, token.encode("ascii"))
+        os.close(fd)
+        os.replace(str(candidate), str(lock))
+    except FileExistsError:
+        pass  # 候选文件名唯一，理论上不会；忽略
+    except OSError:
+        pass
+    try:
+        return lock.read_bytes() == token.encode("ascii")
+    except OSError:
+        return False
+
+
 @contextlib.contextmanager
 def _exclusive_file_lock(path: Path):
     """协作式互斥：O_EXCL 原子创建 .lock，包住「比对 -> 写临时文件 -> replace」。
 
     遵守本机制的写入者被锁串行化；不遵守的外部写入（手改、别的工具）
     由 expected_digest 的 CAS 检出。锁文件带陈旧超时，进程崩溃不会永久卡死。
+
+    锁文件内容 = 本持有者的唯一令牌（pid.随机）。写入者据此判断「我是否仍持有锁」，
+    释放时只删自己的锁，绝不碰别人接管的锁。单次获取逻辑见 ``_try_acquire_lock``。
     """
     lock = path.with_name(path.name + ".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
+    token = _lock_token()
+    candidate = lock.with_name(lock.name + "." + token)
     deadline = _time.monotonic() + _LOCK_WAIT_S
-    fd = None
-    while True:
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+
+    acquired = False
+    while not acquired:
+        if _try_acquire_lock(lock, token, candidate):
+            acquired = True
             break
-        except FileExistsError:
-            try:
-                if _time.time() - lock.stat().st_mtime > _LOCK_STALE_S:
-                    lock.unlink()
-                    continue
-            except OSError:
-                pass
-            if _time.monotonic() >= deadline:
-                raise Conflict(f"{path.name} 写入锁等待超时")
-            _time.sleep(0.01)
+        if _time.monotonic() >= deadline:
+            raise Conflict(f"{path.name} 写入锁等待超时")
+        _time.sleep(0.01)
+
     try:
-        os.write(fd, str(os.getpid()).encode("ascii"))
         yield
     finally:
-        os.close(fd)
+        # 只删自己仍持有的锁；若临界区超过陈旧阈值被别人接管，绝不动别人的锁。
+        # （临界区为毫秒级，远小于 _LOCK_STALE_S，故正常不会出现「别人接管」；
+        #  此处的令牌校验是防御性的最后一道闸。）
         try:
-            lock.unlink()
+            if lock.read_bytes() == token.encode("ascii"):
+                lock.unlink()
+        except OSError:
+            pass
+        try:
+            if candidate.exists():
+                candidate.unlink()
         except OSError:
             pass
 
@@ -695,8 +750,13 @@ def cmd_due(args) -> int:
     if hit is None:
         if changed:
             state["rev"] = rev + 1
-            atomic_write(STATE, state, expected_rev=rev)
-            print("due: 已把过期窗口标为 missed", file=sys.stderr)
+            try:
+                atomic_write(STATE, state, expected_rev=rev)
+                print("due: 已把过期窗口标为 missed", file=sys.stderr)
+            except Conflict as e:
+                # 契约（issue #4 §11）：due 冲突保持静默，诊断走 stderr，
+                # 下一次 due 重试即可。
+                print(f"due: 写入冲突（{e}），missed 标记延后到下一 tick", file=sys.stderr)
         return 0
 
     # 3) 三个条件
@@ -720,8 +780,12 @@ def cmd_due(args) -> int:
     try:
         atomic_write(STATE, state, expected_rev=rev)
     except Conflict as e:
-        # 宁可重复响一次，也不漏响
-        print(f"due: 写入冲突（{e}），仍输出文案", file=sys.stderr)
+        # 契约（issue #4 §11）：due 冲突必须保持静默——空 stdout、退出 0，
+        # 诊断走 stderr。下一次 due 会重试并由成功那次记录 fireCount，绝不重复
+        # 投递文案（空 stdout 即「不投递」）。这是与旧实现「宁可重复响一次」的
+        # 显式背离：重复投递比晚一 tick 响更糟，而宿主把空 stdout 当作不响。
+        print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
+        return 0
 
     n = hit["fireCount"]
     head = f"{hit['label']} —— {now.strftime('%H:%M')}"
@@ -1035,10 +1099,16 @@ def cmd_postpone(args) -> int:
                     atomic_write(ROUTINE, routine, expected_rev=None,
                                  expected_digest=post_digest)
                 except Conflict as rb_err:
+                    # 部分应用（退出码 3，与「校验失败」共用 3，但语义不同）：
+                    # 时刻表已成功推迟到 {target}，但今日状态因并发编辑回滚失败、
+                    # 未更新——今日这一轮仍可能再响一次。
+                    # 恢复：直接重跑同一条 postpone（时刻表已是目标日、幂等），
+                    # 或对今日该窗口执行 ack/cancel 收口。诊断已在 stderr 点名冲突。
                     print(
                         f"postpone: 状态冲突（{e}），回滚被拒（{rb_err}）——"
                         f"部分应用：时刻表已推迟到 {target.isoformat()}，"
-                        f"今日状态未更新；请人工核对后再重试",
+                        f"今日状态未更新；恢复：重跑同一条 postpone，"
+                        f"或对今日该窗口 ack/cancel",
                         file=sys.stderr,
                     )
                     return 3
