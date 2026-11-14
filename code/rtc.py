@@ -779,7 +779,8 @@ def cmd_ack(args) -> int:
             if w["id"] != args.window:
                 continue
         else:
-            if not (start <= now <= grace_end):
+            same_day = state.get("planDate") == now.date().isoformat()
+            if not (start <= now <= grace_end or (w["state"] == "missed" and same_day)):
                 continue
         if w["state"] in {"acked", "delivered"}:
             continue
@@ -789,7 +790,10 @@ def cmd_ack(args) -> int:
         print("ack: 没有匹配的窗口", file=sys.stderr)
         return 4
 
-    hit = sorted(cands, key=lambda w: w["start"])[0]
+    # 优先确认当前在响/待响的窗口，避免把回复误绑到当天更早的 missed 窗口
+    active = [w for w in cands if w["state"] in {"pending", "ringing"}]
+    pool = active if active else cands
+    hit = sorted(pool, key=lambda w: w["start"])[0]
     if hit["state"] not in {"pending", "ringing", "missed"}:
         print(f"ack: {hit['id']} 当前状态 {hit['state']}，不改写", file=sys.stderr)
         return 4

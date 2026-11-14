@@ -1317,5 +1317,68 @@ class TestSetTime(RtcCase):
         self.assertEqual(rc, 3, "非法 HH:MM 应返回 3")
 
 
+
+class TestAckGrace(RtcCase):
+    """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "noon", "label": "午间", "start": "12:00", "end": "12:25",
+            "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"],
+        }]
+        self.write_routine(r)
+
+    def test_ack_missed_same_day_auto_pick(self):
+        # 1) 生成当天计划
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        # 2) 窗口过期 -> due 把它标为 missed
+        self.cli("due", now="2026-11-10T12:30:00+08:00")
+        self.assertEqual(self.window("noon")["state"], "missed")
+        # 3) 晚于宽限(12:40)但同日内，省略 --window 自动挑到它
+        rc, _, _ = self.cli("ack", "--text", "好了", now="2026-11-10T13:00:00+08:00")
+        self.assertEqual(rc, 0, "当天 missed 窗口应在宽限外仍可被 ack")
+        self.assertEqual(self.window("noon")["state"], "acked")
+
+    def test_ack_missed_prev_day_rejected(self):
+        # 计划生成在前一天
+        self.cli("plan", now="2026-11-09T06:00:00+08:00")
+        self.cli("due", now="2026-11-09T12:30:00+08:00")
+        # 第二天再回『好了』不应 ack 到昨天的 missed
+        rc, _, _ = self.cli("ack", "--text", "好了", now="2026-11-10T09:00:00+08:00")
+        self.assertEqual(rc, 4, "跨日的 missed 窗口不应被误 ack")
+
+    def test_ack_active_window_auto_pick_still_works(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T12:05:00+08:00")
+        rc, _, _ = self.cli("ack", "--text", "好了", now="2026-11-10T12:06:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.window("noon")["state"], "acked")
+
+    def test_ack_prefers_active_over_missed(self):
+        # 当天更早的窗口已 missed，但 later 正在响；回复应绑到正在响的
+        r = base_routine()
+        r["alarmWindows"] = [
+            {"id": "early", "label": "早间", "start": "08:00", "end": "08:25",
+             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+            {"id": "later", "label": "晚间", "start": "18:00", "end": "18:25",
+             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+        ]
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        # early 过期 -> missed；later 当前在响
+        self.cli("due", now="2026-11-10T08:30:00+08:00")
+        self.cli("due", now="2026-11-10T18:05:00+08:00")
+        self.assertEqual(self.window("early")["state"], "missed")
+        self.assertEqual(self.window("later")["state"], "ringing")
+        # 省略 --window，应优先确认正在响的 later，而非更早的 missed early
+        rc, _, _ = self.cli("ack", "--text", "好了", now="2026-11-10T18:06:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.window("later")["state"], "acked")
+        self.assertEqual(self.window("early")["state"], "missed", "更早的 missed 不应被误绑")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
