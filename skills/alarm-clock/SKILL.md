@@ -9,43 +9,58 @@ description: 闹钟门控。判断「该不该响」由 code/rtc.py 完成，本
 
 如果你的宿主没有 `rtc.py` 的运行环境，见文末「无代码回退」。
 
+## §0.1 你不是调度器，系统已经就位
+
+RTC 是「判断 + 写入」与「定时触发」分离的两层：
+
+- **定时层（调度器）**：宿主的 cron 跑两条 no-agent 脚本——`rtc-plan`（每天重新生成当天时间表）和 `rtc-due`（每 5 分钟检查一次、命中窗口就打印文案并投递）。它们**不调模型**，是真正让提醒响起来的部分。
+- **你（模型）是配置层**：只在用户开口时被调用，把「改 / 加提醒」翻译成对 `{{CODE_DIR}}/rtc.py` 的子命令调用，写完回一句人话。
+
+因此：
+
+- ❌ 不要告诉用户「RTC 不存在 / 需要搭建 / 需要设置 cron / 需要部署 rtc.py」——部署是安装器（`install.py`）做的事，运行时系统已经跑着了。
+- ❌ 不要自己动手建 / 删 / 暂停 cron 任务（条数恒定：只有 `rtc-plan` 和 `rtc-due` 两条）。
+- ❌ 不要手改 `{{WORKSPACE_DIR}}/rules/routines.json` 或任何 `.example` / `.md` 模板。
+- 用户收到的每一条提醒都是上面这套系统的输出——你看到的定时投递消息就是它的产物，不是外部事件。
+
+
 ## §0 只读一个文件
 
 需要看状态时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。
 
 不要读 `tasks.md`、`AGENTS.md`、`MEMORY.md`、`HEARTBEAT.md`。多读一个文件就多一份延迟，也多一次判断错误的可能。
 
-## §1 用户说「起了 / 好了 / 别响了」
+## §0.5 唯一可改的文件
 
-先查有没有正在响的窗口：
+只有 `<workspace>/rules/routines.json` 是运行时配置。**绝不**打开或手改任何带 `.example`、`.md` 后缀的文件（如 `rules/routines.example.md`、`rules/routines.md`）——那些是模板与文档，改了不会生效，还会让你误以为改好了。本技能是 `rules/routines.json` 的**唯一权威**：其他日常类技能（daily-routine 等）不修改时刻表，遇到改时间 / 改期请回到本技能走命令。所有改动只通过 `rtc.py` 的子命令完成。
+
+## §1 用户说「起了 / 好了 / 别响了」—— 你是唯一的 ack 桥
+
+cron（`rtc-due`）是 no-agent 脚本，**看不到聊天、也不会处理回复**。所以用户回复「起了 / 好了 / 办了 / 别响了 / 知道了」或任何「停 / 不响了 / 做完了」的意思时，**几乎一定是在回某条 RTC 提醒**——这是你（模型）必须做的动作，不是新请求：
+
+1. 立刻调用 ack。**可以省略 `--window`**，命令会自动挑当前在响 / 刚过期（当天）的窗口：
 
 ```
-python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status --json
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} ack --text "<用户原话>"
 ```
 
-挑 `state ∈ {pending, ringing}` 且当前时间落在窗口内的那一个，然后：
+2. 退出码 `0` → 回一句短的：`好，记上了。`（**不要**说「已设置完成」「已完成」「配好了」——那会误导用户以为系统被重配了。）
+3. 退出码 `4` → `现在没有在响的提醒，你是说哪一个？`
+4. 退出码 `2` → `刚才状态被人同时改了，你再确认一次？`
 
-```
-python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} ack --window <id> --text "<用户原话>"
-```
-
-- 退出码 `0` → 回一句短的：`好，记上了。`
-- 退出码 `4` → `现在没有在响的提醒，你是说哪一个？`
-- 退出码 `2` → 有并发写入，说一句 `刚才有人同时改了状态，我这边没写进去，你再确认一次？`
-
-一次性提醒送达后状态是 `delivered`，同样没有可确认的匹配（退出码 `4`）。
-
-**不要自己改 `alarms.json`。** 写入有 `rev` 校验，手改会被下一次写入判成冲突。
-
-通用短语（「知道了」「别响了」）只在**当前窗口**内算确认；窗口没开时说这些，不要当成 ack。
+- ⚠️ 你看到的「Cronjob Response: rtc-due … 回复「好了」就不响了」**就是 RTC 在响**；用户那条回复就是要 ack 它。别把它当外部事件、别去「搭建/部署 RTC」。
+- ⚠️ 当天窗口即便刚过期（状态 `missed`），同日内回复仍能 ack（宽限已放宽），所以晚一点回「好了」也有效。
+- **不要自己改 `alarms.json`。** 写入有 `rev` 校验，手改会被下一次写入判成冲突。
+- 通用短语（「知道了」「别响了」）只在**当前窗口**内算确认；窗口没开时说这些，不要当成 ack。
 
 ## §2 改期
 
 v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改它会让已确认的记录失去意义。
 
-1. 改 `rules/routines.md` 里对应窗口的时间（`HH:MM`），并同步 `rules/routines.json`（机器可读的那份）
-2. 改窗口长度时，`expectFires` 必须同步：`(end - start) ÷ intervalMin + 1`，否则 `rtc.py plan` 会拒绝
-3. 回一句：`改成 13:00 了，明天生效。`
+1. 改**时刻**用 `set-time` 命令（不要手改 JSON）：
+   `python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} set-time --window <id> --start HH:MM [--end HH:MM]`
+2. 回一句：`改成 13:00 了，明天生效。`
+   `set-time` 只写时刻表，下次 `plan` 生效；今天已生成的窗口不变。
 
 **改期（挪到别的日子）用 `postpone` 命令，不要手改 JSON：**
 
@@ -95,7 +110,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 一次性窗口的「改期」= 改 `validFrom` / `validUntil`；窗口本身已经只存在于那一天。
 
-修改时刻表**不需要额外仪式**——它就是一份数据文件，改动在版本控制里可见即可。
+修改时刻表**只能由 `rtc.py` 的命令完成**（`set-time` / `postpone` / `disable` / `enable`）。`rules/routines.json` 是唯一可改的文件，**模型绝不手改**它，也不碰任何 `*.example` / `*.md` 模板。
 但用户若明确要求过「改之前先问我」，那就照做：那是用户的边界，不是契约的规定。
 
 ## §3 一次性提醒
@@ -139,6 +154,10 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 `rtc.py` 会自动把剩余天数写进文案（「距截止还有 2 天」「明天截止」「最后一天！」）——
 **不要自己算天数，也不要自己写「截止 X/X」**，那是代码的事。
+
+> 提示：Hermes 部署里已有便捷脚本 `rtc_once.py`——
+> `python {{CODE_DIR}}/rtc_once.py HH:MM "内容" [--date YYYY-MM-DD]`
+> 会自动追加 `oneOff` 窗口并跑 `plan --force`，比手改 JSON 安全。
 
 **不要自己建定时任务**，也不要往 `alarms.json` 里手写窗口。
 
@@ -207,6 +226,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 - ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
+- ❌ 打开或手改任何名字带 `.example` / `.md` 的文件（`rules/routines.example.md`、`rules/routines.md` 都是模板，不是运行配置）
 - ❌ 读到文件不一致就「顺手修好」
 - ❌ 连续响超过 `expectFires` 次（到上限就判 missed）
 - ❌ 在非窗口时间发任何消息

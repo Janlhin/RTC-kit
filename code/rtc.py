@@ -779,7 +779,8 @@ def cmd_ack(args) -> int:
             if w["id"] != args.window:
                 continue
         else:
-            if not (start <= now <= grace_end):
+            same_day = state.get("planDate") == now.date().isoformat()
+            if not (start <= now <= grace_end or (w["state"] == "missed" and same_day)):
                 continue
         if w["state"] in {"acked", "delivered"}:
             continue
@@ -789,7 +790,10 @@ def cmd_ack(args) -> int:
         print("ack: 没有匹配的窗口", file=sys.stderr)
         return 4
 
-    hit = sorted(cands, key=lambda w: w["start"])[0]
+    # 优先确认当前在响/待响的窗口，避免把回复误绑到当天更早的 missed 窗口
+    active = [w for w in cands if w["state"] in {"pending", "ringing"}]
+    pool = active if active else cands
+    hit = sorted(pool, key=lambda w: w["start"])[0]
     if hit["state"] not in {"pending", "ringing", "missed"}:
         print(f"ack: {hit['id']} 当前状态 {hit['state']}，不改写", file=sys.stderr)
         return 4
@@ -1105,6 +1109,68 @@ def _mark_state(state: dict | None, wid: str, new_state: str,
         hit["missedAt"] = None
         hit["missedReason"] = None
     return "changed"
+
+
+def cmd_set_time(args) -> int:
+    """改窗口的起止时刻（HH:MM）。只写时刻表，下次 plan 生效（默认次日）。
+
+    stdout 保持为空：由用户交互触发，不是定时任务，不该被投递出去。
+    改的是「时刻」不是「日期」，不会改变今天已经生成的窗口。
+    """
+    digest = file_digest(ROUTINE)
+    routine = load_routine()
+    defs = routine.get("alarmWindows") or []
+    w = next((x for x in defs if x["id"] == args.window), None)
+    if w is None:
+        print(f"set-time: 时刻表里没有窗口 {args.window}", file=sys.stderr)
+        return 4
+
+    def parse_hhmm(s, what):
+        try:
+            h, m = (int(x) for x in s.split(":"))
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError
+            return time(h, m)
+        except ValueError:
+            print(f"set-time: --{what} 应为 HH:MM，收到 {s}", file=sys.stderr)
+            return None
+
+    start = parse_hhmm(args.start, "start")
+    if start is None:
+        return 3
+    if args.end is None:
+        eh, em = (int(x) for x in w["end"].split(":"))
+        end = time(eh, em)
+    else:
+        end = parse_hhmm(args.end, "end")
+        if end is None:
+            return 3
+
+    if end <= start:
+        print(f"set-time: end ({args.end or w['end']}) 必须晚于 start ({args.start})",
+              file=sys.stderr)
+        return 3
+
+    w["start"] = args.start
+    if args.end is not None:
+        w["end"] = args.end
+
+    # 窗口长度变化 -> 重算 expectFires（与 plan 的算术校验保持一致）
+    if not (w.get("dueDate") or w.get("checklist") or w.get("oneOff")):
+        w["expectFires"] = expect_fires(start, end, int(w["intervalMin"]))
+
+    try:
+        atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+    except Conflict as e:
+        print(f"set-time: 时刻表已被改动（{e}），未写入", file=sys.stderr)
+        return 2
+    print(
+        f"set-time: {args.window} 改为 {args.start}"
+        + (f"–{args.end}" if args.end else "")
+        + "，下次 plan 生效（默认次日）",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def cmd_cancel(args) -> int:
@@ -1750,6 +1816,12 @@ def main(argv=None) -> int:
     sen.add_argument("--window", required=True, help="窗口 id")
     sen.add_argument("--now")
     sen.set_defaults(func=cmd_enable)
+
+    sst = sub.add_parser("set-time")
+    sst.add_argument("--window", required=True, help="窗口 id")
+    sst.add_argument("--start", required=True, help="新起始时刻 HH:MM")
+    sst.add_argument("--end", help="新结束时刻 HH:MM（省略=保持不变）")
+    sst.set_defaults(func=cmd_set_time)
 
     ssch = sub.add_parser("schedule")
     ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")
