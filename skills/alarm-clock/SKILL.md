@@ -9,6 +9,21 @@ description: 闹钟门控。判断「该不该响」由 code/rtc.py 完成，本
 
 如果你的宿主没有 `rtc.py` 的运行环境，见文末「无代码回退」。
 
+## §0.1 你不是调度器，系统已经就位
+
+RTC 是「判断 + 写入」与「定时触发」分离的两层：
+
+- **定时层（调度器）**：宿主的 cron 跑两条 no-agent 脚本——`rtc-plan`（每天重新生成当天时间表）和 `rtc-due`（每 5 分钟检查一次、命中窗口就打印文案并投递）。它们**不调模型**，是真正让提醒响起来的部分。
+- **你（模型）是配置层**：只在用户开口时被调用，把「改 / 加提醒」翻译成对 `{{CODE_DIR}}/rtc.py` 的子命令调用，写完回一句人话。
+
+因此：
+
+- ❌ 不要告诉用户「RTC 不存在 / 需要搭建 / 需要设置 cron / 需要部署 rtc.py」——部署是安装器（`install.py`）做的事，运行时系统已经跑着了。
+- ❌ 不要自己动手建 / 删 / 暂停 cron 任务（条数恒定：只有 `rtc-plan` 和 `rtc-due` 两条）。
+- ❌ 不要手改 `{{WORKSPACE_DIR}}/rules/routines.json` 或任何 `.example` / `.md` 模板。
+- 用户收到的每一条提醒都是上面这套系统的输出——你看到的定时投递消息就是它的产物，不是外部事件。
+
+
 ## §0 只读一个文件
 
 需要看状态时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。
@@ -144,6 +159,10 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 `rtc.py` 会自动把剩余天数写进文案（「距截止还有 2 天」「明天截止」「最后一天！」）——
 **不要自己算天数，也不要自己写「截止 X/X」**，那是代码的事。
+
+> 提示：Hermes 部署里已有便捷脚本 `rtc_once.py`——
+> `python {{CODE_DIR}}/rtc_once.py HH:MM "内容" [--date YYYY-MM-DD]`
+> 会自动追加 `oneOff` 窗口并跑 `plan --force`，比手改 JSON 安全。
 
 **不要自己建定时任务**，也不要往 `alarms.json` 里手写窗口。
 
