@@ -41,6 +41,8 @@ YYYY-MM-DD holiday   说明
 
 开关：`weekendAlarms: true` / `holidayAlarms: true`（false = 该日期类型不响闹钟）。
 
+这两个开关**已被 `rtc.py` 消费**：置为 `false` 的日期类型是**合法空日**——静默、不报配置错误，但照常落盘 state 与心跳。
+
 ---
 
 ## 三、例行播报
@@ -89,3 +91,54 @@ cron 只能给一套触发表达式，**日期类型差异由技能按「星期 
 6. 校验窗口数与 `expectFires` 合计，不符就别写，记一条错误
 
 **幂等**：`planDate` 已是今天且由日切生成过，直接跳过。
+
+---
+
+## 六、有效期与一次性提醒
+
+窗口可以带有效期，也可以是一次性的。
+
+| 字段 | 含义 |
+|---|---|
+| `validFrom` | 该窗口从哪一天开始生效（含）。省略 = 无限期 |
+| `validUntil` | 该窗口到哪一天失效（含）。省略 = 无限期 |
+| `oneOff` | `true` = 一次性提醒：只响一次，送达即完成（`state: delivered`），不需要确认 |
+
+### 带截止日的周期任务（版本限时）
+
+```
+{
+  "id": "season-event",
+  "label": "版本限时任务",
+  "start": "10:00", "end": "10:25", "intervalMin": 5, "expectFires": 6,
+  "validFrom": "2026-11-10", "validUntil": "2026-12-31"
+}
+```
+
+有效期内每天照常响；超出 `validUntil` 就不再生成窗口。
+
+### 一次性提醒（只响一次）
+
+```
+{
+  "id": "trip-shenzhen",
+  "label": "深圳行程",
+  "start": "09:00", "end": "09:15", "intervalMin": 5, "expectFires": 1,
+  "ackHints": ["好了"],
+  "oneOff": true,
+  "validFrom": "2026-09-30", "validUntil": "2026-09-30"
+}
+```
+
+- `oneOff: true` 时 `expectFires` 必须是 `1`（契约强制）
+- `validFrom` 与 `validUntil` 同日 = 只在这一天出现
+- `end` 建议比 `start` 晚 10–15 分钟：**cron 恰好错过 start 那一分钟时，仍能在窗口内送达**
+- 响过一次后状态是 `delivered`，不再等确认；第二天该窗口不再生成
+
+### 空日的两种含义
+
+| 情况 | 行为 |
+|---|---|
+| 有效期内没有窗口（还没开始 / 已结束） | **合法空日**：静默，照常落盘 state |
+| `weekendAlarms` / `holidayAlarms` 为 `false` | **合法空日**：静默 |
+| 有窗口在有效期内，却被 `dateTypes` 全部排除 | **配置错误**：退出码 `3`，提示检查 `dateTypes` |

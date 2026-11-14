@@ -33,7 +33,7 @@ exit=1
 | 1 | 到期判定归谁，文档自相矛盾（高） | **已修**。判定收进 `code/rtc.py`，成为唯一判定者；`remind.mjs` / `due.mjs` 这类「文档里有、仓库里无」的引用不再作为路径描述 | `code/rtc.py`、`platform/hermes.md` |
 | 2 | 自动重建计划会撤销 ack（高） | **已修**。`plan` 的跳过键改为 `planDate == today`（不再看 `generatedBy`）；重建时把同日同 id 的 `acked/missed/skipped` 原样带回 | `code/rtc.py:carry_forward` |
 | 3 | ack 匹配会静默未来窗口（高/中） | **已修**。匹配条件改为 `start ≤ now ≤ end + 15min`，按 `start` 升序取最早一个；宽限期内允许 `missed → acked` | `code/rtc.py:cmd_ack` |
-| 4 | 取消/改期/一次性提醒无持久表示（高） | **部分修**。v1 明确收窄为「仅周期窗口，改动次日生效」，一次性提醒明确列为不支持；`cancelled` 状态与 `oneOff` 列表未加 | `platform/hermes.md`、`skills/alarm-clock` |
+| 4 | 取消/改期/一次性提醒无持久表示（高） | **已修**（2026-11-13 追加）。改期沿用「次日生效」；一次性提醒以窗口字段 `oneOff` + `validFrom` / `validUntil` 持久表示，送达即完成（`state: delivered`）；`cancelled` 状态仍未加——取消属宿主侧操作，不进状态机 | `contract/routine.schema.json`、`contract/alarm-state.schema.json`、`code/rtc.py`、`skills/alarm-clock` |
 | 5 | 状态所有权三套说法，ack 无并发检查（中） | **已修**。单一写者 `rtc.py`；`rev` 比对覆盖 `plan` / `due` / `ack` 三条写路径，不一致抛冲突、不覆盖 | `code/rtc.py:atomic_write` |
 | 6 | 路径与章节引用不可解析（中） | **已修**。技能统一读部署名 `rules/routines.md`；`§六` 改为 `§一`；`game_checkin` 改为 `weekdayHabit`；`≠ 4` 改为 `≠ {{WINDOW_COUNT}}`；`weekend_alarms` 进 Schema | 见下「文档修正」 |
 | 7 | 指标：输入路径错、口径混（中） | **已修**。`metrics.mjs` 接受 `--state` / `RTC_STATE`，确认率按已结算行计算，`fired` 改标为「发送尝试」；`rtc.py metrics` 提供同口径实现 | `code/metrics.mjs`、`code/rtc.py` |
@@ -130,13 +130,42 @@ metrics 已结算口径的统计
 ## 六、不在本次范围
 
 - 5 份技能的宿主去耦合（第 A 条）——需要先定 phase 划分，避免半途改动导致行为漂移
-- `oneOff` 与按日期覆盖（第 4 条）——涉及 `plan` / 补建 / 归档三处联动，单独立项
+- `cancelled` 状态（第 4 条）——取消属宿主侧操作，不进状态机
 - DST（第 9 条）——需要 IANA 时区库，当前固定偏移对无 DST 地区够用
 - `metrics.mjs` 与 `rtc.py metrics` 的职责合并——先并存，观察一个周期再决定删哪个
 
 ---
 
-## 七、复现方式
+## 七、2026-11-13 追加：一次性提醒与有效期
+
+第 4 条里被列为「不在本次范围」的 `oneOff`，本次落地。理由是外部真实场景里**正在使用的待办恰好都是一次性的**（行程、临时事项），而带截止日的周期任务（版本限时）同样有明确需求。
+
+### 契约
+
+| 字段 | 位置 | 含义 |
+|---|---|---|
+| `validFrom` / `validUntil` | `routine.schema.json` → `alarmWindows[]` | 有效期，闭区间，任一端省略即无限期 |
+| `oneOff` | 同上 | `true` = 一次性提醒；契约强制 `expectFires` 为 `1` |
+| `oneOff` | `alarm-state.schema.json` → `windows[]` | 状态文件里的快照，供 `due` 判断是否送达即完成 |
+| `delivered` | 同上 → `state` 枚举 | 新终态：一次性窗口已送达，**不需要确认** |
+
+### 行为
+
+- **一次性窗口**：只响一次；`end` 建议比 `start` 晚 10–15 分钟，用来容忍 cron 恰好错过 `start` 那一分钟；送达后 `state = delivered`；第二天不再生成。
+- **有效期**：窗口不在 `[validFrom, validUntil]` 内时不生成。
+- **空日语义重排**（原语义只有一种）：
+  - 有效期内没有窗口（还没开始 / 已结束）→ **合法空日**，静默
+  - `weekendAlarms` / `holidayAlarms` 为 `false` → **合法空日**，静默
+  - 有窗口在有效期内却被 `dateTypes` 全部排除 → **配置错误**，退出码 `3`
+- **顺带修复**：契约里定义了 `weekendAlarms` / `holidayAlarms`，但 `rtc.py` 从未消费它们——设为 `false` 仍会照常生成窗口。现在已消费，「显式禁用日安静」这条原则才真正成立。
+
+### 验证
+
+新增 `code/tests/test_rtc.py`：18 个用例，进程级 E2E，零外部依赖。覆盖一次性窗口（送达 / 不重复 / 容忍错过 / 次日消失 / 无可确认匹配）、有效期（期内生成 / 未开始安静 / 已过期安静 / 空日仍写心跳）、空日语义（显式禁用安静 / 意外空报错）、契约约束，以及既有主线的回归（plan → due → ack → 幂等 → missed → 跨日归档）。
+
+---
+
+## 八、复现方式
 
 ```bash
 # Schema（开启 format 断言，与 CI 一致）

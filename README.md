@@ -89,7 +89,7 @@ cancel     取消
 | `rules/` | 声明式规则（`routines` / `priority-map` / `auto-resolver` / `formats`） |
 | `skills/` | 5 个技能说明 |
 | `templates/` | 工作区模板（全部 `*.example.md`） |
-| `code/` | `rtc.py`（主链路实现）与 `metrics.mjs`（旁路统计） |
+| `code/` | `rtc.py`（主链路实现）、`metrics.mjs`（旁路统计）、`tests/`（回归测试） |
 | `platform/` | 运行时适配示例 |
 
 ## 包路径 → 运行时工作区路径
