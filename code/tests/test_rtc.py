@@ -18,8 +18,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import argparse
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "code"))
+import rtc  # noqa: E402  (回滚竞态测试直接调 cmd_postpone)
 RTC = REPO / "code" / "rtc.py"
 SCHEMA = REPO / "contract" / "routine.schema.json"
 ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
@@ -1144,6 +1147,64 @@ class TestExecutionArchive(RtcCase):
         res = snap.get("results") or {}
         self.assertIn("cancelled", res, "跨多天开机也要回填前一天的快照")
         self.assertEqual(res["cancelled"]["state"], "cancelled")
+
+
+class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
+    """回归：推迟失败回滚时，不得覆盖并发改过的另一个窗口（审计发现 ①）。
+
+    真实竞态：推迟先写时刻表（第 1 步成功），随后另一个进程改了别的窗口；
+    再写状态时冲突，触发回滚。回滚若用「当前磁盘摘要」当守卫，会把别人的
+    改动一起抹掉。正确做法是回滚用「改之前抓的摘要」，冲突即放弃写入。
+    """
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
+             "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]},
+            {"id": "report", "label": "助理汇报", "start": "14:00", "end": "14:30",
+             "intervalMin": 5, "expectFires": 7, "ackHints": ["好了"]},
+        ]
+        self.write_routine(r)
+        rtc.set_workspace(self.ws)
+
+    def test_rollback_keeps_concurrent_edit(self):
+        # 先把今天排出来，让 wake 处于 pending（推迟才会走「写状态」那一步）
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+
+        calls = {"n": 0}
+        orig = rtc.atomic_write
+
+        def fake(path, data, expected_rev=None, expected_digest=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 第 1 步：时刻表写入成功；随后模拟「另一个进程」改了 report
+                res = orig(path, data, expected_rev, expected_digest)
+                rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+                for x in rb["alarmWindows"]:
+                    if x["id"] == "report":
+                        x["start"] = "15:00"
+                rtc.ROUTINE.write_text(json.dumps(rb, ensure_ascii=False, indent=2), encoding="utf-8")
+                return res
+            if path == rtc.STATE:
+                # 第 2 步：强制状态写入冲突 -> 触发回滚分支
+                raise rtc.Conflict("injected: state changed concurrently")
+            # 第 3 步（回滚写时刻表）：交给真实代码，由 fix 决定成败
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = fake
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        rc = rtc.cmd_postpone(argparse.Namespace(
+            window="wake", to=None, days=1, deadline=False,
+            now="2026-05-10T08:00:00+08:00"))
+        self.assertEqual(rc, 2, "状态冲突应触发回滚并返回 2")
+
+        rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+        report = next(x for x in rb["alarmWindows"] if x["id"] == "report")
+        self.assertEqual(report["start"], "15:00",
+                         "回滚不得覆盖并发改过的『助理汇报』（15:00）")
 
 
 if __name__ == "__main__":

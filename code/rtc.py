@@ -974,7 +974,7 @@ def cmd_postpone(args) -> int:
                         w.pop(k, None)
                 try:
                     atomic_write(ROUTINE, routine, expected_rev=None,
-                                 expected_digest=file_digest(ROUTINE))
+                                 expected_digest=digest)
                 except Conflict:
                     pass
                 print(f"postpone: 状态冲突（{e}），已回滚，未推迟", file=sys.stderr)
