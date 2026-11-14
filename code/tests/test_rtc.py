@@ -83,7 +83,7 @@ class TestOneOff(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [{
-            "id": "trip", "label": "深圳行程", "start": "09:00", "end": "09:15",
+            "id": "travel", "label": "旅游", "start": "09:00", "end": "09:15",
             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
             "oneOff": True, "validFrom": "2026-11-10", "validUntil": "2026-11-10",
         }]
@@ -96,8 +96,8 @@ class TestOneOff(RtcCase):
 
         rc, out, _ = self.cli("due", now="2026-11-10T09:00:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertIn("深圳行程", out, "一次性提醒必须产出投递文案")
-        w = self.window("trip")
+        self.assertIn("旅游", out, "一次性提醒必须产出投递文案")
+        w = self.window("travel")
         self.assertEqual(w["state"], "delivered", "送达即完成，不需要等确认")
         self.assertEqual(w["fireCount"], 1)
         self.assertEqual(w["expectFires"], 1)
@@ -114,14 +114,14 @@ class TestOneOff(RtcCase):
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
         rc, out, _ = self.cli("due", now="2026-11-10T09:03:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertIn("深圳行程", out, "错过 start 那一分钟不应导致漏送")
+        self.assertIn("旅游", out, "错过 start 那一分钟不应导致漏送")
 
     def test_gone_next_day(self):
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
         self.cli("due", now="2026-11-10T09:00:00+08:00")
         rc, out, _ = self.cli("plan", now="2026-11-11T06:00:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertNotIn("深圳行程", out, "有效期过后不应再有提醒文案")
+        self.assertNotIn("旅游", out, "有效期过后不应再有提醒文案")
         self.assertEqual(self.state().get("windows"), [], "有效期过后不再生成窗口")
         self.assertEqual(self.state().get("planDate"), "2026-11-11", "空日也要落盘 state")
 
@@ -277,6 +277,124 @@ class TestMainlineRegression(RtcCase):
         self.assertEqual(hist[0]["id"], "wake")
         self.assertEqual(hist[0]["state"], "acked")
         self.assertIsNotNone(hist[0]["ackedAt"], "归档要保留 ackedAt")
+
+
+class TestScheduleArchive(RtcCase):
+    """每日日程快照与历史查询"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["rollcalls"] = [{"hour": 20, "minute": 0,
+                           "kindByDateType": {"workday": "summary", "holiday": "summary",
+                                              "weekend": "summary"}}]
+        r["weeklyChores"] = [{"dayOfWeek": 6, "label": "洗衣服", "attachToRollcallHour": 14}]
+        self.write_routine(r)
+
+    def snapshot(self, day: str) -> Path:
+        return self.ws / "state" / "schedule" / f"{day}.json"
+
+    def test_snapshot_written_into_workspace(self):
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        sp = self.snapshot("2026-12-15")
+        self.assertTrue(sp.exists(), "plan 必须写每日快照")
+        self.assertTrue(sp.is_relative_to(self.ws),
+                        "快照必须落在 --workspace 指定的目录里，不能写到进程 cwd 下")
+        snap = json.loads(sp.read_text(encoding="utf-8"))
+        self.assertEqual(snap["date"], "2026-12-15")
+        self.assertEqual(snap["planKind"], "workday")
+        self.assertEqual(len(snap["windows"]), 1)
+        self.assertEqual(snap["windows"][0]["label"], "起床")
+        self.assertEqual(snap["windows"][0]["expectFires"], 6)
+        self.assertEqual(len(snap["rollcalls"]), 1)
+        self.assertEqual(snap["rollcalls"][0]["kind"], "summary")
+
+    def test_snapshot_records_weekly_chore(self):
+        self.cli("plan", now="2026-12-19T06:00:00+08:00")   # 周六
+        snap = json.loads(self.snapshot("2026-12-19").read_text(encoding="utf-8"))
+        self.assertEqual(len(snap["weeklyChores"]), 1)
+        self.assertEqual(snap["weeklyChores"][0]["label"], "洗衣服")
+
+    def test_snapshot_records_one_off_and_validity(self):
+        r = base_routine()
+        r["alarmWindows"][0].update({"oneOff": True, "expectFires": 1,
+                                      "validFrom": "2026-12-15", "validUntil": "2026-12-15"})
+        self.write_routine(r)
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        w = json.loads(self.snapshot("2026-12-15").read_text(encoding="utf-8"))["windows"][0]
+        self.assertTrue(w["oneOff"])
+        self.assertEqual(w["validFrom"], "2026-12-15")
+        self.assertEqual(w["validUntil"], "2026-12-15")
+
+    def test_query_day_and_month(self):
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        self.cli("plan", now="2026-12-16T06:00:00+08:00")
+        rc, out, _ = self.cli("schedule", "2026-12-15")
+        self.assertEqual(rc, 0)
+        self.assertIn("2026-12-15", out)
+        self.assertIn("起床", out)
+        rc, out, _ = self.cli("schedule", "--month", "2026-12")
+        self.assertEqual(rc, 0)
+        self.assertIn("2026-12-15", out)
+        self.assertIn("2026-12-16", out)
+
+    def test_query_without_snapshot_falls_back_to_preview(self):
+        """没有快照的日期按配置推算，而不是报「没有」。"""
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        rc, out, _ = self.cli("schedule", "2026-12-20")
+        self.assertEqual(rc, 0, "没有快照时应推算，而不是报错")
+        self.assertIn("按配置推算", out)
+
+    def test_query_disabled_day_has_no_preview(self):
+        """被显式禁用的日期类型推算不出安排 → 退出码 4。"""
+        self.write_routine(base_routine(weekendAlarms=False))
+        rc, _, err = self.cli("schedule", "2026-11-14")   # 周六
+        self.assertEqual(rc, 4)
+        self.assertIn("没有", err)
+
+    def test_snapshots_survive_many_days(self):
+        days = ["2026-12-14", "2026-12-15", "2026-12-16", "2027-01-11"]
+        for d in days:
+            self.cli("plan", now=f"{d}T06:00:00+08:00")
+        for d in days:
+            self.assertTrue(self.snapshot(d).exists(), f"{d} 的快照必须永久保留")
+
+    def test_future_date_is_previewed_from_config(self):
+        """未来日期没有快照时，按配置推算——能看见自己预约了什么。"""
+        r = base_routine()
+        r["alarmWindows"].append({
+            "id": "travel", "label": "旅游", "start": "09:00", "end": "23:45",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "oneOff": True, "validFrom": "2028-01-01", "validUntil": "2028-01-01"})
+        self.write_routine(r)
+        rc, out, _ = self.cli("schedule", "2028-01-01")
+        self.assertEqual(rc, 0, "未来日期应能推算出安排")
+        self.assertIn("旅游", out)
+        self.assertIn("按配置推算", out, "推算结果必须标明来源，不与快照混淆")
+        rc, out, _ = self.cli("schedule", "2027-06-15")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("旅游", out, "不在有效期内，不该出现该窗口")
+
+    def test_wide_window_oneoff_still_delivers_late_in_day(self):
+        """宽容错窗口时，当天晚些开机也能收到。"""
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "travel", "label": "旅游", "start": "09:00", "end": "23:45",
+            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
+            "oneOff": True, "validFrom": "2026-12-15", "validUntil": "2026-12-15"}]
+        self.write_routine(r)
+        self.cli("plan", now="2026-12-15T09:30:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-12-15T09:31:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("旅游", out, "宽容错窗口时，晚开机也应当天收到")
+
+    def test_metrics_indexes_schedule_table(self):
+        self.cli("plan", now="2026-12-15T06:00:00+08:00")
+        rc, _, err = self.cli("metrics", "sync")
+        self.assertEqual(rc, 0)
+        rc, out, _ = self.cli("metrics", "schedule", "--date", "2026-12-15")
+        self.assertEqual(rc, 0)
+        self.assertIn("起床", out)
 
 
 if __name__ == "__main__":
