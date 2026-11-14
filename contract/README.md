@@ -40,6 +40,20 @@ npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json \
 - 可空字段写成 `"type": ["string", "null"]`。**不要用 `nullable`**——那是 OpenAPI 3.0 的关键字，JSON Schema 2020-12 不认识它，写了不报错也不生效
 - 小时分钟写成 `^([01][0-9]|2[0-3]):[0-5][0-9]$`，别用 `^[0-9]{2}:[0-9]{2}$`——后者会放过 `99:99`
 
+## 窗口的几种时间，别混淆
+
+`alarmWindows[]` 里同时存在几组时间，各管一件事：
+
+| 字段 | 回答什么 | 例 |
+|---|---|---|
+| `start` / `end` / `intervalMin` / `expectFires` | 一天之内什么时候响、响几次 | `07:00`–`07:25`，每 5 分钟，6 次 |
+| `dateTypes` | 哪种日期类型响（工作日 / 周末 / 节假日） | `["weekday"]` |
+| `validFrom` / `validUntil` | 哪一段时间内有效（闭区间） | `2026-11-10` – `2026-12-31` |
+| `oneOff` | 只响一次，送达即完成 | `true` |
+
+`oneOff: true` 时契约强制 `expectFires` 为 `1`；`validFrom` 与 `validUntil` 同日即为「只在那天出现」。
+`oneOff` 只对**闹钟窗口**有意义；`rollcalls`（例行播报）与 `weeklyChores`（周专项）由日期类型与星期决定，不看有效期。
+
 ## 契约稳定性
 
 `version` 字段用于演进。加字段视为向后兼容；改字段含义或删字段必须升 `version` 并在 `CONTRIBUTING.md` 里说明迁移方式。

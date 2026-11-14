@@ -24,6 +24,19 @@ python rtc.py --workspace <dir> metrics  # sync / report
 
 适配示例见 `platform/hermes.md`。
 
+## 测试
+
+仓库的第一个回归测试套件：**进程级 E2E**——每个用例在临时工作区里用真实 CLI 调用 `rtc.py`，断言退出码、stdout（投递内容）与状态文件。
+
+```bash
+python code/tests/test_rtc.py                          # 直接跑
+python -m unittest discover -s code/tests -v           # 或用 discover
+```
+
+零外部依赖，只用标准库。契约相关的两个用例需要 `jsonschema`，没装就自动跳过。
+
+改了 `rtc.py` 或契约之后先跑这个；**新增行为必须配一条用例**。
+
 ## metrics.mjs
 
 执行情况的统计账本。用运行时的内置 SQLite 模块，**零外部依赖、零构建步骤**（JSDoc + `// @ts-check` 提供类型检查）。
