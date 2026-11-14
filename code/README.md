@@ -16,13 +16,55 @@ python rtc.py --workspace <dir> plan     # 生成/补建当天窗口（只增不
 python rtc.py --workspace <dir> due      # 该响就打印文案，不该响就什么都不打印
 python rtc.py --workspace <dir> ack      # 写入确认
 python rtc.py --workspace <dir> status   # 人读 / --json 机器读
-python rtc.py --workspace <dir> metrics  # sync / report
+python rtc.py --workspace <dir> metrics  # sync / report / schedule
+python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日程
+python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
 ```
 
 契约：**stdout 为空即静默**；诊断信息全部走 stderr；退出码 `0` 正常 / `2` 状态冲突 / `3` 校验失败 / `4` 无匹配窗口。
 写入是「临时文件 + 原子改名」，并在写入前比对 `rev`，不一致就放弃而不是覆盖。
 
 适配示例见 `platform/hermes.md`。
+
+## 日程存档
+
+`state/alarms.json` 只保存**当天**的计划加最近 14 天的执行摘要。想查一年前某天的日程安排，
+靠的是另一份东西：**每日快照**。
+
+```
+state/schedule/2026-12-15.json
+```
+
+`plan` 成功后写一份，写一次留永久，不清理。每份约 0.5–2 KB，一年不到 1 MB。
+
+一份快照里有：
+
+| 字段 | 内容 |
+|---|---|
+| `date` / `planKind` / `timezone` | 那天是哪天、什么日期类型 |
+| `windows[]` | 全部窗口：label、起止时刻、间隔、期望次数、是否一次性、有效期、确认词 |
+| `rollcalls[]` | 那天的播报时点与类型（report / follow / summary） |
+| `weeklyChores[]` | 那天的周专项（如周六的洗衣服） |
+
+查法：
+
+```bash
+python rtc.py schedule 2026-12-15        # 详细日程
+python rtc.py schedule --month 2026-12   # 整月概览，每天一行
+python rtc.py schedule 2026-12-15 --json # 机器可读
+```
+
+**没有快照时按配置推算。** 未来日期本来就没有快照（快照只有那天才生成），
+所以查未来时改为读 `rules/routines.json` 推算那天会是什么安排，输出会标明
+「按配置推算」。快照回答「那天实际是什么」，推算回答「那天将会是什么」——
+两者不混。推算也推不出来时返回退出码 `4`。
+
+**为什么要单独存一份**：删掉「每天重建」是对的，但旧系统那套里真正有价值的一条是
+「每天存档 + 随时能翻历史」。`history` 只存计数摘要且 14 天截断，`metrics.db` 存的是
+执行结果——**两者都答不出「那天到底是什么安排」**。
+
+快照由主链路（`plan`）写，不是旁路——旁路可能没跑，快照不会缺。写失败不阻断提醒，
+但会在 stderr 留一行诊断。
 
 ## 测试
 
@@ -57,6 +99,17 @@ node metrics.mjs today                只看今天
 ```sql
 daily(date, window, label, expect, fired, acked_at, missed)
 PRIMARY KEY (date, window)   -- upsert 幂等，跑几次结果一样
+
+schedule(date, window, label, start, end, expect, one_off, valid_from, valid_until)
+PRIMARY KEY (date, window)   -- 每日快照的 SQL 索引
+```
+
+`daily` 记**执行结果**（响了几次、有没有确认）；`schedule` 记**那天的安排**。
+`sync` 时从快照目录补齐 `schedule`，因此它永远跟着快照走。
+
+```bash
+python rtc.py metrics schedule                 # 覆盖了多少天
+python rtc.py metrics schedule --date 2026-12-15
 ```
 
 **定位：只读旁路**
