@@ -47,6 +47,52 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 2. 改窗口长度时，`expectFires` 必须同步：`(end - start) ÷ intervalMin + 1`，否则 `rtc.py plan` 会拒绝
 3. 回一句：`改成 13:00 了，明天生效。`
 
+**改期（挪到别的日子）用 `postpone` 命令，不要手改 JSON：**
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} postpone --window <id> --to YYYY-MM-DD
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} postpone --window <id> --days 3
+```
+
+- 时刻不变——推迟到明天就是明天同一时间响
+- 今天那次不会再响（记为 `skipped`），明天自动重新创建
+- 一次性窗口推迟 = 挪 `validFrom` / `validUntil`；倒计时窗口推迟 = 挪截止日
+- 周期窗口推迟 = 跳过这几天，之后照常
+- 退出码 `0` → 回一句 `推到明天了，还是那个点。`
+- 退出码 `3` → 配置有冲突，说一句 `这个日子它不响，换一天？`
+- 退出码 `4` → `没有这个提醒项。`
+
+**用户说「推迟」但没给日期时，先问一句「推到哪天？」**——别猜。
+
+### 取消 / 完成 / 永不提醒
+
+三件事，三条命令，**别混用**：
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} cancel   --window <id>
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} complete --window <id> --text "<用户原话>"
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} disable  --window <id>
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
+```
+
+| 用户说 | 用哪条 | 回一句 |
+|---|---|---|
+| 「那个不去了」 | `cancel` | `好，那次取消了。` |
+| 「这件事做完了」 | `complete` | `好，完成了，以后不提醒了。` |
+| 「以后都别提醒我了」 | `disable` | `好，以后不提醒了。` |
+| 「又想起来了」 | `enable` | `好，重新开起来了。` |
+
+区别：
+
+- `cancel` 取消**一个安排**。周期窗口（每天都响的）只能取消今天这一次——
+  它没有「这件事」可取消。一次性 / 倒计时 / 有期限的安排则是彻底取消。
+- `complete` = 完成 + 永久停用。`ack` 只停今天。
+- `disable` 停用**一类**提醒；`enable` 可以撤销。
+
+退出码：`0` 成功 · `3` 参数不合法 · `4` 没有这个窗口（或那天不存在这个窗口）。
+
+**这些命令的 stdout 是空的**——不要把它们当提醒投递出去。结果看退出码，细节在 stderr。
+
 一次性窗口的「改期」= 改 `validFrom` / `validUntil`；窗口本身已经只存在于那一天。
 
 修改时刻表**不需要额外仪式**——它就是一份数据文件，改动在版本控制里可见即可。
@@ -79,6 +125,21 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
   「那天做就行」的事（旅游、生日、还款）用 `end` = 当天 `23:45`——**当天任何时候开机都能收到**
 - `expectFires` 必须是 `1`，否则契约校验会拒绝
 
+**带截止日的事**（版本限时活动、还款日、截止日之前要交的东西）用 `dueDate`：
+
+```json
+{
+  "id": "zzz", "label": "<活动名>",
+  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
+  "ackHints": ["好了"],
+  "dueDate": "<截止日>",
+  "validFrom": "<开始提醒的日期>", "validUntil": "<截止日>"
+}
+```
+
+`rtc.py` 会自动把剩余天数写进文案（「距截止还有 2 天」「明天截止」「最后一天！」）——
+**不要自己算天数，也不要自己写「截止 X/X」**，那是代码的事。
+
 **不要自己建定时任务**，也不要往 `alarms.json` 里手写窗口。
 
 ## §4 响的时候说什么
@@ -94,6 +155,32 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 规律：第 1 次带 `ackHint`，第 2 次起标「第 N 次」，每隔一次重提一次怎么停。不加强度、不加感叹号、不解释系统原理、整段 2–3 行。
 
 **改文案请改 `rtc.py`，不要在这里加措辞规则**——否则两个地方各说一套。
+
+## §4.1 带清单的提醒
+
+窗口带 `checklist` 就是一份要逐项打勾的单子。到点提醒会把整张单子发给你，并标出还剩几项。
+
+```json
+{
+  "id": "pack",
+  "label": "清点并带走",
+  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
+  "ackHints": ["好了"],
+  "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"]
+}
+```
+
+用户说「电饭煲拿到了」时：
+
+```
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --item "电饭煲"
+```
+
+- 退出码 `0` → 简短确认：`打勾了，还剩 3 项`
+- 退出码 `4` → `清单里没有这一项，你说的是哪个？`
+
+`--item` 可以给名称或序号。**不要自己改 `alarms.json`**——勾选状态由 `check` 维护。
+清单全部打完会自动置为完成，之后不再提醒。
 
 ## §5 静默
 
@@ -116,6 +203,8 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 ## §7 禁止
 
 - ❌ 自己判断「现在该不该响」
+- ❌ 手改 `rules/routines.json` 里的日期（推迟用 `postpone` 命令）
+- ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
 - ❌ 读到文件不一致就「顺手修好」
