@@ -36,12 +36,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import sqlite3
 import sys
 import tempfile
+import time as _time
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -112,31 +114,80 @@ def file_digest(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+_LOCK_STALE_S = 30
+_LOCK_WAIT_S = 10
+
+
+@contextlib.contextmanager
+def _exclusive_file_lock(path: Path):
+    """协作式互斥：O_EXCL 原子创建 .lock，包住「比对 -> 写临时文件 -> replace」。
+
+    遵守本机制的写入者被锁串行化；不遵守的外部写入（手改、别的工具）
+    由 expected_digest 的 CAS 检出。锁文件带陈旧超时，进程崩溃不会永久卡死。
+    """
+    lock = path.with_name(path.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = _time.monotonic() + _LOCK_WAIT_S
+    fd = None
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            break
+        except FileExistsError:
+            try:
+                if _time.time() - lock.stat().st_mtime > _LOCK_STALE_S:
+                    lock.unlink()
+                    continue
+            except OSError:
+                pass
+            if _time.monotonic() >= deadline:
+                raise Conflict(f"{path.name} 写入锁等待超时")
+            _time.sleep(0.01)
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        os.close(fd)
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
 def atomic_write(path: Path, data: dict, expected_rev: int | None,
-                 expected_digest: str | None = None) -> None:
+                 expected_digest: str | None = None) -> str:
     """写入前比对 rev 与内容摘要；不一致则抛 Conflict，绝不覆盖别人的写入。
 
     rev 适合程序自己写的账本；摘要适合人会手改的配置文件（时刻表）。
+    返回本次写入内容的摘要——它是「这个操作写出的版本」，供调用方在
+    后续回滚里做 CAS；不能改成重新读磁盘，那会把别人的改动当成自己的基线。
     """
-    if expected_digest is not None and file_digest(path) != expected_digest:
-        raise Conflict(f"{path.name} 在读取之后被改动过")
-    if expected_rev is not None and path.exists():
-        current = load_json(path)
-        if int(current.get("rev", 0)) != expected_rev:
-            raise Conflict(f"rev 已变：期望 {expected_rev}，实际 {current.get('rev')}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    new_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    with _exclusive_file_lock(path):
+        if expected_digest is not None and file_digest(path) != expected_digest:
+            raise Conflict(f"{path.name} 在读取之后被改动过")
+        if expected_rev is not None and path.exists():
+            current = load_json(path)
+            if int(current.get("rev", 0)) != expected_rev:
+                raise Conflict(f"rev 已变：期望 {expected_rev}，实际 {current.get('rev')}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            # 临门再验：把 check 与 replace 之间的窗口缩到一次原子系统调用
+            if expected_digest is not None and file_digest(path) != expected_digest:
+                raise Conflict(f"{path.name} 在写入期间被改动过")
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+    return new_digest
 
 
 def load_routine() -> dict:
@@ -941,7 +992,8 @@ def cmd_postpone(args) -> int:
     for k, v in changes.items():
         w[k] = v
     try:
-        atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+        post_digest = atomic_write(ROUTINE, routine, expected_rev=None,
+                                  expected_digest=digest)
     except Conflict as e:
         print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
@@ -966,7 +1018,10 @@ def cmd_postpone(args) -> int:
                 atomic_write(STATE, state, expected_rev=srev)
                 outcome = "skipped"
             except Conflict as e:
-                # 回滚时刻表：宁可今天照响，也不要明天没有
+                # 回滚时刻表：宁可今天照响，也不要明天没有。
+                # 守卫必须是「本次第 1 步写入的那个版本」(post_digest)：
+                # 推迟前的 digest 必然不匹配（回滚永远失败），回滚时重读的
+                # 当前值又会把别人的并发改动当成自己的基线而覆盖掉。
                 for k, (present, val) in old_values.items():
                     if present:
                         w[k] = val
@@ -974,9 +1029,15 @@ def cmd_postpone(args) -> int:
                         w.pop(k, None)
                 try:
                     atomic_write(ROUTINE, routine, expected_rev=None,
-                                 expected_digest=digest)
-                except Conflict:
-                    pass
+                                 expected_digest=post_digest)
+                except Conflict as rb_err:
+                    print(
+                        f"postpone: 状态冲突（{e}），回滚被拒（{rb_err}）——"
+                        f"部分应用：时刻表已推迟到 {target.isoformat()}，"
+                        f"今日状态未更新；请人工核对后再重试",
+                        file=sys.stderr,
+                    )
+                    return 3
                 print(f"postpone: 状态冲突（{e}），已回滚，未推迟", file=sys.stderr)
                 return 2
         else:
