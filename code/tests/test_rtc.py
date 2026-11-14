@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -1154,7 +1156,9 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
 
     真实竞态：推迟先写时刻表（第 1 步成功），随后另一个进程改了别的窗口；
     再写状态时冲突，触发回滚。回滚若用「当前磁盘摘要」当守卫，会把别人的
-    改动一起抹掉。正确做法是回滚用「改之前抓的摘要」，冲突即放弃写入。
+    改动一起抹掉；但用「推迟前摘要」也不行——推迟自己已经写过文件，
+    那个摘要必然不匹配，回滚永远失败却谎报成功。正确做法是用
+    「本次操作第 1 步写入后的版本摘要」做 CAS，冲突即如实报部分应用。
     """
 
     def setUp(self):
@@ -1196,15 +1200,69 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
         rtc.atomic_write = fake
         self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
 
-        rc = rtc.cmd_postpone(argparse.Namespace(
-            window="wake", to=None, days=1, deadline=False,
-            now="2026-05-10T08:00:00+08:00"))
-        self.assertEqual(rc, 2, "状态冲突应触发回滚并返回 2")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = rtc.cmd_postpone(argparse.Namespace(
+                window="wake", to=None, days=1, deadline=False,
+                now="2026-05-10T08:00:00+08:00"))
+        self.assertEqual(rc, 3, "并发编辑使回滚 CAS 失败，应报『部分应用』(rc=3)")
+        self.assertIn("部分应用", err.getvalue(), "诊断不得谎报『已回滚』")
 
         rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
         report = next(x for x in rb["alarmWindows"] if x["id"] == "report")
         self.assertEqual(report["start"], "15:00",
                          "回滚不得覆盖并发改过的『助理汇报』（15:00）")
+        wake = next(x for x in rb["alarmWindows"] if x["id"] == "wake")
+        self.assertEqual(wake.get("skipDates"), ["2026-05-10"],
+                         "部分应用：推迟确实留在时刻表里，必须如实告知")
+
+    def test_rollback_restores_without_concurrent_edit(self):
+        """审计发现 ②：没有并发编辑时，回滚必须真的把推迟撤销。
+
+        旧实现用推迟前 digest 做回滚守卫，而推迟本身已改过文件，
+        摘要必然不匹配 -> 回滚被拒却被吞掉 -> 报『已回滚』而推迟残留。
+        """
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        state_before = json.loads(rtc.STATE.read_text(encoding="utf-8"))
+
+        calls = {"n": 0}
+        orig = rtc.atomic_write
+
+        def fake(path, data, expected_rev=None, expected_digest=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return orig(path, data, expected_rev, expected_digest)
+            if path == rtc.STATE:
+                raise rtc.Conflict("injected: state changed concurrently")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = fake
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = rtc.cmd_postpone(argparse.Namespace(
+                window="wake", to=None, days=1, deadline=False,
+                now="2026-05-10T08:00:00+08:00"))
+        self.assertEqual(rc, 2, "状态冲突且无并发编辑时应成功回滚")
+        self.assertIn("已回滚", err.getvalue())
+
+        rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+        wake = next(x for x in rb["alarmWindows"] if x["id"] == "wake")
+        self.assertNotIn("skipDates", wake, "推迟必须被撤销，不能残留")
+        self.assertEqual(json.loads(rtc.STATE.read_text(encoding="utf-8")),
+                         state_before, "今日状态不应被改动")
+
+    def test_cas_rejects_edit_between_check_and_replace(self):
+        """审计要求：check 与 replace 之间被外部改写时不得静默覆盖。"""
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        orig_digest = rtc.file_digest(rtc.ROUTINE)
+        r = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+        with self.assertRaises(rtc.Conflict):
+            rtc.atomic_write(rtc.ROUTINE, r, expected_rev=None,
+                             expected_digest="0" * 64)
+        self.assertEqual(rtc.file_digest(rtc.ROUTINE), orig_digest,
+                         "守卫不匹配时文件必须一字未动")
 
 
 if __name__ == "__main__":
