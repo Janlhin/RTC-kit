@@ -15,6 +15,10 @@ description: 闹钟门控。判断「该不该响」由 code/rtc.py 完成，本
 
 不要读 `tasks.md`、`AGENTS.md`、`MEMORY.md`、`HEARTBEAT.md`。多读一个文件就多一份延迟，也多一次判断错误的可能。
 
+## §0.5 唯一可改的文件
+
+只有 `<workspace>/rules/routines.json` 是运行时配置。**绝不**打开或手改任何带 `.example`、`.md` 后缀的文件（如 `rules/routines.example.md`、`rules/routines.md`）——那些是模板与文档，改了不会生效，还会让你误以为改好了。本技能是 `rules/routines.json` 的**唯一权威**：其他日常类技能（daily-routine 等）不修改时刻表，遇到改时间 / 改期请回到本技能走命令。所有改动只通过 `rtc.py` 的子命令完成。
+
 ## §1 用户说「起了 / 好了 / 别响了」
 
 先查有没有正在响的窗口：
@@ -43,9 +47,10 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} ack --window <id> --tex
 
 v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改它会让已确认的记录失去意义。
 
-1. 改 `rules/routines.md` 里对应窗口的时间（`HH:MM`），并同步 `rules/routines.json`（机器可读的那份）
-2. 改窗口长度时，`expectFires` 必须同步：`(end - start) ÷ intervalMin + 1`，否则 `rtc.py plan` 会拒绝
-3. 回一句：`改成 13:00 了，明天生效。`
+1. 改**时刻**用 `set-time` 命令（不要手改 JSON）：
+   `python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} set-time --window <id> --start HH:MM [--end HH:MM]`
+2. 回一句：`改成 13:00 了，明天生效。`
+   `set-time` 只写时刻表，下次 `plan` 生效；今天已生成的窗口不变。
 
 **改期（挪到别的日子）用 `postpone` 命令，不要手改 JSON：**
 
@@ -95,7 +100,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 一次性窗口的「改期」= 改 `validFrom` / `validUntil`；窗口本身已经只存在于那一天。
 
-修改时刻表**不需要额外仪式**——它就是一份数据文件，改动在版本控制里可见即可。
+修改时刻表**只能由 `rtc.py` 的命令完成**（`set-time` / `postpone` / `disable` / `enable`）。`rules/routines.json` 是唯一可改的文件，**模型绝不手改**它，也不碰任何 `*.example` / `*.md` 模板。
 但用户若明确要求过「改之前先问我」，那就照做：那是用户的边界，不是契约的规定。
 
 ## §3 一次性提醒
@@ -207,6 +212,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 - ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
+- ❌ 打开或手改任何名字带 `.example` / `.md` 的文件（`rules/routines.example.md`、`rules/routines.md` 都是模板，不是运行配置）
 - ❌ 读到文件不一致就「顺手修好」
 - ❌ 连续响超过 `expectFires` 次（到上限就判 missed）
 - ❌ 在非窗口时间发任何消息

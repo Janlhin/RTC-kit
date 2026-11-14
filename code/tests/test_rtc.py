@@ -1265,5 +1265,57 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
                          "守卫不匹配时文件必须一字未动")
 
 
+class TestSetTime(RtcCase):
+    """set-time：模型改窗口时刻走命令，而不是手改 JSON"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {"id": "wake", "label": "起床", "start": "08:10", "end": "08:40",
+             "intervalMin": 5, "expectFires": 7, "ackHints": ["起了"]},
+            {"id": "meds", "label": "吃药", "start": "09:00", "end": "09:20",
+             "intervalMin": 5, "expectFires": 5, "ackHints": ["好了"]},
+        ]
+        self.write_routine(r)
+
+    def _routine(self):
+        return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+
+    def test_set_time_changes_start_and_keeps_length(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        rc, out, err = self.cli("set-time", "--window", "wake",
+                                "--start", "07:30", "--end", "08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "", "set-time 由用户触发，stdout 不该被投递出去")
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "wake")
+        self.assertEqual(w["start"], "07:30")
+        self.assertEqual(w["end"], "08:00")
+        self.assertEqual(w["expectFires"], 7, "长度不变，expectFires 仍应为 7")
+
+    def test_set_time_recomputes_expectFires_when_length_changes(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        rc, out, err = self.cli("set-time", "--window", "meds",
+                                "--start", "09:00", "--end", "09:30")
+        self.assertEqual(rc, 0)
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "meds")
+        # 09:30-09:00=30 分钟 -> (30/5)+1 = 7
+        self.assertEqual(w["expectFires"], 7)
+
+    def test_set_time_rejects_end_not_later_than_start(self):
+        rc, out, err = self.cli("set-time", "--window", "wake",
+                                "--start", "09:00", "--end", "08:00")
+        self.assertEqual(rc, 3, "end 不晚于 start 应拒绝")
+        self.assertIn("end", err)
+
+    def test_set_time_rejects_missing_window(self):
+        rc, out, err = self.cli("set-time", "--window", "nope", "--start", "07:30")
+        self.assertEqual(rc, 4, "不存在的窗口应返回 4")
+
+    def test_set_time_rejects_bad_format(self):
+        rc, out, err = self.cli("set-time", "--window", "wake", "--start", "730")
+        self.assertEqual(rc, 3, "非法 HH:MM 应返回 3")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
