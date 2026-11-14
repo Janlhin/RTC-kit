@@ -112,6 +112,25 @@
           "type": "string",
           "format": "date",
           "description": "该窗口到哪一天失效（含）。省略 = 无限期。一次性提醒 = validFrom 与 validUntil 同日"
+        },
+        "checklist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "该窗口要逐项打勾的清单。给了就按清单提醒：文案带进度，未完成项逐条列出；每项的 id 按序号自动生成（1、2、3…）"
+        },
+        "skipDates": {
+          "type": "array",
+          "items": { "type": "string", "format": "date" },
+          "description": "这些日期不响这个窗口。给周期窗口用——推迟某一天时记在这里（否则周期窗口会继续每天响）"
+        },
+        "disabled": {
+          "type": "boolean",
+          "description": "true = 永久停用这个窗口：以后任何日期都不生成。用于「以后别提醒我了」与「这件事完成了」。省略 = 启用"
+        },
+        "dueDate": {
+          "type": "string",
+          "format": "date",
+          "description": "截止日。给了就按倒计时提醒：文案自动带「距截止还有 N 天」，每天只提醒一次（expectFires 固定为 1），并从 validFrom 起每天重新提醒直到 dueDate 当天。剩余天数由代码算，不由模型判断"
         }
       },
       "allOf": [

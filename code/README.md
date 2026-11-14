@@ -17,8 +17,16 @@ python rtc.py --workspace <dir> due      # 该响就打印文案，不该响就�
 python rtc.py --workspace <dir> ack      # 写入确认
 python rtc.py --workspace <dir> status   # 人读 / --json 机器读
 python rtc.py --workspace <dir> metrics  # sync / report / schedule
-python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日程
+python rtc.py --workspace <dir> check --window <ID> --item <名称或序号>   # 清单打勾
+python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日程（含执行结果）
 python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
+python rtc.py --workspace <dir> history  2026-12-15      # 查那天的执行结果
+python rtc.py --workspace <dir> history  --month 2026-12 # 那个月的结果汇总
+python rtc.py --workspace <dir> postpone travel --to 2026-12-16  # 把提醒挪到别的日子
+python rtc.py --workspace <dir> cancel   travel                # 取消一个安排
+python rtc.py --workspace <dir> complete travel --text "打完了"  # 完成 + 停用
+python rtc.py --workspace <dir> disable  tea                   # 永不提醒
+python rtc.py --workspace <dir> enable   tea                   # 又想起来了
 ```
 
 契约：**stdout 为空即静默**；诊断信息全部走 stderr；退出码 `0` 正常 / `2` 状态冲突 / `3` 校验失败 / `4` 无匹配窗口。
@@ -37,14 +45,18 @@ state/schedule/2026-12-15.json
 
 `plan` 成功后写一份，写一次留永久，不清理。每份约 0.5–2 KB，一年不到 1 MB。
 
-一份快照里有：
+一份快照里有两层：
 
 | 字段 | 内容 |
 |---|---|
 | `date` / `planKind` / `timezone` | 那天是哪天、什么日期类型 |
-| `windows[]` | 全部窗口：label、起止时刻、间隔、期望次数、是否一次性、有效期、确认词 |
+| `windows[]` | **计划**：全部窗口：label、起止时刻、间隔、期望次数、是否一次性、有效期、确认词 |
 | `rollcalls[]` | 那天的播报时点与类型（report / follow / summary） |
 | `weeklyChores[]` | 那天的周专项（如周六的洗衣服） |
+| `results{}` | **结果**：窗口 id → 实际状态、响了几次、确认没有、为什么没成 |
+
+`results` 是后补的：`plan` 写下计划，次日归档时把结果**回填**进去。
+补跑 `plan` 也会回填——机器关机跨过日切、次日才开机时，靠这条保证前一天的快照最终也带上结果。
 
 查法：
 
@@ -65,6 +77,145 @@ python rtc.py schedule 2026-12-15 --json # 机器可读
 
 快照由主链路（`plan`）写，不是旁路——旁路可能没跑，快照不会缺。写失败不阻断提醒，
 但会在 stderr 留一行诊断。
+
+## 推迟（改到别的日子）
+
+推迟 = **改日期，不改时间**。一条命令做完三件事：
+
+```bash
+python rtc.py postpone --window travel --to 2026-05-11   # 挪到指定日期
+python rtc.py postpone --window travel --days 3             # 往后推 3 天
+```
+
+| 步骤 | 做什么 |
+|---|---|
+| 1 | 时刻表的日期字段平移到目标日（`start` / `end` 一律不动） |
+| 2 | 今天已生成的那一次标为 `skipped` + 原因 `postponed` |
+| 3 | 明天由 `plan` 从时刻表重新生成——**不需要重建任何定时任务** |
+
+三种窗口的语义：
+
+| 窗口类型 | 推迟做了什么 |
+|---|---|
+| 一次性（`oneOff`） | `validFrom` / `validUntil` 一起挪；今天那次标 `skipped` |
+| 有效期区间 | 整个区间平移，时长不变（`--deadline` 则移动截止日） |
+| 倒计时（`dueDate`） | 截止日挪到目标日，剩余天数由代码重算 |
+| 周期（无日期字段） | 目标日之前的日期写进 `skipDates`，跳过这几天，之后照常 |
+
+**写入时刻表时用内容摘要做守卫**（`file_digest`）：读完之后若有人手改过
+`routines.json`，拒绝写入并退出 `2`。`routines.json` 是人会编辑的文件，
+只用 `rev` 挡不住「读—改—写」之间的手改。
+
+**会拒绝的情况**（退出码 `3`），宁可当场报错也不「推迟成功但明天不响」：
+
+- 目标日期不晚于今天
+- 目标日的日期类型与该窗口的 `dateTypes` 冲突（例如窗口只在工作日生效，却推到周六）
+- 目标日是显式禁用的日期类型（`weekendAlarms` / `holidayAlarms` 为 `false`）
+
+`postpone` 的 **stdout 保持为空**：它由用户交互触发，不是定时任务，不该被投递出去。
+结果看退出码，细节在 stderr。
+
+## 取消 / 完成 / 永不提醒
+
+三个不同意图，三条命令：
+
+| 用户说 | 命令 | 效果 |
+|---|---|---|
+| 「那个不去了」 | `cancel` | 取消**一个安排** |
+| 「这件事做完了」 | `complete` | 记录完成 + 永久停用 |
+| 「以后都别提醒我了」 | `disable` | 永久停用**一类**提醒（`enable` 可撤销） |
+
+### cancel 对不同窗口的含义不同
+
+| 窗口类型 | cancel 的效果 |
+|---|---|
+| 一次性（`oneOff`） | 这件事不做了 → 彻底不生成 |
+| 倒计时（`dueDate`） | 截止日截断到今天 → 以后不再生成 |
+| 有效期区间 | 有效期截断到今天 → 以后不再生成 |
+| 周期（无限期） | **只取消今天这一次**，明天照常 |
+
+最后一格是重点：周期窗口没有「这件事」可以取消——它每天都在响。
+要永久停用请用 `disable`。
+
+`cancel --date YYYY-MM-DD` 取消未来某天的那次。先检查那天确实有这个窗口，
+不存在则退 `4` 并说明——否则「取消」会静默无效。
+
+### complete 与 ack 的区别
+
+- `ack` = 「这次我知道了，别再响了」→ 只停今天，明天照常
+- `complete` = 「这件事做完了，以后也不用提醒」→ 记录完成 + 永久停用
+
+### 契约
+
+| 字段 | 位置 | 含义 |
+|---|---|---|
+| `disabled` | `routine.alarmWindows[]` | `true` = 永久停用，任何日期都不生成 |
+| `disabled` | `alarm-state.windows[]` | 状态快照里的记录 |
+| `cancelled` | `alarm-state` 的 `state` 枚举 | 新终态：被用户取消 |
+| `cancelledAt` | `alarm-state.windows[]` | 被取消的时刻 |
+
+全部窗口都被停用时，那一天是**合法空日**（静默），不是配置错误。
+
+`cancelled` 与 `missed` 的区别很重要：被取消不是漏响，所以
+`self_check` 不会把它报成「整段没响」（归档里保留 `missedReason: cancelled`）。
+
+### stdout 约定
+
+`cancel` / `complete` / `disable` / `enable` / `check` 的 **stdout 保持为空**：
+它们由用户交互触发，不是定时任务，不该被投递出去。结果看退出码，细节在 stderr。
+
+## 查执行结果：推迟 / 取消 / 未完成留不留档
+
+**都留档，而且是永久的。**
+
+```bash
+python rtc.py history 2026-11-13            # 那天的执行结果
+python rtc.py history  --month 2026-11      # 那个月的汇总
+python rtc.py history  2026-11-13 --json    # 机器可读
+```
+
+输出：
+
+```
+2026-11-13 的执行结果（4 项）：
+    取件             已跳过（推迟到别处）
+    临时会议           已取消（被取消）
+    没做完的事          漏响（窗口过期）
+    正常响的           已送达（一次性，无需确认），响 1 次
+```
+
+`schedule` 也会在窗口行后面直接带出结果，两个命令互补：
+
+| 命令 | 回答什么 |
+|---|---|
+| `schedule <date>` | 那天**计划**了什么（现在会顺带显示结果） |
+| `history <date>` | 那天**实际**怎么了 |
+
+### 三层存储的分工
+
+```
+state/alarms.json      当天状态 + 14 天执行摘要   ← 主链路当前状态
+state/schedule/*.json  每日完整快照（计划 + 结果）  ← 永久历史存档
+metrics.db             统计索引，可缺失            ← 旁路
+```
+
+**一年后回来查得到**，靠的是 `state/schedule/`——它不受 14 天截断影响。
+
+`metrics.db` 的 `daily` 表也记这些，但它是旁路（要有人跑 `sync`），
+`schedule` 表是快照的 SQL 索引。快照才是权威存档。
+
+### 归档会记哪些状态
+
+| 状态 | 含义 | `missedReason` |
+|---|---|---|
+| `delivered` | 一次性提醒已送达 | — |
+| `acked` | 已确认 | — |
+| `skipped` | 被跳过 | `postponed` / `late_plan` |
+| `cancelled` | 被用户取消 | `cancelled` |
+| `missed` | 没响成 | `window_expired` / `day_rollover` |
+
+`skipped` / `cancelled` / `missed` 三者都保留原因——**推迟、取消、漏响是三种不同的事**，
+查账时要能分开看。
 
 ## 测试
 
