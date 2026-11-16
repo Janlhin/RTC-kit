@@ -1,11 +1,17 @@
 # code — 确定性脚本
 
-这一层只放**不依赖模型**的代码。两个文件，职责不同：
+这一层只放**不依赖模型**的代码。`rtc.py` 是入口，实现按职责分成四个模块 + 一个 Node 旁路：
 
 | 文件 | 角色 | 依赖 |
 |---|---|---|
-| `rtc.py` | 提醒主链路：`plan` / `due` / `ack` / `status` / `metrics` | Python 3.10+，仅标准库 |
+| `rtc.py` | 兼容入口（薄壳）：`python rtc.py …` 与 `import rtc` 都照旧 | Python 3.10+，仅标准库 |
+| `rtc_core.py` | 契约校验、锁与原子写、`plan` / `due` / `ack` / 改期类命令、CLI 与 `main()` | 仅标准库 |
+| `rtc_archive.py` | 每日多盘 zip 备份、按天 git 归档 | 仅标准库 |
+| `rtc_metrics.py` | 指标账本：建表 / 同步 / 导出 / report | 仅标准库 |
+| `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
+
+为什么 `rtc.py` 只有几十行：`import rtc` 拿到的是 `rtc_core` 这个模块对象（`sys.modules` 别名），所以 `rtc_due.py` / `rtc_plan.py` 调 `rtc.main()`、以及测试里替换 `rtc.atomic_write` 这类动作全部照旧有效。**不要**把它改回 `from rtc_core import *`——那样会变成两个命名空间，替换失效。
 
 ## rtc.py
 
