@@ -42,6 +42,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time as _time
@@ -878,6 +879,7 @@ BACKUP_FILES = (
 def backup_config() -> tuple[list[Path], int]:
     """只认 rules/backup.json —— 不自己扫盘。
 
+
     自动扫盘会在别人的机器上悄悄往不认识的盘写文件；测试也会因此污染真实磁盘。
     目标盘由安装器（install.py）一次性写好，用户随时可改。
     """
@@ -954,7 +956,10 @@ def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], li
 
 
 def daily_backup(now: datetime) -> list[str]:
-    """每天跑一次（由 plan 调）。成功静默，失败给一行话。"""
+    """每天跑一次（由 plan 调）：本地多盘 zip + git 私人仓库，两种都配了就都做。
+
+    成功静默，失败给一行话。
+    """
     today = now.date().isoformat()
     mark = WORKSPACE / BACKUP_MARK
     try:
@@ -964,10 +969,18 @@ def daily_backup(now: datetime) -> list[str]:
         pass
 
     targets, keep = backup_config()
-    if not targets:
-        return []  # 没有第二块盘，静默；手动 backup 会明确告诉你
+    has_git = bool(git_archive_config())
+    if not targets and not has_git:
+        return []  # 一样都没配，静默；手动 backup / gitarchive 会明确告诉你
 
-    written, errors = backup_now(targets, keep, today)
+    written, errors = ([], [])
+    if targets:
+        written, errors = backup_now(targets, keep, today)
+    did_git = False
+    if has_git:
+        did_git, git_errors = git_archive(now)
+        errors = list(errors) + [f"git: {e}" for e in git_errors]
+
     try:
         mark.parent.mkdir(parents=True, exist_ok=True)
         mark.write_text(
@@ -976,6 +989,7 @@ def daily_backup(now: datetime) -> list[str]:
                     "date": today,
                     "at": now.isoformat(timespec="seconds"),
                     "written": len(written),
+                    "git": did_git,
                     "errors": errors,
                 },
                 ensure_ascii=False,
@@ -1007,6 +1021,159 @@ def cmd_backup(args) -> int:
         print(f"backup: {e}", file=sys.stderr)
     if not written:
         return 3
+    return 0
+
+
+# ---------------------------------------------------------------- git 存档
+# 压缩包只防「盘坏」，不防「机器没了」。这条路把档案按天提交进一个私人 git 仓库，
+# 远端随便写：GitHub / Gitee / GitLab / 自建 / 本地裸库都行（URL 或路径原样交给 git）。
+
+def git_archive_config() -> dict:
+    """读 rules/backup.json 里的 git 段。没有就返回空 dict（=不启用）。"""
+    cfg = WORKSPACE / BACKUP_CFG
+    if not cfg.exists():
+        return {}
+    try:
+        data = load_json(cfg)
+    except (Validation, ValueError, TypeError, OSError):
+        return {}
+    g = (data or {}).get("git")
+    return g if isinstance(g, dict) else {}
+
+
+def _git(args: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str]:
+    try:
+        p = subprocess.run(
+            ["git", "-c", "user.name=RTC", "-c", "user.email=rtc@localhost",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
+        )
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, f"git 调用失败：{e}"
+
+
+def git_archive(now: datetime) -> tuple[bool, list[str]]:
+    """把今天的档案复制进本地镜像仓库并推送到远端。
+
+    返回 (有没有做事, 错误行)。没有配置 / 没有变化 都算「没做事」，静默。
+    """
+    g = git_archive_config()
+    if not g:
+        return False, []
+
+    repo = Path(g.get("dir") or (Path.home() / "RTC-archive"))
+    branch = str(g.get("branch") or "main")
+    remotes: list[str] = []
+    if isinstance(g.get("remotes"), list):
+        remotes = [str(x) for x in g["remotes"] if str(x).strip()]
+    elif str(g.get("remote") or "").strip():
+        remotes = [str(g["remote"]).strip()]
+    remotes = remotes or ["origin"]
+
+    if _git(["--version"], Path.cwd())[0] != 0:
+        return True, ["git 不可用：先装 git 再来（装好后重跑一次即自动补推）"]
+
+    errors: list[str] = []
+    try:
+        repo.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return True, [f"git 存档目录建不出来（{repo}）：{e}"]
+
+    if not (repo / ".git").exists():
+        rc, out = _git(["init"], repo)
+        if rc != 0:
+            return True, [f"git init 失败：{out}"]
+        _git(["branch", "-M", branch], repo)
+
+    today = now.date().isoformat()
+    day_dir = repo / "archive" / today
+    members: list[tuple[Path, str]] = []
+    for rel in BACKUP_FILES:
+        p = WORKSPACE / rel
+        if p.is_file():
+            members.append((p, rel))
+    for sub in ("state/schedule", "state/backups"):
+        d = WORKSPACE / sub
+        if d.is_dir():
+            for f in sorted(d.glob("*.json")):
+                members.append((f, f"{sub}/{f.name}"))
+    if not members:
+        return False, []
+
+    try:
+        for src, rel in members:
+            dst = day_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+    except OSError as e:
+        return True, [f"复制档案进 git 目录失败：{e}"]
+
+    rc, out = _git(["add", "-A"], repo)
+    if rc != 0:
+        return True, [f"git add 失败：{out}"]
+    rc, out = _git(["status", "--porcelain"], repo)
+    if rc != 0:
+        return True, [f"git status 失败：{out}"]
+    if not out.strip():
+        return False, []  # 今天已经存过，且内容没变
+
+    rc, out = _git(["commit", "-m", f"archive {today}"], repo)
+    if rc != 0:
+        return True, [f"git commit 失败：{out}"]
+
+    for remote in remotes:
+        target = remote
+        if remote not in ("origin",) and ("://" in remote or remote.startswith("git@")
+                                          or remote.startswith("ssh:") or remote.endswith(".git")):
+            rc, out = _git(["remote", "add", "origin", remote], repo)
+            if rc != 0:  # 已经有 origin 了，改掉
+                _git(["remote", "set-url", "origin", remote], repo)
+            target = "origin"
+        rc, out = _git(["push", target, f"HEAD:{branch}"], repo)
+        if rc != 0:
+            # 远端被别的机器推过（或 force-push 过）：先 rebase 再试一次
+            _git(["pull", "--rebase", target, branch], repo)
+            rc2, out2 = _git(["push", target, f"HEAD:{branch}"], repo)
+            if rc2 != 0:
+                errors.append(f"推送到 {remote} 失败：{out2[-300:] or out[-300:]}")
+    return True, errors
+
+
+def cmd_gitarchive(args) -> int:
+    g = git_archive_config()
+    if args.dir or args.remote:
+        g = dict(g)
+        if args.dir:
+            g["dir"] = args.dir
+        if args.remote:
+            g["remotes"] = [args.remote]
+    if not g:
+        print("gitarchive: 还没配置。在 rules/backup.json 里写 \"git\": "
+              "{\"dir\": \"...\", \"remotes\": [\"git@github.com:you/rtc-data.git\"]}", file=sys.stderr)
+        return 3
+    cfg = WORKSPACE / BACKUP_CFG
+    data = {}
+    if cfg.exists():
+        try:
+            data = load_json(cfg) or {}
+        except (Validation, ValueError, TypeError, OSError):
+            data = {}
+    data["git"] = g
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"gitarchive: 配置写不进去：{e}", file=sys.stderr)
+        return 3
+
+    did, errors = git_archive(datetime.now().astimezone())
+    for e in errors:
+        print(f"gitarchive: {e}", file=sys.stderr)
+    if errors:
+        return 3
+    print(f"gitarchive: {'已提交并推送' if did else '内容没变化，跳过'}")
     return 0
 
 
@@ -2467,6 +2634,11 @@ def main(argv=None) -> int:
     sb.add_argument("--to", action="append", help="目标目录，可重复；不写则自动挑非源盘")
     sb.add_argument("--keep", type=int, default=0, help="每个盘保留几份（默认取配置，30）")
     sb.set_defaults(func=cmd_backup)
+
+    sg = sub.add_parser("gitarchive", help="把档案按天提交进私人 git 仓库并推送（GitHub/Gitee/自建都行）")
+    sg.add_argument("--dir", help="本地镜像仓库目录，默认 ~/RTC-archive")
+    sg.add_argument("--remote", help="远端地址：https / ssh / 本地裸库路径都可以")
+    sg.set_defaults(func=cmd_gitarchive)
 
     args = p.parse_args(argv)
     if args.workspace:

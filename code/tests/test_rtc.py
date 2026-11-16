@@ -1842,6 +1842,70 @@ class TestBackup(RtcCase):
             shutil.rmtree(target, ignore_errors=True)
 
 
+class TestGitArchive(RtcCase):
+    """压缩包只防「盘坏」，不防「机器没了」：档案要能进私人 git 仓库。"""
+
+    def _bare(self) -> Path:
+        d = Path(tempfile.mkdtemp(prefix="rtc-bare-")) / "data.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(d)],
+                       check=True, capture_output=True)
+        self.addCleanup(shutil.rmtree, d.parent, True)
+        return d
+
+    def _config(self, bare: Path) -> Path:
+        vault = self.ws.parent / "vault"
+        (self.ws / "rules" / "backup.json").write_text(json.dumps({
+            "targets": [],
+            "keep": 30,
+            "git": {"dir": str(vault), "remotes": [str(bare)], "branch": "main"},
+        }), encoding="utf-8")
+        return vault
+
+    def test_commits_and_pushes_today_archive(self):
+        bare = self._bare()
+        self._config(bare)
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+
+        rc, out, err = self.cli("gitarchive")
+        self.assertEqual(rc, 0, f"{out} {err}")
+
+        log = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("archive", log.stdout, "远端没有收到提交")
+        tree = subprocess.run(["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("rules/routines.json", tree.stdout)
+        self.assertIn("state/alarms.json", tree.stdout)
+
+        # 再跑一次：没有变化就不该再产生提交，也不该报错
+        rc2, out2, _ = self.cli("gitarchive")
+        self.assertEqual(rc2, 0)
+        log2 = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(len(log2.stdout.strip().splitlines()),
+                         len(log.stdout.strip().splitlines()), "内容没变却又提交了一次")
+
+    def test_plan_drives_git_archive_daily(self):
+        bare = self._bare()
+        self._config(bare)
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+
+        log = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("archive", log.stdout, "plan 没把档案推进 git")
+
+    def test_unpushed_remote_is_reported(self):
+        """远端写错不能假装成功——否则用户以为有备份，其实一个字节都没出去。"""
+        self._config(Path(tempfile.mkdtemp(prefix="rtc-nope-")) / "no-such-repo.git")
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        rc, out, err = self.cli("gitarchive")
+        self.assertNotEqual(rc, 0, "推不上去还返回 0，等于假成功")
+        self.assertIn("失败", err)
+
+
 class TestOnceScriptSeals(RtcCase):
     """rtc_once.py 是我们自己的写入口，不能让自己的文件被报成「有人手改」。"""
 

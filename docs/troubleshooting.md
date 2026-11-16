@@ -264,3 +264,67 @@ Copy-Item -Force "C:\Temp\rtc-restore\rules\routines.json" "C:\Users\<你>\RTC\r
 
 > 备份是**整份快照**，不是增量。恢复时先解开看一眼 `state/schedule/` 里有哪些日期，
 > 再决定整体盖回还是只挑需要的日子复制过去。
+
+## 8. 第二种备份：把档案提交进私人 git 仓库
+
+zip 只防「盘坏」，不防「机器没了 / 换电脑」。想再稳一层，就把档案按天提交进一个**私人**仓库。
+远端随便写——GitHub、Gitee、GitLab、自建 Gitea、局域网裸库、甚至 U 盘上的 `git init --bare`，
+用的都是同一条命令。
+
+### 8.1 配一次
+
+在 `rules/backup.json` 里加一段 `git`（和 `targets` 并存，两个都会跑）：
+
+```json
+{
+  "targets": ["D:\\RTC-Backup", "E:\\RTC-Backup"],
+  "keep": 30,
+  "git": {
+    "dir": "C:\\Users\\<你>\\RTC-archive",
+    "remotes": ["git@github.com:<你>/rtc-archive.git"],
+    "branch": "main"
+  }
+}
+```
+
+`dir` 是本地镜像仓库（每天往 `archive/<日期>/` 里放一份档案，提交后推送）。
+`remotes` 可以写多个，一次推多处。
+
+### 8.2 各种仓库怎么写地址
+
+| 仓库 | remotes 里写什么 | 认证 |
+|---|---|---|
+| GitHub 私有库 | `https://github.com/<你>/rtc-archive.git` | Fine-grained token，或 SSH |
+| Gitee | `https://gitee.com/<你>/rtc-archive.git` | 私人令牌，或 SSH |
+| GitLab | `https://gitlab.com/<你>/rtc-archive.git` | Project access token，或 SSH |
+| 自建 Gitea | `https://你的域名/<你>/rtc-archive.git` | 同上 |
+| SSH（任意平台） | `git@github.com:<你>/rtc-archive.git` | 已配好的 ssh key |
+| 局域网/本机裸库 | `D:\\RTC-archive.git` 或 `\\\\nas\\rtc\\archive.git` | 无 |
+
+> https 走的是系统 git 的凭据：先把 token 存进 Git Credential Manager，或在 URL 里带
+> `https://<user>:<token>@host/...`（后者会留在配置文件里，别提交到任何仓库）。
+
+### 8.3 跑一次 / 看结果
+
+```bash
+python code/rtc.py --workspace <工作区> gitarchive
+python code/rtc.py --workspace <工作区> gitarchive --remote "git@gitee.com:<你>/rtc-archive.git"
+```
+
+成功会说「已提交并推送」；内容没变化会说「内容没变化，跳过」；推不上去会返回**退出码 3**
+并说明原因——**不会假装成功**。
+
+每天 `rtc-plan` 会自己跑一次（和 zip 同一处，同一天只跑一次），平时完全静默。
+
+### 8.4 从仓库里恢复
+
+```bash
+git clone <仓库地址> C:\Temp\rtc-restore
+# archive/2026-11-16/ 就是一个完整的当天快照
+```
+
+挑需要的日期，把 `rules/routines.json` 和 `state/` 盖回工作区即可。
+
+> 隐私提醒：这个仓库里会有你的作息、提醒文案、确认原文（`alarms.json` 的 `ackText`）。
+> **务必用私有库**；公开库等于把这些发到互联网上。
+
