@@ -443,7 +443,16 @@ def run(args: argparse.Namespace) -> int:
     print("\n[install] 1/5 安装入口脚本")
     if not dry_run:
         scripts_dir.mkdir(parents=True, exist_ok=True)
-    to_copy = ["rtc.py", "rtc_plan.py", "rtc_due.py", "rtc_once.py"]
+    to_copy = [
+        "rtc.py",
+        "rtc_core.py",
+        "rtc_archive.py",
+        "rtc_metrics.py",
+        "rtc_brief.py",
+        "rtc_plan.py",
+        "rtc_due.py",
+        "rtc_once.py",
+    ]
     for fname in to_copy:
         src = code_src / fname
         if not src.is_file():
