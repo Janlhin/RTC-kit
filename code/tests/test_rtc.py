@@ -1701,6 +1701,9 @@ class TestHandEditedRoutine(RtcCase):
         rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertNotIn("被 RTC 之外", out, "第一次 plan 只是建印章，不该报警")
+        # 窗口数从印章里取，别写死——不同基线的时刻表窗口数并不一样
+        sealed = json.loads((self.ws / "state" / "routine-seal.json").read_text(encoding="utf-8"))
+        was = sealed["windows"]
 
         hand = {
             "version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00",
@@ -1716,7 +1719,7 @@ class TestHandEditedRoutine(RtcCase):
         rc, out, err = self.cli("plan", "--force", now="2026-11-16T08:01:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertIn("被 RTC 之外的东西改过", out)
-        self.assertIn("4", out)
+        self.assertIn(f"上次程序写出 {was} 个窗口", out)
         self.assertIn("现在是 1", out)
 
         backups = sorted((self.ws / "state" / "backups").glob("routines.handedit-*.json"))
