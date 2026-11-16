@@ -112,7 +112,27 @@ python -m unittest discover -s code/tests -p "test_*.py"
 python install.py --workspace ./_smoke-ws --dry-run
 ```
 
-`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。
+`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。`-Fast` 只跑前八项（pre-commit 用），`-SkipStatic` 只跑后两项（CI 的 test 层用）。
+
+### 校验要用哪个 python
+
+`ruff`、`mypy`、`coverage` 不在标准库里，`verify.ps1` 取解释器的顺序是：
+
+1. `$env:PYTHON`（显式指定，优先级最高）
+2. 仓库内 `.venv`（Windows 找 `.venv\Scripts\python.exe`，其他平台找 `.venv/bin/python`）
+3. PATH 上的 `python`
+
+前两条都不满足时，如果 PATH 上的 python 没装这些包，会看到 `No module named ruff` —— 那不是门禁坏了，是解释器选错了。本地这样准备一次即可：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install ruff mypy coverage jsonschema
+# 或者用已有的虚拟环境：
+$env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
+```
+
+`git commit` 时 pre-commit 钩子跑的是同一个脚本，所以钩子拦下「No module named ruff」也是这个原因，不是钩子装错了。
+>>>>>>> origin/main
 
 ## 目录一览
 
