@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -86,13 +87,103 @@ def default_skills_dir() -> Path:
     return Path.home() / ".hermes" / "skills"
 
 
+def _ensure_utf8_stdio() -> None:
+    """控制台编码兜底。
+
+    GitHub Actions 的 Windows runner 控制台是 cp1252，打印中文会直接抛
+    UnicodeEncodeError——CI 第一次跑就死在一行 `print("[install] --dry-run：…")`。
+    只在当前编码表示不了中文时才切 UTF-8；中文 Windows 的 cp936 控制台保持原样，
+    免得把它本来正常的显示改成乱码。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        enc = getattr(stream, "encoding", None)
+        if not enc:
+            continue
+        try:
+            "安装".encode(enc)
+            continue
+        except (UnicodeEncodeError, LookupError):
+            pass
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+def _placeholders_for(code_dir: Path, workspace: Path) -> dict:
+    """路径类占位符 → 真实绝对路径。都是「由部署决定」的值，安装时确定性填死。"""
+    return {
+        "{{CODE_DIR}}": str(code_dir),
+        "{{WORKSPACE_DIR}}": str(workspace),
+        "{{STATE_DIR}}": str(workspace / "state"),
+        "{{RULES_DIR}}": str(workspace / "rules"),
+    }
+
+
+def _normalize_separators(text: str, roots: list) -> str:
+    """把 Windows 绝对路径里残留的正斜杠统一成 ``os.sep``。
+
+    模板写作 ``{{CODE_DIR}}/rtc.py``，只做字符串替换会拼出
+    ``C:\\Users\\...\\scripts/rtc.py`` 这种混斜线路径。多数情况下还能跑，
+    但在 cmd、某些工具和日志里会断，也会让人误以为路径拼错了。
+    """
+    if os.sep == "/":
+        return text
+    for root in roots:
+        text = re.sub(
+            re.escape(str(root)) + r"[^ \t\n`\"'）|，。；]*",
+            lambda m: m.group(0).replace("/", os.sep),
+            text,
+        )
+    return text
+
+
 def substitute_skill(template: str, code_dir: Path, workspace: Path) -> str:
-    return (
-        template
-        .replace("{{CODE_DIR}}", str(code_dir))
-        .replace("{{WORKSPACE_DIR}}", str(workspace))
-        .replace("{{STATE_DIR}}", str(workspace / "state"))
-    )
+    """替换路径占位符，产出「可直接照着跑」的现场文本（不留混斜线）。"""
+    values = _placeholders_for(code_dir, workspace)
+    # 先替「占位符 + 斜杠」，再替裸占位符——否则 `{{X}}/sub` 会变成 `dir/sub`
+    for key, val in values.items():
+        template = template.replace(key + "/", val.rstrip("/") + os.sep)
+    for key, val in values.items():
+        template = template.replace(key, val)
+    return _normalize_separators(template, list(values.values()))
+
+
+def remaining_placeholders(text: str) -> list:
+    """还剩哪些 ``{{XXX}}``。
+
+    路径类占位符已由本脚本填死；剩下的都是 `CONTRIBUTING.md` 里「由部署 / 用户
+    决定」的填充项（时区、作息时刻、项目名……），安装器不猜，只提示。
+    """
+    return sorted(set(re.findall(r"\{\{[A-Z][A-Z0-9_]*\}\}", text)))
+
+
+def install_skills(repo: Path, skills_dir: Path, scripts_dir: Path,
+                   workspace: Path, dry_run: bool) -> list:
+    """把仓库里**所有**带 SKILL.md 的技能接地后写进 Harness。
+
+    只装 alarm-clock 是不够的：daily-routine / daily-task-prep / daily-task-manager /
+    deletion-gate 同样引用真实路径，漏装等于让模型手上只有一份能用的说明书。
+    """
+    installed = []
+    for tpl in sorted((repo / "skills").glob("*/SKILL.md")):
+        name = tpl.parent.name
+        text = substitute_skill(tpl.read_text(encoding="utf-8"), scripts_dir, workspace)
+        leftovers = remaining_placeholders(text)
+        dst = skills_dir / name / "SKILL.md"
+        if dry_run:
+            print(f"[install] 将写入技能 {dst}")
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(text, encoding="utf-8")
+            print(f"[install] 已写入技能 {name}")
+        if leftovers:
+            print(f"[install] 提示：{name} 里还有需要人工填的占位符：{'、'.join(leftovers)}")
+        installed.append(name)
+    return installed
 
 
 def run(args: argparse.Namespace) -> int:
@@ -131,20 +222,12 @@ def run(args: argparse.Namespace) -> int:
             shutil.copyfile(src, dst)
             print(f"[install] 已拷贝 {name}")
 
-    tpl = repo / "skills" / "alarm-clock" / "SKILL.md"
-    if tpl.is_file():
-        text = tpl.read_text(encoding="utf-8")
-        if "{{CODE_DIR}}" in text or "{{WORKSPACE_DIR}}" in text or "{{STATE_DIR}}" in text:
-            text = substitute_skill(text, scripts_dir, workspace)
-        dst = skills_dir / "alarm-clock" / "SKILL.md"
-        if args.dry_run:
-            print(f"[install] 将写入（已替换占位符）{dst}")
-        else:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(text, encoding="utf-8")
-            print(f"[install] 已写入技能 {dst}")
+    tpl_root = repo / "skills"
+    if tpl_root.is_dir():
+        names = install_skills(repo, skills_dir, scripts_dir, workspace, args.dry_run)
+        print(f"[install] 技能共 {len(names)} 个：{'、'.join(names)}")
     else:
-        print(f"[install] 找不到技能模板：{tpl}", file=sys.stderr)
+        print(f"[install] 找不到技能模板目录：{tpl_root}", file=sys.stderr)
 
     if routine_path.exists():
         print(f"[install] 工作区已存在配置，跳过脚手架：{routine_path}")
@@ -177,6 +260,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    _ensure_utf8_stdio()
     ap = argparse.ArgumentParser(description="RTC-kit 安装接地器")
     ap.add_argument("--workspace", required=True, help="RTC 工作区目录（rules/routines.json 将在此）")
     ap.add_argument("--harness-scripts-dir", default=None, help="Harness 的 scripts 目录（默认 ~/.hermes/scripts）")

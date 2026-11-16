@@ -1526,5 +1526,113 @@ class TestAckGrace(RtcCase):
 
 
 
+class TestStateCorruption(RtcCase):
+    """状态文件坏掉时必须优雅退出：一行诊断、退出码 3、原文件不被覆盖。
+
+    回归自实机自检（F4）：以前 `alarms.json` 写成 `{oops` 之后，
+    `status` 与 `due` 都直接抛 Traceback 退 1——而 `rtc-due` 每 5 分钟
+    跑一次，等于每 5 分钟给宿主留一条看不懂的失败记录。
+    """
+
+    def test_corrupt_state_status_is_readable_error(self):
+        self.write_routine(base_routine())
+        (self.ws / "state" / "alarms.json").write_text("{oops", encoding="utf-8")
+        rc, out, err = self.cli("status", "--json")
+        self.assertEqual(rc, 3, f"应退 3（校验失败），实际 {rc}")
+        self.assertNotIn("Traceback", err, "不该抛 Traceback")
+        self.assertIn("不是合法 JSON", err)
+        self.assertIn("alarms.json", err)
+
+    def test_corrupt_state_due_keeps_silent_and_file_intact(self):
+        self.write_routine(base_routine())
+        p = self.ws / "state" / "alarms.json"
+        p.write_text("{oops", encoding="utf-8")
+        rc, out, err = self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.assertEqual(rc, 3)
+        self.assertEqual(out, "", "坏文件时该静默，不得输出半截提醒")
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(p.read_text(encoding="utf-8"), "{oops", "坏文件不得被覆盖")
+
+    def test_corrupt_routine_is_readable_error(self):
+        (self.ws / "rules" / "routines.json").write_text("[]", encoding="utf-8")
+        rc, _, err = self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.assertEqual(rc, 3)
+        self.assertNotIn("Traceback", err, "时刻表结构不对时也不该甩 Traceback")
+
+
+class TestPlanForceKeepsRinging(RtcCase):
+    """同日重建（plan --force）不得把正在响的窗口重置。
+
+    回归自实机自检（A3b）：rtc_once.py 每加一条提醒都跑 `plan --force`，
+    若此时正好有窗口在响，fireCount 会被清零、状态回 pending，
+    下一 tick 再响一轮——响的次数上限就形同虚设。
+    """
+
+    def test_force_preserves_ringing_window(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        w = self.window("wake")
+        self.assertEqual(w["fireCount"], 1)
+        self.assertEqual(w["state"], "ringing")
+
+        rc, _, _ = self.cli("plan", "--force", now="2026-11-10T07:01:00+08:00")
+        self.assertEqual(rc, 0)
+        w = self.window("wake")
+        self.assertEqual(w["state"], "ringing", "正在响的窗口被打回 pending")
+        self.assertEqual(w["fireCount"], 1, "fireCount 被清零")
+        self.assertIn("lastFiredAt", w, "丢失 lastFiredAt → 间隔判断失效")
+
+    def test_force_then_due_continues_cadence(self):
+        """重建后再响一次：计数应连续（2），而不是从 1 重来。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.cli("plan", "--force", now="2026-11-10T07:01:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-10T07:05:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("第 2 次", out, f"重建后计数没接上：{out!r}")
+        self.assertEqual(self.window("wake")["fireCount"], 2)
+
+
+class TestPruneExpiredOneOff(RtcCase):
+    """过期的一次性提醒条目要被 plan 清掉，周期窗口一个都不能动。
+
+    回归自实机自检：routines.json 里还留着几天前的一次性窗口，只增不删。
+    """
+
+    def test_expired_oneoff_is_pruned(self):
+        r = base_routine()
+        r["alarmWindows"].append(
+            {"id": "once-old-1400-20261114", "label": "旧提醒", "start": "14:00", "end": "14:04",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "oneOff": True,
+             "validFrom": "2026-11-14", "validUntil": "2026-11-14"})
+        r["alarmWindows"].append(
+            {"id": "once-today-1500", "label": "今天的", "start": "15:00", "end": "15:04",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "oneOff": True,
+             "validFrom": "2026-11-18", "validUntil": "2026-11-18"})
+        self.write_routine(r)
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("已清理过期的一次性提醒", err)
+
+        saved = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        ids = [w["id"] for w in saved["alarmWindows"]]
+        self.assertNotIn("once-old-1400-20261114", ids, "过期的 oneOff 没被清掉")
+        self.assertIn("once-today-1500", ids, "今天的 oneOff 被误删")
+        self.assertIn("wake", ids, "周期窗口被误删")
+
+    def test_future_oneoff_untouched(self):
+        r = base_routine()
+        r["alarmWindows"].append(
+            {"id": "once-future", "label": "以后的", "start": "09:00", "end": "09:04",
+             "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "oneOff": True,
+             "validFrom": "2026-12-01", "validUntil": "2026-12-01"})
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        saved = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        self.assertIn("once-future", [w["id"] for w in saved["alarmWindows"]])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

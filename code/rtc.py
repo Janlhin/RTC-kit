@@ -105,7 +105,23 @@ def set_workspace(path: Path) -> None:
 
 
 def load_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    """读 JSON；读坏了就给一行可读诊断，绝不抛 Traceback 给调度器。
+
+    状态文件被手改坏、写到一半断电、编码被编辑器改掉，都会落到这里。以前
+    `json.JSONDecodeError` 直接冒到 main 之上：`rtc-due` 每 5 分钟抛一次
+    Traceback，宿主只看到「Script exited with code 1」，用户什么也看不懂。
+    现在统一转成 Validation（退出码 3、stderr 一行说清哪个文件哪一行），
+    并且只读不写——坏文件原样保留，留待人工或备份恢复。
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise Validation(
+            f"{path} 不是合法 JSON（第 {e.lineno} 行第 {e.colno} 列：{e.msg}）；"
+            f"该文件未被改动，请从备份恢复或核对是否有手改"
+        ) from None
+    except UnicodeDecodeError as e:
+        raise Validation(f"{path} 不是 UTF-8 编码（{e.reason}）；该文件未被改动") from None
 
 
 def file_digest(path: Path) -> str | None:
@@ -245,14 +261,44 @@ def atomic_write(path: Path, data: dict, expected_rev: int | None,
     return new_digest
 
 
+_ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows")
+
+
 def load_routine() -> dict:
+    """读时刻表并做最小形状校验。
+
+    「JSON 合法但结构不对」（整个文件被写成 `[]`、少了 tzOffset）同样会让
+    plan/due 在后续几行抛 KeyError/TypeError。这里提前拦下来，给一句
+    能照着修的诊断，而不是一个栈。
+    """
     if not ROUTINE.exists():
         raise Validation(f"找不到时刻表：{ROUTINE}")
-    return load_json(ROUTINE)
+    routine = load_json(ROUTINE)
+    if not isinstance(routine, dict):
+        raise Validation(
+            f"{ROUTINE} 顶层应是对象（{{…}}），实际是 {type(routine).__name__}；"
+            f"参考 rules/routines.example.md"
+        )
+    missing = [k for k in _ROUTINE_KEYS if k not in routine]
+    if missing:
+        raise Validation(f"{ROUTINE} 缺字段：{', '.join(missing)}；参考 rules/routines.example.md")
+    if not isinstance(routine.get("alarmWindows"), list):
+        raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
+    return routine
 
 
 def load_state() -> dict | None:
-    return load_json(STATE) if STATE.exists() else None
+    if not STATE.exists():
+        return None
+    state = load_json(STATE)
+    if not isinstance(state, dict):
+        raise Validation(
+            f"{STATE} 顶层应是对象（{{…}}），实际是 {type(state).__name__}；"
+            f"该文件未被改动，请从 state 备份恢复"
+        )
+    if not isinstance(state.get("windows") or [], list):
+        raise Validation(f"{STATE} 的 windows 应是数组；该文件未被改动")
+    return state
 
 
 # ---------------------------------------------------------------- 心跳与自检
@@ -557,13 +603,22 @@ def _migrate_checklist(prev: dict, w: dict) -> None:
 
 
 def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
-    """只增不改：同日同 id 的终态窗口原样带回，避免重建冲掉确认。"""
+    """只增不改：同日同 id 的终态窗口原样带回，避免重建冲掉确认。
+
+    `ringing`（正在响）也算：它带着 fireCount 与 lastFiredAt。
+    同一天重建（`plan --force`）时若把它重置成 pending，下一次 tick 会
+    再响一轮，而 fireCount 是从 0 重新数——上限形同虚设。
+    `rtc_once.py` 每加一条提醒都跑一次 `plan --force`，这条路径是常走的。
+    """
     if not old:
         return fresh
     prev = {w["id"]: w for w in old.get("windows", [])}
     merged = []
     for w in fresh:
         p = prev.get(w["id"])
+        if p and p.get("state") == "ringing":
+            merged.append(p)
+            continue
         keep = bool(p) and p.get("state") in TERMINAL
         if keep and w.get("dueDate") and p.get("state") != "cancelled":
             keep = False          # 倒计时：每天重新开始，直到截止日（但被取消的不重开）
@@ -679,6 +734,18 @@ def cmd_plan(args) -> int:
         f"plan: {today} {kind} {len(windows)} 窗口 / {total} 次，rev={state['rev']}",
         file=sys.stderr,
     )
+
+    # 顺手清掉过期的一次性提醒：只删「oneOff 且 validUntil 已过」的。
+    # 放在 state 写成功之后，且任何冲突都只提示不阻断——清理失败不影响今天照响。
+    try:
+        rdigest = file_digest(ROUTINE)
+        rnow = load_routine()
+        removed = _prune_expired_oneoffs(rnow, today)
+        if removed:
+            _write_routine(rnow, rdigest)
+            print(f"plan: 已清理过期的一次性提醒 {', '.join(removed)}", file=sys.stderr)
+    except (Conflict, Validation) as e:
+        print(f"plan: 清理过期一次性提醒失败（{e}），不影响本次计划", file=sys.stderr)
 
     # 每日快照：主链路写，写一次留永久。失败不阻断提醒，但必须留下诊断。
     try:
@@ -1148,6 +1215,24 @@ CANCELLED_REASON = "cancelled"
 def _write_routine(routine: dict, digest: str | None) -> None:
     """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。"""
     atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+
+
+def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:
+    """删掉已经过期的一次性提醒条目，返回被删的 id。
+
+    一次性窗口只存在于 validFrom~validUntil 那一天，过期后既不会再响、也不会
+    自己消失——不清理就会一直躺在 routines.json 里（实机上还留着 11-14 的那条）。
+    只认「oneOff 且 validUntil 早于今天」；周期窗口、倒计时窗口一律不碰。
+    """
+    defs = routine.get("alarmWindows") or []
+    dead_ids = {
+        w["id"] for w in defs
+        if w.get("oneOff") and (w.get("validUntil") or w.get("validFrom") or "") < today
+    }
+    if not dead_ids:
+        return []
+    routine["alarmWindows"] = [w for w in defs if w.get("id") not in dead_ids]
+    return sorted(dead_ids)
 
 
 def _find_window(routine: dict, wid: str) -> dict | None:
