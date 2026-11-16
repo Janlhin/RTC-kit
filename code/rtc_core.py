@@ -26,7 +26,6 @@ import shutil
 import sys
 import tempfile
 import time as _time
-import uuid as _uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -124,99 +123,111 @@ def file_digest(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-_LOCK_STALE_S = 30
-
 _LOCK_WAIT_S = 10
 
 
-def _lock_token() -> str:
-    """本持有者的唯一令牌：进程号 + 随机串，确保全局唯一、不可预测。"""
-    return f"{os.getpid()}.{_uuid.uuid4().hex}"
+def _sidecar_is_our_inode(lock: Path, fd: int) -> bool:
+    """sidecar 是否仍是我们打开的那个 inode。
 
+    POSIX 的 ``flock`` 锁的是 **inode**，不是路径。sidecar 被删掉再重建后，
+    我们锁住的是旧 inode，对新文件没有任何约束——第二个写入者会毫无阻碍地
+    进入临界区（审计补丁未覆盖的洞）。所以拿到锁后必须比对一次
+    ``os.stat(path).st_ino`` 与 ``os.fstat(fd).st_ino``。
 
-def _try_acquire_lock(lock: Path, token: str, candidate: Path) -> bool:
-    """尝试获取一次锁（不阻塞）。成功返回 True 并令 lock 内容为 token。
-
-    - 锁不存在：O_EXCL 干净创建，成功。
-    - 锁存在且仍新鲜（未超 ``_LOCK_STALE_S``）：返回 False，由调用方等待。
-    - 锁存在且已陈旧：用唯一候选文件做 ``os.replace`` 原子接管，再校验
-      「lock 内容是否等于自己的 token」——只有接管的胜出者读到自己的 token、
-      返回 True；落败的一方读到的是别人的 token，返回 False。这保证两个写入者
-      不会同时认为自己持有锁、从而同时进入临界区（审计发现 ①：stale-lock 接管
-      会丢失写入）。
+    Windows 上持锁期间文件根本删不掉（强制锁），且 st_ino 语义不同，
+    因此不做比对；个别文件系统会返回 0，此时无法判定，按「是自己」处理，
+    避免陷入无意义的空转。
     """
-    try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        try:
-            os.write(fd, token.encode("ascii"))
-        finally:
-            os.close(fd)
+    if os.name == "nt":
         return True
-    except (FileExistsError, PermissionError):
-        # Windows 上锁文件被另一进程/线程短暂持有时，O_EXCL 会抛 PermissionError
-        # （共享冲突）而非 FileExistsError；一律当作「锁被占用，稍后重试」。
-        pass
     try:
-        if _time.time() - lock.stat().st_mtime <= _LOCK_STALE_S:
-            return False
+        st_path = os.stat(str(lock))
+        st_fd = os.fstat(fd)
     except OSError:
         return False
-    try:
-        fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.write(fd, token.encode("ascii"))
-        os.close(fd)
-        os.replace(str(candidate), str(lock))
-    except FileExistsError:
-        pass  # 候选文件名唯一，理论上不会；忽略
-    except OSError:
-        pass
-    try:
-        return lock.read_bytes() == token.encode("ascii")
-    except OSError:
-        return False
+    if not st_path.st_ino or not st_fd.st_ino:
+        return True
+    return st_path.st_ino == st_fd.st_ino
+
+
+def _unlock_fd(fd: int) -> None:
+    """释放 fd 上的 OS 锁（与获取时的分支一一对应）。"""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        # fcntl 只在 POSIX 存在，类型存根按平台裁剪，这里按实际运行平台取值。
+        posix = cast(Any, fcntl)
+        posix.flock(fd, posix.LOCK_UN)
 
 
 @contextlib.contextmanager
 def _exclusive_file_lock(path: Path):
-    """协作式互斥：O_EXCL 原子创建 .lock，包住「比对 -> 写临时文件 -> replace」。
+    """持久 sidecar + 操作系统持锁：互斥由内核保证，文件本身不按年龄替换或删除。
 
-    遵守本机制的写入者被锁串行化；不遵守的外部写入（手改、别的工具）
-    由 expected_digest 的 CAS 检出。锁文件带陈旧超时，进程崩溃不会永久卡死。
+    协议要点：
 
-    锁文件内容 = 本持有者的唯一令牌（pid.随机）。写入者据此判断「我是否仍持有锁」，
-    释放时只删自己的锁，绝不碰别人接管的锁。单次获取逻辑见 ``_try_acquire_lock``。
+    - sidecar = ``<文件名>.lock``，**长期存在**，谁都不删、不按 mtime 判陈旧；
+    - 进程活着就持锁，进程一死内核自动释放（不需要「陈旧阈值」这个概念）；
+    - 所有写入者必须走本协议；不遵守协议的编辑器 / 其它工具不被覆盖，
+      仍需 ``expected_rev`` / ``expected_digest`` 的 CAS 兜底；
+    - 仅限本地文件系统。网络盘上的 ``flock`` / ``msvcrt.locking`` 语义未验证。
     """
+    import errno
+
     lock = path.with_name(path.name + ".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    token = _lock_token()
-    candidate = lock.with_name(lock.name + "." + token)
     deadline = _time.monotonic() + _LOCK_WAIT_S
-
+    fd = None
     acquired = False
-    while not acquired:
-        if _try_acquire_lock(lock, token, candidate):
-            acquired = True
-            break
-        if _time.monotonic() >= deadline:
-            raise Conflict(f"{path.name} 写入锁等待超时")
-        _time.sleep(0.01)
-
     try:
+        while True:
+            fd = os.open(str(lock), os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
+            os.set_inheritable(fd, False)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    # Windows 允许锁住 EOF 之外的字节，因此不需要写入标记；
+                    # 真正要的是「这个句柄持有一把锁」，不是文件内容。
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    posix = cast(Any, fcntl)
+                    posix.flock(fd, posix.LOCK_EX | posix.LOCK_NB)
+            except OSError as ex:
+                os.close(fd)
+                fd = None
+                if ex.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if _time.monotonic() >= deadline:
+                    raise Conflict(f"{path.name} write-lock wait timed out") from ex
+                _time.sleep(0.01)
+                continue
+            if _sidecar_is_our_inode(lock, fd):
+                acquired = True
+                break
+            # sidecar 在 open 与加锁之间被删除/替换：锁的是旧 inode，等于没锁。
+            _unlock_fd(fd)
+            os.close(fd)
+            fd = None
+            if _time.monotonic() >= deadline:
+                raise Conflict(f"{path.name} lock sidecar was replaced during acquire")
+            _time.sleep(0.01)
         yield
     finally:
-        # 只删自己仍持有的锁；若临界区超过陈旧阈值被别人接管，绝不动别人的锁。
-        # （临界区为毫秒级，远小于 _LOCK_STALE_S，故正常不会出现「别人接管」；
-        #  此处的令牌校验是防御性的最后一道闸。）
-        try:
-            if lock.read_bytes() == token.encode("ascii"):
-                lock.unlink()
-        except OSError:
-            pass
-        try:
-            if candidate.exists():
-                candidate.unlink()
-        except OSError:
-            pass
+        if fd is not None:
+            try:
+                if acquired:
+                    _unlock_fd(fd)
+            finally:
+                os.close(fd)
 
 
 def atomic_write(path: Path, data: dict, expected_rev: int | None, expected_digest: str | None = None) -> str:
