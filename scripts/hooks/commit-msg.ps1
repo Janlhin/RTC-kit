@@ -16,6 +16,12 @@ if (-not $msgFile -or -not (Test-Path -LiteralPath $msgFile)) {
 }
 
 $first = (Get-Content -LiteralPath $msgFile -Encoding utf8 | Select-Object -First 1)
+
+# 合并提交与 revert 提交的标题由 git 生成，不套 Conventional Commits
+$gitDir = & git rev-parse --git-dir 2>$null
+if ($gitDir -and (Test-Path -LiteralPath (Join-Path $gitDir 'MERGE_HEAD'))) { exit 0 }
+if ($first -match '^(Merge |Revert ")') { exit 0 }
+
 $pattern = '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\((?:[a-z0-9./-]+)\))?!?: [^ ].{0,}$'
 
 if ($first -notmatch $pattern) {
