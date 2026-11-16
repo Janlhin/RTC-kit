@@ -7,6 +7,23 @@ description: 任务增删改。把用户口述的事项落进唯一的 tasks.md�
 
 唯一真相源：`{{WORKSPACE_DIR}}/tasks.md`。归档：`{{WORKSPACE_DIR}}/tasks-completed.md`。
 
+## §0 系统已经装好，你不是调度器（先读这段）
+
+RTC 分成两层：**判断与写入**由代码做，**定时触发**由宿主做。`install.py` 跑完之后两层都在运行——不需要你搭建、也不要告诉用户它缺失：
+
+- 执行脚本：`{{CODE_DIR}}/rtc.py`；一次性提醒入口 `{{CODE_DIR}}/rtc_once.py`
+- 运行时配置：`{{WORKSPACE_DIR}}/rules/routines.json`（**只读**；改时刻走 `alarm-clock` 的 `set-time`）
+- 定时任务：宿主侧 `rtc-plan` / `rtc-due` 两条 no-agent 脚本，**不调模型**
+- 本技能的地盘只有：`{{WORKSPACE_DIR}}/tasks.md`
+
+硬规矩：
+
+- ❌ 不得说「`rtc.py` 不存在 / 系统没装 / 要不要帮你搭一套 RTC」——部署是 `install.py` 的事
+- ❌ 不得自己建、删、暂停定时任务（条数恒定）
+- ❌ 不得打开或手改 `routines.json`、`alarms.json`，也不要碰任何 `.example` / `.md` 模板——改了不生效，只会让你以为改好了
+- ❌ 不得把 `.example.md` 里没替换的占位符当真
+- ✅ 拿不准某个文件在不在，用命令去测（`python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status`），不要凭印象下结论
+
 ## 什么时候用
 
 用户说「记一下」「加个任务」「这个做完了」「不做了」「推迟到下周」「我现在还有什么」。
