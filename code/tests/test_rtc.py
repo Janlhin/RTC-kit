@@ -1634,5 +1634,60 @@ class TestPruneExpiredOneOff(RtcCase):
         self.assertIn("once-future", [w["id"] for w in saved["alarmWindows"]])
 
 
+class TestBrief(RtcCase):
+    """行程简报：模型不跑命令也能知道今天排了什么。
+
+    回归自实机问题：模型只在用户开口时被调用，它看不到今天的时间表，
+    于是用户每次都得重讲一遍「我现在要干嘛」。解法是把简报写进 AGENTS.md。
+    """
+
+    def agents_md(self) -> Path:
+        return self.ws / "AGENTS.md"
+
+    def write_agents(self, extra: str = "用户原文，不能被动。"):
+        self.agents_md().write_text(
+            "# 入口\n\n" + extra + "\n\n"
+            "<!-- RTC:BRIEF:BEGIN 自动生成，勿手改本区块；改时刻表请用 rtc.py -->\n"
+            "旧内容\n"
+            "<!-- RTC:BRIEF:END -->\n\n## 红线\n- 不建 cron\n",
+            encoding="utf-8")
+
+    def test_brief_lists_next_window(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, _ = self.cli("brief", now="2026-11-10T06:30:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("今日行程", out)
+        self.assertIn("接下来：07:00 起床", out, out)
+        self.assertIn("30 分钟", out, "应给出到点还有多久")
+
+    def test_plan_syncs_agents_block(self):
+        self.write_routine(base_routine())
+        self.write_agents()
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        text = self.agents_md().read_text(encoding="utf-8")
+        self.assertIn("今日行程", text, "简报没写进 AGENTS.md")
+        self.assertIn("用户原文，不能被动。", text, "区块外的原文被改动了")
+        self.assertIn("## 红线", text, "区块后的内容丢了")
+        self.assertNotIn("旧内容", text, "旧区块没被替换")
+
+    def test_no_block_leaves_file_untouched(self):
+        self.write_routine(base_routine())
+        p = self.agents_md()
+        p.write_text("# 入口\n没有标记\n", encoding="utf-8")
+        rc, _, err = self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.assertEqual(rc, 0, "没有标记不该让 plan 失败")
+        self.assertEqual(p.read_text(encoding="utf-8"), "# 入口\n没有标记\n", "无标记时不该改文件")
+
+    def test_ack_refreshes_block(self):
+        self.write_routine(base_routine())
+        self.write_agents()
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:05:00+08:00")
+        self.cli("ack", "--window", "wake", "--text", "起了", now="2026-11-10T07:06:00+08:00")
+        text = self.agents_md().read_text(encoding="utf-8")
+        self.assertIn("起床 已确认", text, "确认后简报没刷新")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

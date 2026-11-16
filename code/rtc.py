@@ -775,6 +775,11 @@ def cmd_plan(args) -> int:
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
     for line in self_check(state, now, first_run=(old is None)):
         print(line)
+
+    # 行程推到会话入口：模型不跑命令也知道今天排了什么
+    res = sync_brief_block(routine, state, now)
+    if res.startswith(("read-failed", "write-failed")):
+        print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
     return 0
 
 
@@ -853,6 +858,12 @@ def cmd_due(args) -> int:
         # 显式背离：重复投递比晚一 tick 响更糟，而宿主把空 stdout 当作不响。
         print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
         return 0
+
+    # 状态变了就连带刷新 AGENTS.md 里的行程：模型下次开口时读到的是刚响过什么，
+    # 而不是 06:00 生成时的旧版本。写失败只提示，绝不影响这次投递。
+    res = sync_brief_block(routine, state, now)
+    if res.startswith(("read-failed", "write-failed")):
+        print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
 
     n = hit["fireCount"]
     head = f"{hit['label']} —— {now.strftime('%H:%M')}"
@@ -939,6 +950,9 @@ def cmd_ack(args) -> int:
         print(f"ack: 写入冲突（{e}）", file=sys.stderr)
         return 2
     print(f"ack: {hit['id']} 已确认", file=sys.stderr)
+    res = sync_brief_block(routine, state, now)
+    if res.startswith(("read-failed", "write-failed")):
+        print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
     return 0
 
 
@@ -1915,6 +1929,146 @@ def cmd_metrics(args) -> int:
 # ---------------------------------------------------------------- 入口
 
 
+# ---------------------------------------------------------------- 行程简报
+#
+# 模型与 RTC 之间原本有一道墙：模型只在用户开口时被调用，它不知道今天排了什么，
+# 于是用户每次都得重新讲一遍「我现在要干嘛」。墙不是靠「让模型多跑一条命令」
+# 拆掉的——弱模型不保证每次都愿意跑。真正的解法是把行程推到模型每次会话都会
+# 读到的位置（AGENTS.md），并给出一条零解析成本的纯文本。
+
+_BRIEF_BEGIN = "<!-- RTC:BRIEF:BEGIN 自动生成，勿手改本区块；改时刻表请用 rtc.py -->"
+_BRIEF_END = "<!-- RTC:BRIEF:END -->"
+
+_STATE_WORD = {
+    "acked": "已确认",
+    "delivered": "已送达",
+    "skipped": "跳过",
+    "missed": "过期未确认",
+    "cancelled": "已取消",
+    "pending": "待响",
+    "ringing": "正在响",
+}
+
+
+def _hhmm(iso: str | None) -> str:
+    if not iso:
+        return "--:--"
+    try:
+        return datetime.fromisoformat(iso).strftime("%H:%M")
+    except ValueError:
+        return "--:--"
+
+
+def _span(minutes: int) -> str:
+    if minutes <= 0:
+        return "已到点"
+    h, m = divmod(minutes, 60)
+    if h and m:
+        return f"{h} 小时 {m} 分钟"
+    if h:
+        return f"{h} 小时"
+    return f"{m} 分钟"
+
+
+def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
+    """一页行程：现在在响什么、接下来是什么、今天已经过了什么。"""
+    weekday = "一二三四五六日"[now.weekday()]
+    head = f"今日行程（{now.strftime('%m-%d')} 周{weekday}）"
+    if not state:
+        return [head, "今天还没生成计划（cron 每天 06:00 生成，也可以手动 plan --force）"]
+    windows = state.get("windows") or []
+    if not windows:
+        return [head, "今天没有安排。"]
+
+    def key(w: dict) -> str:
+        return w.get("start") or ""
+
+    ringing = [w for w in windows if w.get("state") == "ringing"]
+    pending = [w for w in windows if w.get("state") == "pending" and key(w) > now.isoformat()]
+    done = [w for w in windows
+            if w.get("state") in ("acked", "delivered", "missed", "skipped", "cancelled")]
+
+    lines = [head]
+    if ringing:
+        w = ringing[0]
+        lines.append(
+            f"现在：{w['label']} 正在响（第 {w.get('fireCount', 1)} 次，"
+            f"{_hhmm(w.get('start'))}-{_hhmm(w.get('end'))}）"
+        )
+    else:
+        lines.append("现在：没有在响的提醒。")
+
+    if pending:
+        rest = sorted(pending, key=key)
+        nxt = rest[0]
+        try:
+            gap = int((datetime.fromisoformat(nxt["start"]) - now).total_seconds() // 60)
+        except ValueError:
+            gap = 0
+        lines.append(f"接下来：{_hhmm(nxt['start'])} {nxt['label']}（还有 {_span(gap)}）")
+        if len(rest) > 1:
+            lines.append("再往后：" + "、".join(
+                f"{_hhmm(w['start'])} {w['label']}" for w in rest[1:4]))
+    else:
+        lines.append("接下来：今天没有更晚的安排了。")
+
+    if done:
+        lines.append("今天已过：" + "、".join(
+            f"{_hhmm(w['start'])} {w['label']} {_STATE_WORD.get(w.get('state'), w.get('state'))}"
+            for w in sorted(done, key=key)))
+    return lines
+
+
+def brief_text(routine: dict, state: dict | None, now: datetime) -> str:
+    return "\n".join(render_brief(routine, state, now))
+
+
+def sync_brief_block(routine: dict, state: dict | None, now: datetime) -> str:
+    """把简报写进 AGENTS.md 的标记区块，返回结果供调用方打印。
+
+    只替换两个标记之间的内容，标记外的用户原文一个字都不动；没有标记就
+    什么都不做（返回 `no-block`），绝不整文件覆盖。
+    """
+    path = WORKSPACE / "AGENTS.md"
+    if not path.exists():
+        return "no-file"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return f"read-failed: {e}"
+    if _BRIEF_BEGIN not in text or _BRIEF_END not in text:
+        return "no-block"
+    start = text.index(_BRIEF_BEGIN) + len(_BRIEF_BEGIN)
+    end = text.index(_BRIEF_END)
+    if start > end:
+        return "no-block"
+    body = brief_text(routine, state, now)
+    new = text[:start] + "\n" + body + "\n" + text[end:]
+    if new == text:
+        return "unchanged"
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(new, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        return f"write-failed: {e}"
+    return "updated"
+
+
+def cmd_brief(args) -> int:
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    state = load_state()
+    if args.sync:
+        result = sync_brief_block(routine, state, now)
+        print(f"brief: AGENTS.md {result}", file=sys.stderr)
+    print(brief_text(routine, state, now))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="rtc", description="RTC-kit 确定性核心")
     p.add_argument("--workspace", default=None)
@@ -1994,6 +2148,11 @@ def main(argv=None) -> int:
     ss = sub.add_parser("status")
     ss.add_argument("--json", action="store_true")
     ss.set_defaults(func=cmd_status)
+
+    sb = sub.add_parser("brief")
+    sb.add_argument("--now")
+    sb.add_argument("--sync", action="store_true", help="同时刷新 AGENTS.md 的行程区块")
+    sb.set_defaults(func=cmd_brief)
 
     sm = sub.add_parser("metrics")
     sm.add_argument("action", choices=["sync", "report", "schedule"])
