@@ -155,12 +155,13 @@ def _unlock_fd(fd: int) -> None:
     if os.name == "nt":
         import msvcrt
 
+        # msvcrt 只在 Windows 存在；两平台都按实际运行环境取值，避开类型存根的裁剪。
+        win = cast(Any, msvcrt)
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        win.locking(fd, win.LK_UNLCK, 1)
     else:
         import fcntl
 
-        # fcntl 只在 POSIX 存在，类型存根按平台裁剪，这里按实际运行平台取值。
         posix = cast(Any, fcntl)
         posix.flock(fd, posix.LOCK_UN)
 
@@ -192,10 +193,11 @@ def _exclusive_file_lock(path: Path):
                 if os.name == "nt":
                     import msvcrt
 
+                    win = cast(Any, msvcrt)
                     os.lseek(fd, 0, os.SEEK_SET)
                     # Windows 允许锁住 EOF 之外的字节，因此不需要写入标记；
                     # 真正要的是「这个句柄持有一把锁」，不是文件内容。
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    win.locking(fd, win.LK_NBLCK, 1)
                 else:
                     import fcntl
 
