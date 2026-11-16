@@ -140,6 +140,16 @@ class TestScaffoldWorkspace(unittest.TestCase):
         self.assertEqual(len(data["alarmWindows"]), 4,
                          "开箱默认时刻表要有内容，不是空白示例")
 
+        backup = ws / "rules" / "backup.json"
+        self.assertTrue(backup.is_file(), "备份配置要装好，否则每日备份永远不跑")
+        cfg = json.loads(backup.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["keep"], 30)
+        self.assertIsInstance(cfg["targets"], list)
+        # 目标里不能出现源盘自己的盘符（同盘不算备份）
+        src = ws.drive.upper()
+        for t in cfg["targets"]:
+            self.assertNotEqual(Path(t).drive.upper(), src, f"{t} 落在源盘上，不算多盘备份")
+
         for rel in ("AGENTS.md", "tasks.md", "errors.md"):
             path = ws / rel
             self.assertTrue(path.is_file(), f"工作区缺 {rel}")

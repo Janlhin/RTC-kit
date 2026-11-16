@@ -46,6 +46,7 @@ import sys
 import tempfile
 import time as _time
 import uuid as _uuid
+import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -837,6 +838,13 @@ def cmd_plan(args) -> int:
         if prev_results:
             fill_snapshot_results(old["planDate"], prev_results)
 
+    # 每天跑一次本地多盘备份：真档案在 state/schedule/*.json，丢了就是永久丢失
+    try:
+        for line in daily_backup(now):
+            print(line)
+    except Exception as e:  # 备份失败绝不能拖垮提醒本身
+        print(f"backup: 备份异常 {type(e).__name__}: {e}")
+
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
     for line in take_notices() + hand_edit + self_check(state, now, first_run=(old is None)):
         print(line)
@@ -845,6 +853,160 @@ def cmd_plan(args) -> int:
     res = sync_brief_block(routine, state, now)
     if res.startswith(("read-failed", "write-failed")):
         print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------- 多盘本地备份
+# 每日快照是永久档案，但只存在一块盘上——那块盘坏了，一年后什么都查不到。
+# 这里每天把它们压成一个 zip 写到另外的本地盘（不写源盘，同盘不算备份），
+# 按天数滚动删除；成功时完全静默，失败才说话。
+
+BACKUP_CFG = "rules/backup.json"
+BACKUP_MARK = "state/.backup-last.json"
+BACKUP_GLOB = "RTC-*.zip"
+BACKUP_KEEP = 30
+BACKUP_FILES = (
+    "rules/routines.json",
+    "rules/backup.json",
+    "state/alarms.json",
+    "state/routine-seal.json",
+    "AGENTS.md",
+    "tasks.md",
+)
+
+
+def backup_config() -> tuple[list[Path], int]:
+    """只认 rules/backup.json —— 不自己扫盘。
+
+    自动扫盘会在别人的机器上悄悄往不认识的盘写文件；测试也会因此污染真实磁盘。
+    目标盘由安装器（install.py）一次性写好，用户随时可改。
+    """
+    cfg = WORKSPACE / BACKUP_CFG
+    targets: list[Path] = []
+    keep = BACKUP_KEEP
+    if cfg.exists():
+        try:
+            data = load_json(cfg)
+            if isinstance(data, dict):
+                raw = data.get("targets") or []
+                if isinstance(raw, list):
+                    targets = [Path(str(t)) for t in raw if str(t).strip()]
+                if isinstance(data.get("keep"), int) and data["keep"] > 0:
+                    keep = int(data["keep"])
+        except (Validation, ValueError, TypeError, OSError):
+            pass
+    return targets, keep
+
+
+def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], list[str]]:
+    """把工作区档案压成一份 zip 写到每个目标盘；返回（写成功的路径, 错误列表）。"""
+    members: list[tuple[Path, str]] = []
+    for rel in BACKUP_FILES:
+        p = WORKSPACE / rel
+        if p.is_file():
+            members.append((p, rel))
+    for sub in ("state/schedule", "state/backups"):
+        d = WORKSPACE / sub
+        if d.is_dir():
+            for f in sorted(d.glob("*.json")):
+                members.append((f, f"{sub}/{f.name}"))
+    if not members:
+        return [], ["工作区里没有可备份的档案（还没生成过数据？）"]
+
+    written: list[Path] = []
+    errors: list[str] = []
+    for t in targets:
+        dst = t / f"RTC-{day.replace('-', '')}.zip"
+        if dst.exists():
+            written.append(dst)
+            continue
+        tmp = dst.with_name(dst.name + ".tmp")
+        try:
+            t.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                for src, arc in members:
+                    z.write(src, arc)
+            with zipfile.ZipFile(tmp) as z:  # 回读，让 zip 自己验 CRC
+                if z.testzip() is not None:
+                    raise OSError(f"回读校验失败：{dst}")
+                if len(z.namelist()) != len(members):
+                    raise OSError(f"条目数不符：{len(z.namelist())}/{len(members)}")
+            os.replace(tmp, dst)
+            written.append(dst)
+        except (OSError, ValueError) as e:
+            errors.append(f"{t} 写入失败：{e}")
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            continue
+
+    # 每个目标盘只留最近 keep 份
+    for t in targets:
+        try:
+            files = sorted(t.glob(BACKUP_GLOB))
+            for old in (files[:-keep] if keep > 0 else []):
+                old.unlink()
+        except OSError:
+            pass
+    return written, errors
+
+
+def daily_backup(now: datetime) -> list[str]:
+    """每天跑一次（由 plan 调）。成功静默，失败给一行话。"""
+    today = now.date().isoformat()
+    mark = WORKSPACE / BACKUP_MARK
+    try:
+        if mark.exists() and (load_json(mark) or {}).get("date") == today:
+            return []
+    except (Validation, ValueError, TypeError, OSError):
+        pass
+
+    targets, keep = backup_config()
+    if not targets:
+        return []  # 没有第二块盘，静默；手动 backup 会明确告诉你
+
+    written, errors = backup_now(targets, keep, today)
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(
+            json.dumps(
+                {
+                    "date": today,
+                    "at": now.isoformat(timespec="seconds"),
+                    "written": len(written),
+                    "errors": errors,
+                },
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    if errors:
+        return [f"⚠️ 备份部分失败：{'；'.join(errors[:3])}"]
+    return []
+
+
+def cmd_backup(args) -> int:
+    today = date.today().isoformat()
+    targets, keep = backup_config()
+    if args.to:
+        targets = [Path(p) for p in args.to]
+    if args.keep:
+        keep = args.keep
+    if not targets:
+        print("backup: 没找到可写的第二块盘；用 --to 指定一个目录", file=sys.stderr)
+        return 3
+    written, errors = backup_now(targets, keep, today)
+    for w in written:
+        size = w.stat().st_size / 1024
+        print(f"backup: {w}  {size:.1f} KB")
+    for e in errors:
+        print(f"backup: {e}", file=sys.stderr)
+    if not written:
+        return 3
     return 0
 
 
@@ -2300,6 +2462,11 @@ def main(argv=None) -> int:
     sm.add_argument("--days", type=int, default=30)
     sm.add_argument("--date", help="YYYY-MM-DD（用于 metrics schedule）")
     sm.set_defaults(func=cmd_metrics)
+
+    sb = sub.add_parser("backup", help="把档案压成 zip 写到其他本地盘（每日 plan 会自动跑一次）")
+    sb.add_argument("--to", action="append", help="目标目录，可重复；不写则自动挑非源盘")
+    sb.add_argument("--keep", type=int, default=0, help="每个盘保留几份（默认取配置，30）")
+    sb.set_defaults(func=cmd_backup)
 
     args = p.parse_args(argv)
     if args.workspace:

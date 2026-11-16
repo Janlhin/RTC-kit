@@ -225,6 +225,20 @@ def _write_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def backup_targets_for(workspace: Path) -> list:
+    """除源盘以外的固定盘，各给一个备份目录。POSIX 上没有这个概念，返回空。"""
+    src = workspace.drive.upper() if workspace.drive else ""
+    out = []
+    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+        root = Path(f"{letter}:\\")
+        try:
+            if root.exists() and root.drive.upper() != src:
+                out.append(str(root / "RTC-Backup"))
+        except OSError:
+            continue
+    return out
+
+
 def scaffold_workspace(repo: Path, code_dir: Path, workspace: Path,
                        dry_run: bool, force: bool = False) -> dict:
     """搭工作区骨架。已存在的**用户文件**一律不覆盖（除非 force）。
@@ -236,6 +250,9 @@ def scaffold_workspace(repo: Path, code_dir: Path, workspace: Path,
     """
     files = {
         "rules/routines.json": json.dumps(default_routine(), ensure_ascii=False, indent=2) + "\n",
+        "rules/backup.json": json.dumps(
+            {"targets": backup_targets_for(workspace), "keep": 30},
+            ensure_ascii=False, indent=2) + "\n",
         "errors.md": ERRORS_HEADER,
         "tasks.md": "# tasks.md — 今天要做什么\n\n## Today\n\n### 我\n\n"
                     "## 待安排（有日期）\n\n## 待安排（没日期）\n",
@@ -406,11 +423,18 @@ def run(args: argparse.Namespace) -> int:
     # 3/5 工作区骨架
     print("\n[install] 3/5 搭工作区骨架")
     scaffold = scaffold_workspace(repo, scripts_dir, workspace, dry_run, force)
-    for rel in ("rules/routines.json", "AGENTS.md", "tasks.md", "errors.md"):
+    for rel in ("rules/routines.json", "rules/backup.json", "AGENTS.md", "tasks.md", "errors.md"):
         state = scaffold.get(rel, "?")
         label = {"created": "已生成", "skipped": "已存在，跳过（不动你的数据）",
                  "planned": "将生成", "overwritten": "已覆盖（--force）"}.get(state, state)
         print(f"[install] {rel}: {label}")
+    if scaffold.get("rules/backup.json") == "created":
+        tgts = backup_targets_for(workspace)
+        if tgts:
+            print(f"[install] 每日备份目标：{'、'.join(tgts)}（每个盘留最近 30 份）")
+        else:
+            print("[install] 未找到第二块本地盘：每日备份暂不启用。"
+                  "接一块盘后在 rules/backup.json 里的 targets 写上路径即可。")
     if scaffold.get("rules/routines.json") == "created":
         print("[install] 默认时刻表已就位：起床 08:10、早间 09:00、午间 12:00、晚间 19:00"
               "（用 set-time 改，别手改 JSON）")

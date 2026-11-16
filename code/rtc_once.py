@@ -14,8 +14,10 @@
 不会跑 due（跑一次就会把响铃消耗掉）；到点由 cron 的 rtc-due 投递。
 """
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -24,6 +26,27 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RT = HERE / "rtc.py"
 DEFAULT_WS = Path(os.environ.get("RTC_WORKSPACE") or (Path.home() / "RTC"))
+
+
+def seal_routine(ws: Path, routines: Path) -> None:
+    """写完时刻表要盖章，否则下一次 plan 会把这条提醒报成「有人手改」。
+
+    我们也是「程序」——只有 RTC 自己写的文件才不该触发手改告警。
+    """
+    try:
+        payload = {
+            "digest": hashlib.sha256(routines.read_bytes()).hexdigest(),
+            "windows": len((json.loads(routines.read_text(encoding="utf-8")) or {}).get("alarmWindows") or []),
+            "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        seal = ws / "state" / "routine-seal.json"
+        seal.parent.mkdir(parents=True, exist_ok=True)
+        seal.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        last = ws / "state" / "backups" / "routines.program-last.json"
+        last.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(routines, last)
+    except (OSError, ValueError, TypeError):
+        pass  # 盖章失败不影响提醒本身
 
 
 def fail(msg: str) -> int:
@@ -102,6 +125,10 @@ def main() -> int:
         routines.write_bytes(raw)
         print((proc.stderr or proc.stdout or "plan 失败").strip(), file=sys.stderr)
         return fail("plan --force 失败，已回滚 routines.json")
+
+    # 我们也是程序：写完立刻盖章，否则下一次 plan 会把刚加的提醒报成「有人手改」。
+    seal_routine(ws, routines)
+
     if proc.stderr.strip():
         print(proc.stderr.strip(), file=sys.stderr)
 

@@ -215,3 +215,52 @@ hermes gateway restart   # 配置生效
 
 > 什么时候不该关：你需要它在对话里替你改 `tasks.md`、读 `AGENTS.md` 做摘要时。
 > 那时保留 `file`，靠 6.1 / 6.2 的印章和自愈兜底。
+
+## 7. 档案只有一份：多盘本地备份
+
+`state/schedule/<日期>.json` 是永久档案，但默认只存在**一块盘**上。那块盘坏了、系统重装了，
+一年后想查"那天几点出门"就什么都查不到。所以每天 `rtc-plan` 会顺手备份一次。
+
+**存哪儿**：另一块本地盘上的 `RTC-Backup` 目录（不写源盘——同盘不算备份）。
+没有 `rules/backup.json` 时，程序自动挑除源盘以外的固定盘：
+
+```
+D:\RTC-Backup\RTC-20261116.zip
+E:\RTC-Backup\RTC-20261116.zip
+```
+
+**里面装了什么**：`rules/routines.json`、`state/alarms.json`、`state/routine-seal.json`、
+全部 `state/schedule/*.json`、`state/backups/*.json`、`AGENTS.md`、`tasks.md`。
+
+**多久一次、留几份**：每天一次（同一天重复跑不会重写），每个盘留最近 30 份（约 30 KB/天）。
+
+**想改目标盘或保留天数**，写一份 `rules/backup.json`：
+
+```json
+{"targets": ["D:\\RTC-Backup", "E:\\RTC-Backup"], "keep": 30}
+```
+
+### 7.1 手动跑一次 / 看看到底备了没
+
+```bash
+python code/rtc.py --workspace <工作区> backup
+python code/rtc.py --workspace <工作区> backup --to D:\RTC-Backup --keep 60
+```
+
+最后跑过哪天、写到哪、有没有失败，都在 `state/.backup-last.json` 里。
+
+### 7.2 丢了盘怎么恢复
+
+翻出最近一份 zip，解开，把里面的目录按原样盖回工作区即可：
+
+```powershell
+Expand-Archive -LiteralPath "D:\RTC-Backup\RTC-20261116.zip" -DestinationPath "C:\Temp\rtc-restore"
+Copy-Item -Recurse -Force "C:\Temp\rtc-restore\state" "C:\Users\<你>\RTC\"
+Copy-Item -Force "C:\Temp\rtc-restore\rules\routines.json" "C:\Users\<你>\RTC\rules\"
+```
+
+恢复完跑一次 `rtc.py --workspace <工作区> status` 和 `history --month <当月>`，确认窗口和
+历史都对得上。
+
+> 备份是**整份快照**，不是增量。恢复时先解开看一眼 `state/schedule/` 里有哪些日期，
+> 再决定整体盖回还是只挑需要的日子复制过去。
