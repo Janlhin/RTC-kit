@@ -242,14 +242,18 @@ python -m unittest discover -s code/tests -v           # 或用 discover
 
 > **运行时下限**：`node:sqlite` 自 Node 22.5 起提供（当时需 `--experimental-sqlite`），22.13 / 23.4 起不再需要该 flag。也就是说，不带 flag 直接跑的最低版本是 **Node 22.13 或 23.4**；Node 20 会直接 `ERR_UNKNOWN_BUILTIN_MODULE`。不想管版本下限就用 `rtc.py metrics`。
 
+**状态目录必须给**：脚本默认只认「自己所在目录」，而实际状态在工作区 `state/` 下。所以每条命令都要带 `--state <工作区>/state`，否则 `sync` 会报 `找不到 <脚本目录>/alarms.json` 并以非零码退出（不会静默生成空账本）。也可以用环境变量 `RTC_STATE` 替代。
+
 ```
-node metrics.mjs init                 建表
-node metrics.mjs sync                 今天 + 全部历史（幂等，最安全）
-node metrics.mjs sync today           只落今天的窗口
-node metrics.mjs sync past            只补今天以前（日切用）
-node metrics.mjs report [天数]        确认率、按窗口、最近 7 天
-node metrics.mjs today                只看今天
+node metrics.mjs init                 --state <工作区>/state   建表
+node metrics.mjs sync                 --state <工作区>/state   今天 + 全部历史（幂等，最安全）
+node metrics.mjs sync today           --state <工作区>/state   只落今天的窗口
+node metrics.mjs sync past            --state <工作区>/state   只补今天以前（日切用）
+node metrics.mjs report [天数]         --state <工作区>/state   确认率、按窗口、最近 7 天
+node metrics.mjs today                --state <工作区>/state   只看今天
 ```
+
+`--state` 可以出现在命令任意位置（脚本先剥掉它再解析子命令）。
 
 表结构：
 
