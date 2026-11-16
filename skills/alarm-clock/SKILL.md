@@ -224,6 +224,16 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 
 写之前读 `rev`、写入后 `rev + 1`；发现 `rev` 已变则放弃写入、记一条 `concurrent_write`、不重试不合并。
 
+## §6.1 查状态
+
+```
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status --json
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} metrics report
+```
+
+回答说人话：`今天 4 个窗口，响了 6 次，确认 2 个，漏 1 个。` 不要贴 JSON。
+
 ## §7 禁止
 
 - ❌ 自己判断「现在该不该响」

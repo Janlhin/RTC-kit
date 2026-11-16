@@ -1589,51 +1589,147 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
 
 
 class TestLockOwnership(unittest.TestCase):
-    """审计发现 ①：stale-lock 接管既不许两个写入者同时进入临界区，
-    也不许一方删掉另一方的锁。"""
+    """锁协议：持久 sidecar + 操作系统持锁。
+
+    审计发现 ① 的原始形态是「按 mtime 判陈旧、把锁抢过来接管」，重叠期会丢写入。
+    本类锁定替换后的协议，逐条对应审计的六项针对性检查：
+
+    - sidecar 常驻，进出临界区都不删（不再有「陈旧」这个概念）
+    - mtime 再旧也不接管，第二个写入者必须等第一个真的退出
+    - 跨进程互斥成立（不是同进程内的线程假象）
+    - 持有者被强杀后立刻可获取，不需要等任何超时
+    - 多写入者并发不丢更新
+    - POSIX：sidecar 被删除/替换后能被 inode 守卫自检出来
+    """
 
     def _lock_for(self, name):
         d = tempfile.mkdtemp(prefix="rtc-lock-")
         p = Path(d) / name
         return p, p.with_name(p.name + ".lock")
 
-    def test_fresh_acquire_writes_token(self):
-        p, lock = self._lock_for("a.json")
-        self.assertTrue(rtc._try_acquire_lock(lock, "A", lock.with_name(lock.name + ".A")))
-        self.assertEqual(lock.read_bytes().decode(), "A")
+    def _spawn_holder(self, target, hold_s):
+        """起一个子进程拿锁并保持 hold_s 秒，读到 HELD 才返回，保证锁确实已在别人手里。"""
+        d = tempfile.mkdtemp(prefix="rtc-child-")
+        script = Path(d) / "hold.py"
+        script.write_text(
+            "import pathlib, sys, time\n"
+            f"sys.path.insert(0, {str(RTC.parent)!r})\n"
+            "import rtc\n"
+            "p = pathlib.Path(sys.argv[1])\n"
+            "with rtc._exclusive_file_lock(p):\n"
+            "    print('HELD', flush=True)\n"
+            "    time.sleep(float(sys.argv[2]))\n",
+            encoding="utf-8",
+        )
+        child = subprocess.Popen(
+            [sys.executable, str(script), str(target), str(hold_s)],
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            env=ENV,
+        )
 
-    def test_live_lock_not_taken_over(self):
-        p, lock = self._lock_for("a.json")
-        rtc._try_acquire_lock(lock, "A", lock.with_name(lock.name + ".A"))
-        self.assertEqual(lock.read_bytes().decode(), "A")
-        # 锁新鲜 → 第二个写入者必须拿不到
-        self.assertFalse(rtc._try_acquire_lock(lock, "B", lock.with_name(lock.name + ".B")))
-        self.assertEqual(lock.read_bytes().decode(), "A")
+        def cleanup():
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            child.stdout.close()
 
-    def test_stale_lock_takeover_yields_single_owner(self):
-        p, lock = self._lock_for("a.json")
-        lock.write_bytes(b"ghost")
-        import time as _t
+        self.addCleanup(cleanup)
+        self.assertEqual(child.stdout.readline().strip(), "HELD", "子进程未能拿到锁")
+        return child
 
-        old = _t.time() - (rtc._LOCK_STALE_S + 5)
-        os.utime(str(lock), (old, old))
-        # A 接管陈旧锁
-        self.assertTrue(rtc._try_acquire_lock(lock, "A", lock.with_name(lock.name + ".A")))
-        self.assertEqual(lock.read_bytes().decode(), "A")
-        # 接管后锁变新鲜，B 不得再拿到（不会出现「两者都拿到」）
-        self.assertFalse(rtc._try_acquire_lock(lock, "B", lock.with_name(lock.name + ".B")))
-        self.assertEqual(lock.read_bytes().decode(), "A")
-
-    def test_owner_does_not_delete_other_owners_lock(self):
+    def test_sidecar_persists_after_release(self):
+        """sidecar 常驻：进出临界区后它仍然在盘上，可重复获取。"""
         p, lock = self._lock_for("a.json")
         with rtc._exclusive_file_lock(p):
-            owner = lock.read_bytes().decode()
-            self.assertTrue(owner, "进入临界区后锁必须含本持有者令牌")
-            # 模拟 A 临界区过长、锁被 B 接管
-            lock.write_bytes(b"B")
-        # A 退出时不得删掉 B 的锁
-        self.assertTrue(lock.exists(), "A 退出不得删除 B 接管的锁")
-        self.assertEqual(lock.read_bytes().decode(), "B")
+            self.assertTrue(lock.exists(), "进入临界区时 sidecar 必须存在")
+        self.assertTrue(lock.exists(), "释放时不得删除 sidecar（删了就等于换协议）")
+        with rtc._exclusive_file_lock(p):
+            pass
+        self.assertTrue(lock.exists())
+
+    def test_no_stale_threshold_constant(self):
+        """「按年龄判陈旧」的实现痕迹必须消失，否则两种协议会再次混在一起。"""
+        self.assertFalse(hasattr(rtc, "_LOCK_STALE_S"), "陈旧阈值概念应已移除")
+        self.assertFalse(hasattr(rtc, "_try_acquire_lock"), "按 mtime 接管的入口应已移除")
+
+    def test_no_age_based_takeover(self):
+        """sidecar 的 mtime 是一小时前，也不许接管：必须等持有者真的退出。"""
+        import threading
+        import time
+
+        p, lock = self._lock_for("a.json")
+        lock.write_bytes(b"")
+        old = time.time() - 3600
+        os.utime(str(lock), (old, old))
+        entered = []
+
+        def holder():
+            with rtc._exclusive_file_lock(p):
+                entered.append(time.monotonic())
+                time.sleep(0.4)
+
+        th = threading.Thread(target=holder)
+        th.start()
+        while not entered:
+            time.sleep(0.01)
+        t0 = time.monotonic()
+        with rtc._exclusive_file_lock(p):
+            waited = time.monotonic() - t0
+        th.join()
+        self.assertGreaterEqual(waited, 0.3, f"陈旧 sidecar 被提前接管了（只等了 {waited:.2f}s）")
+
+    def test_exclusive_across_processes(self):
+        """跨进程互斥：子进程持锁 0.5s，父进程必须等它退出才进得去。"""
+        import time
+
+        p, lock = self._lock_for("a.json")
+        child = self._spawn_holder(p, 0.5)
+        t0 = time.monotonic()
+        with rtc._exclusive_file_lock(p):
+            waited = time.monotonic() - t0
+        child.wait(timeout=10)
+        self.assertGreaterEqual(waited, 0.3, f"两个进程同时进入临界区（只等了 {waited:.2f}s）")
+        self.assertTrue(lock.exists(), "子进程退出也不得删除 sidecar")
+
+    def test_lock_released_when_holder_dies(self):
+        """持有者被强杀 → 锁立刻释放，不依赖任何超时。"""
+        import time
+
+        p, lock = self._lock_for("a.json")
+        child = self._spawn_holder(p, 60)
+        child.kill()
+        child.wait(timeout=10)
+        t0 = time.monotonic()
+        with rtc._exclusive_file_lock(p):
+            elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 2.0, f"持有者死亡后仍等了 {elapsed:.2f}s，说明还在按超时判死")
+
+    def test_windows_sidecar_not_unlinkable_while_held(self):
+        """Windows 的锁是强制锁：持锁期间别人删不掉 sidecar，旧写者只会空等。"""
+        if os.name != "nt":
+            self.skipTest("POSIX 上 sidecar 可被删除，由 inode 守卫兜底")
+        p, lock = self._lock_for("a.json")
+        with rtc._exclusive_file_lock(p), self.assertRaises(PermissionError):
+            os.unlink(str(lock))
+
+    def test_posix_inode_guard_detects_replaced_sidecar(self):
+        """POSIX：flock 锁的是 inode，sidecar 被替换后必须能自检出来。"""
+        if os.name == "nt":
+            self.skipTest("Windows 持锁期间文件删不掉，此洞只在 POSIX 存在")
+        p, lock = self._lock_for("a.json")
+        lock.write_bytes(b"")
+        fd = os.open(str(lock), os.O_RDWR)
+        try:
+            self.assertTrue(rtc._sidecar_is_our_inode(lock, fd))
+            os.unlink(str(lock))  # 删掉旧 inode（fd 仍开着）
+            lock.write_bytes(b"new")  # 同名重建，inode 已变
+            self.assertFalse(
+                rtc._sidecar_is_our_inode(lock, fd), "sidecar 被替换后必须判定为「不是我的 inode」"
+            )
+        finally:
+            os.close(fd)
 
     def test_concurrent_writers_no_lost_update(self):
         import threading

@@ -9,6 +9,24 @@ description: 删除前闸门。用户要求删文件、清目录、批量重命�
 
 **看完之后默认什么都不做，只出报告。** 这是设计，不是保守。
 
+## §0 这套系统是本机「有主的」东西（先读这段）
+
+不要因为文件名陌生就判它是残留。下面这些路径默认属于「有主、在用」，出现在删除清单里时一律进「不动」那一行：
+
+| 路径 | 是什么 |
+|---|---|
+| `{{CODE_DIR}}/` | 执行核心：`rtc.py`、`rtc_once.py`、`rtc_plan.py`、`rtc_due.py`（`.bak-*` 是备份，算候选、不算残留） |
+| `{{WORKSPACE_DIR}}/` | 工作区：`rules/`、`state/`、`tasks.md`、`tasks-completed.md`、`AGENTS.md`、`TOOLS.md`、`errors.md` |
+| `{{STATE_DIR}}/` | 运行时状态：`alarms.json`、metrics 库、schedule 快照——**真相源，不在任何批量清理范围** |
+| 技能目录 | `alarm-clock`、`daily-task-manager`、`deletion-gate`（与代码同版本发布） |
+
+硬规矩：
+
+- ❌ 不得把 `state/`、`rules/`、技能目录当成「缓存 / 残留」清理
+- ❌ 不得声称系统缺失、建议重装或「重新搭建一套」
+- ❌ `.env`、metrics 库、`alarms.json` 属于凭证 / 真相源级别，不在批量清理范围
+- ✅ `.bak-*`、`cache/`、`logs/` 可以进候选，但要给出理由（多大、多久没动、有没有被引用）并等二次确认
+
 ## §1 三项检查（全过才进入执行）
 
 | # | 检查 | 怎么判 | 不过怎么办 |

@@ -43,7 +43,7 @@ VALID_STATES = {"pending", "ringing", "delivered", "acked", "missed", "skipped",
 class Case:
     cid: str
     title: str
-    status: str = "PASS"          # PASS / FAIL / XFAIL / XPASS / SKIP
+    status: str = "PASS"  # PASS / FAIL / XFAIL / XPASS / SKIP
     detail: str = ""
     evidence: list = field(default_factory=list)
 
@@ -63,7 +63,9 @@ class Lab:
         p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
         if self.verbose:
             print(f"      $ {' '.join(str(c) for c in cmd)}")
-            print(f"        exit={p.returncode} out={p.stdout.strip()[:200]!r} err={p.stderr.strip()[:200]!r}")
+            print(
+                f"        exit={p.returncode} out={p.stdout.strip()[:200]!r} err={p.stderr.strip()[:200]!r}"
+            )
         return p
 
     def rt(self, *args, timeout=60):
@@ -97,14 +99,19 @@ class Lab:
             shutil.copy(src, self.ws / "rules" / "routines.json")
         else:  # 没有实机配置时退化为空时刻表
             (self.ws / "rules" / "routines.json").write_text(
-                json.dumps({"version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00",
-                            "alarmWindows": []}, ensure_ascii=False), encoding="utf-8")
+                json.dumps(
+                    {"version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00", "alarmWindows": []},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
 
     def add_window(self, **win) -> None:
         r = self.routines()
         r["alarmWindows"].append(win)
         (self.ws / "rules" / "routines.json").write_text(
-            json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     # ── 断言 ─────────────────────────────────────────────
     def case(self, cid, title, fn, xfail=None):
@@ -174,13 +181,15 @@ def suite(lab: Lab) -> None:
         lab.ok(before["fireCount"] == 1, f"前置：应响 1 次，实际 {before['fireCount']}")
         lab.rt_now("plan", "2026-11-17T07:01", "--force")
         after = lab.win("wake")
-        lab.ok(after["fireCount"] == 1,
-               f"ringing 窗口被 --force 重置：fireCount {before['fireCount']}→{after['fireCount']}，"
-               f"state {before['state']}→{after['state']}")
+        lab.ok(
+            after["fireCount"] == 1,
+            f"ringing 窗口被 --force 重置：fireCount {before['fireCount']}→{after['fireCount']}，"
+            f"state {before['state']}→{after['state']}",
+        )
 
     def t_weekend():
         lab.fresh("weekend")
-        p = lab.rt_now("plan", "2026-11-21T06:00")   # 2026-11-21 周六
+        p = lab.rt_now("plan", "2026-11-21T06:00")  # 2026-11-21 周六
         lab.ok(p.returncode == 0, "周末 plan 失败")
         lab.ok("weekend" in p.stderr, f"未识别为周末：{p.stderr.strip()[:80]!r}")
 
@@ -217,7 +226,7 @@ def suite(lab: Lab) -> None:
     def t_silent():
         lab.fresh("silent")
         lab.rt_now("plan", "2026-11-18T06:00")
-        p = lab.rt_now("due", "2026-11-18T03:00")   # 没有任何窗口
+        p = lab.rt_now("due", "2026-11-18T03:00")  # 没有任何窗口
         lab.ok(p.returncode == 0, f"静默时退出码应 0，实际 {p.returncode}")
         lab.ok(p.stdout.strip() == "", f"静默时不该有输出：{p.stdout.strip()[:80]!r}")
 
@@ -240,12 +249,14 @@ def suite(lab: Lab) -> None:
 
     def t_ack_after_missed():
         lab.rt_now("plan", "2026-11-19T06:00")
-        lab.rt_now("due", "2026-11-19T12:30")          # 12:25 之后 → 过期标 missed
+        lab.rt_now("due", "2026-11-19T12:30")  # 12:25 之后 → 过期标 missed
         w = lab.win("meds-noon")
         lab.ok(w["state"] == "missed", f"前置：过期后应 missed，实际 {w['state']}")
         p = lab.rt_now("ack", "2026-11-19T12:30", "--window", "meds-noon", "--text", "好了")
         lab.ok(p.returncode == 0, f"当天过期窗口应仍可 ack，实际退出码 {p.returncode}")
-        lab.ok(lab.win("meds-noon")["state"] == "acked", f"ack 后应 acked，实际 {lab.win('meds-noon')['state']}")
+        lab.ok(
+            lab.win("meds-noon")["state"] == "acked", f"ack 后应 acked，实际 {lab.win('meds-noon')['state']}"
+        )
 
     def t_ack_none():
         p = lab.rt_now("ack", "2026-11-19T12:40", "--window", "nope", "--text", "好了")
@@ -264,8 +275,21 @@ def suite(lab: Lab) -> None:
 
     def inject_once(tag, at, label, date):
         lab.fresh(tag)
-        p = lab.run([sys.executable, str(lab.once), "--workspace", str(lab.ws),
-                     at, label, "--date", date, "--window-min", "5"], timeout=60)
+        p = lab.run(
+            [
+                sys.executable,
+                str(lab.once),
+                "--workspace",
+                str(lab.ws),
+                at,
+                label,
+                "--date",
+                date,
+                "--window-min",
+                "5",
+            ],
+            timeout=60,
+        )
         lab.ok(p.returncode == 0, f"rtc_once 失败：{p.stderr.strip()[:120]}")
         oos = [w for w in lab.routines()["alarmWindows"] if w.get("oneOff")]
         lab.ok(oos, "routines.json 里没有新增 oneOff 窗口")
@@ -290,17 +314,34 @@ def suite(lab: Lab) -> None:
     def t_oneoff_dedupe():
         lab.fresh("once_dedupe")
         for _ in range(2):
-            lab.run([sys.executable, str(lab.once), "--workspace", str(lab.ws),
-                     "14:00", "重复", "--date", "2026-11-21"], timeout=60)
-        mine = [w for w in lab.routines()["alarmWindows"]
-                if w.get("oneOff") and w.get("label") == "重复"]
+            lab.run(
+                [
+                    sys.executable,
+                    str(lab.once),
+                    "--workspace",
+                    str(lab.ws),
+                    "14:00",
+                    "重复",
+                    "--date",
+                    "2026-11-21",
+                ],
+                timeout=60,
+            )
+        mine = [w for w in lab.routines()["alarmWindows"] if w.get("oneOff") and w.get("label") == "重复"]
         lab.ok(len(mine) == 1, f"同一时刻重复注入应只 1 条，实际 {len(mine)}")
 
     def t_checklist():
         lab.fresh("check")
-        lab.add_window(id="pack", label="清点并带走", start="20:00", end="20:15",
-                       intervalMin=5, expectFires=1, ackHints=["好了"],
-                       checklist=["电饭煲", "电脑", "被子枕头"])
+        lab.add_window(
+            id="pack",
+            label="清点并带走",
+            start="20:00",
+            end="20:15",
+            intervalMin=5,
+            expectFires=1,
+            ackHints=["好了"],
+            checklist=["电饭煲", "电脑", "被子枕头"],
+        )
         lab.rt_now("plan", "2026-11-22T06:00")
         p = lab.rt_now("due", "2026-11-22T20:00")
         lab.ok("还剩 3 项" in p.stdout, f"清单提醒未标剩余项：{p.stdout.strip()[:90]!r}")
@@ -335,8 +376,10 @@ def suite(lab: Lab) -> None:
         p = lab.rt_now("complete", "2026-11-23T09:00", "--window", "meds-am", "--text", "做完了")
         lab.ok(p.returncode == 0, f"complete 退出码 {p.returncode}")
         lab.rt_now("plan", "2026-11-25T06:00", "--force")
-        lab.ok("meds-am" not in [w["id"] for w in lab.status()["windows"]],
-               "complete 后次日仍在计划里（应永久停用）")
+        lab.ok(
+            "meds-am" not in [w["id"] for w in lab.status()["windows"]],
+            "complete 后次日仍在计划里（应永久停用）",
+        )
         dw = [w.get("disabled") for w in lab.routines()["alarmWindows"] if w["id"] == "meds-am"]
         lab.ok(dw and dw[0] is True, f"routines 里未标 disabled：{dw}")
 
@@ -359,7 +402,9 @@ def suite(lab: Lab) -> None:
         lab.rt_now("plan", "2026-11-28T06:00")
         p = lab.rt_now("postpone", "2026-11-28T09:00", "--window", "meds-pm", "--days", "1")
         lab.ok(p.returncode == 0, f"postpone 退出码 {p.returncode}")
-        lab.ok(lab.win("meds-pm")["state"] == "skipped", f"今天应 skipped，实际 {lab.win('meds-pm')['state']}")
+        lab.ok(
+            lab.win("meds-pm")["state"] == "skipped", f"今天应 skipped，实际 {lab.win('meds-pm')['state']}"
+        )
         lab.rt_now("plan", "2026-11-29T06:00")
         lab.ok("meds-pm" in [w["id"] for w in lab.status()["windows"]], "次日应重建")
         p = lab.rt_now("postpone", "2026-11-28T09:00", "--window", "wake", "--to", "2026-11-27")
@@ -369,16 +414,40 @@ def suite(lab: Lab) -> None:
         lab.fresh("settime")
         lab.rt_now("plan", "2026-11-30T06:00")
         today_before = lab.win("wake")["window"]
-        p = lab.run([sys.executable, str(lab.rtc), "--workspace", str(lab.ws),
-                     "set-time", "--window", "wake", "--start", "07:30", "--end", "07:55"])
+        p = lab.run(
+            [
+                sys.executable,
+                str(lab.rtc),
+                "--workspace",
+                str(lab.ws),
+                "set-time",
+                "--window",
+                "wake",
+                "--start",
+                "07:30",
+                "--end",
+                "07:55",
+            ]
+        )
         lab.ok(p.returncode == 0, f"set-time 退出码 {p.returncode}：{p.stderr.strip()[:90]}")
         lab.ok(lab.win("wake")["window"] == today_before, "今天的窗口不该被改（次日生效）")
         starts = [w["start"] for w in lab.routines()["alarmWindows"] if w["id"] == "wake"]
         lab.ok(starts and starts[0] == "07:30", f"routines 未写成 07:30：{starts}")
         lab.rt_now("plan", "2026-12-01T06:00")
         lab.ok(lab.win("wake")["window"].startswith("07:30"), f"次日未生效：{lab.win('wake')['window']}")
-        p = lab.run([sys.executable, str(lab.rtc), "--workspace", str(lab.ws),
-                     "set-time", "--window", "wake", "--start", "08:00"])   # end 仍 07:55 < start
+        p = lab.run(
+            [
+                sys.executable,
+                str(lab.rtc),
+                "--workspace",
+                str(lab.ws),
+                "set-time",
+                "--window",
+                "wake",
+                "--start",
+                "08:00",
+            ]
+        )  # end 仍 07:55 < start
         lab.ok(p.returncode == 3, f"start 晚于 end 应 exit 3，实际 {p.returncode}")
 
     lab.case("E1 cancel 只影响今天", "今天 cancelled、明天恢复", t_cancel)
@@ -391,13 +460,25 @@ def suite(lab: Lab) -> None:
     print("\n[6/6] 并发、锁、坏文件、观测命令")
 
     def t_concurrent():
-        lab.fresh("concur")
-        lab.rt_now("plan", "2026-12-02T06:00")
+        _lock_window("concur", "2026-12-02")
         rev0 = lab.status()["rev"]
-        procs = [subprocess.Popen([sys.executable, str(lab.rtc), "--workspace", str(lab.ws),
-                                   "due", "--now", "2026-12-02T07:00"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                 for _ in range(3)]
+        procs = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(lab.rtc),
+                    "--workspace",
+                    str(lab.ws),
+                    "due",
+                    "--now",
+                    "2026-12-02T07:00",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(3)
+        ]
         outs = [p.communicate() for p in procs]
         spoke = [o for o in outs if o[0].strip()]
         lab.ok(len(spoke) == 1, f"3 个并发 due 应只有一个出文案，实际 {len(spoke)} 个")
@@ -407,29 +488,79 @@ def suite(lab: Lab) -> None:
         except Exception as e:
             raise AssertionError(f"alarms.json 被写坏：{e}")
         lab.ok(lab.status()["rev"] >= rev0, "rev 倒退")
-        lab.ok(lab.win("wake")["fireCount"] == 1, f"并发多写了 fireCount：{lab.win('wake')['fireCount']}")
+        lab.ok(lab.win("lk")["fireCount"] == 1, f"并发多写了 fireCount：{lab.win('lk')['fireCount']}")
+
+    def _hold_lock(seconds):
+        """起一个子进程真正持有 state/alarms.json 的操作系统锁（不是只建一个文件）。"""
+        lock_target = lab.ws / "state" / "alarms.json"
+        script = lab.root / "hold-lock.py"
+        script.write_text(
+            "import pathlib, sys, time\n"
+            f"sys.path.insert(0, {str(lab.rtc.parent)!r})\n"
+            "import rtc\n"
+            "with rtc._exclusive_file_lock(pathlib.Path(sys.argv[1])):\n"
+            "    print('HELD', flush=True)\n"
+            "    time.sleep(float(sys.argv[2]))\n",
+            encoding="utf-8",
+        )
+        child = subprocess.Popen(
+            [sys.executable, str(script), str(lock_target), str(seconds)],
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        child.stdout.readline()
+        return child
+
+    def _lock_window(tag, date):
+        """沙箱里自建一个覆盖 07:00 的一次性窗口，不依赖实机时刻表里有没有 wake。"""
+        lab.fresh(tag)
+        lab.add_window(
+            id="lk",
+            label="锁测试",
+            start="07:00",
+            end="07:15",
+            intervalMin=5,
+            expectFires=1,
+            ackHints=["好了"],
+            oneOff=True,
+            validFrom=date,
+            validUntil=date,
+        )
+        lab.rt_now("plan", f"{date}T06:00")
 
     def t_lock_fresh():
-        lab.fresh("lock1")
-        lab.rt_now("plan", "2026-12-03T06:00")
-        lock = lab.ws / "state" / "alarms.json.lock"
-        lock.write_text("held", encoding="utf-8")
-        p = lab.rt_now("due", "2026-12-03T07:00")
-        lab.ok("写入冲突" in p.stderr, f"新鲜锁时未提示冲突：{p.stderr.strip()[:90]!r}")
-        lab.ok(p.stdout.strip() == "", f"锁被占时不该响：{p.stdout.strip()[:60]!r}")
-        lab.ok(lab.win("wake")["fireCount"] == 0, "锁被占时仍写了状态")
-        lock.unlink()
+        _lock_window("lock1", "2026-12-03")
+        child = _hold_lock(20)  # 比 RTC 的 10s 等待更长，确保它等不到锁
+        try:
+            p = lab.rt_now("due", "2026-12-03T07:00")
+            lab.ok("写入冲突" in p.stderr, f"锁被别的进程持有时未提示冲突：{p.stderr.strip()[:90]!r}")
+            lab.ok(p.stdout.strip() == "", f"锁被占时不该响：{p.stdout.strip()[:60]!r}")
+            lab.ok(lab.win("lk")["fireCount"] == 0, "锁被占时仍写了状态")
+        finally:
+            child.kill()
+            child.wait()
 
     def t_lock_stale():
-        lab.fresh("lock2")
-        lab.rt_now("plan", "2026-12-04T06:00")
+        """sidecar 的 mtime 再旧也不接管；持有者一退出立刻能拿到，且 sidecar 不删。"""
+        _lock_window("lock2", "2026-12-04")
         lock = lab.ws / "state" / "alarms.json.lock"
-        lock.write_text("held", encoding="utf-8")
-        old = time.time() - 3600
-        os.utime(lock, (old, old))
+        child = _hold_lock(20)
+        try:
+            old = time.time() - 3600
+            os.utime(lock, (old, old))
+            p = lab.rt_now("due", "2026-12-04T07:00")
+            lab.ok(
+                p.stdout.strip() == "", f"旧 mtime 被当成「可接管」，锁没起作用：{p.stdout.strip()[:60]!r}"
+            )
+            lab.ok("写入冲突" in p.stderr, f"旧 mtime 时未提示冲突：{p.stderr.strip()[:90]!r}")
+            lab.ok(lab.win("lk")["fireCount"] == 0, "锁被占时仍写了状态")
+        finally:
+            child.kill()
+            child.wait()
         p = lab.rt_now("due", "2026-12-04T07:00")
-        lab.ok(p.stdout.strip() != "", f"陈旧锁应被接管并正常响，实际静默：{p.stderr.strip()[:90]!r}")
-        lab.ok(not lock.exists(), "接管后旧锁文件应被清掉")
+        lab.ok(p.stdout.strip() != "", f"持有者已退出，提醒仍未响：{p.stderr.strip()[:90]!r}")
+        lab.ok(lock.exists(), "sidecar 应常驻，不应被删除或按年龄清理")
 
     def t_corrupt():
         lab.fresh("corrupt")
@@ -437,16 +568,21 @@ def suite(lab: Lab) -> None:
         f = lab.ws / "state" / "alarms.json"
         f.write_text("{oops", encoding="utf-8")
         p = lab.rt_now("due", "2026-12-05T07:00")
-        lab.ok(p.returncode != 1 or "Traceback" not in p.stderr,
-               "状态文件损坏时抛 Traceback（应给一行可读错误并安全退出）")
+        lab.ok(
+            p.returncode != 1 or "Traceback" not in p.stderr,
+            "状态文件损坏时抛 Traceback（应给一行可读错误并安全退出）",
+        )
         lab.ok(f.read_text(encoding="utf-8") == "{oops", "损坏文件被覆盖（更严重）")
 
     def t_observe():
         lab.fresh("obs")
         lab.rt_now("plan", "2026-12-06T06:00")
         lab.rt_now("due", "2026-12-06T07:00")
-        for cmd in (["history", "--json", "2026-12-06"], ["schedule", "--json", "2026-12-07"],
-                    ["metrics", "report", "--days", "7"]):
+        for cmd in (
+            ["history", "--json", "2026-12-06"],
+            ["schedule", "--json", "2026-12-07"],
+            ["metrics", "report", "--days", "7"],
+        ):
             p = lab.rt(cmd[0], *cmd[1:])
             lab.ok(p.returncode == 0, f"{cmd[0]} 退出码 {p.returncode}：{p.stderr.strip()[:80]}")
         p = lab.rt("history", "--json", "2026-12-06")
@@ -455,7 +591,7 @@ def suite(lab: Lab) -> None:
 
     lab.case("F1 三路并发写", "只有一个响、文件不坏、rev 不倒退", t_concurrent)
     lab.case("F2 新鲜锁", "提示写入冲突、不响、不改状态", t_lock_fresh)
-    lab.case("F3 陈旧锁接管", "1 小时前的锁被接管并清理", t_lock_stale)
+    lab.case("F3 锁不按年龄接管", "mtime 一小时前也不接管、持有者退出后立刻可写、sidecar 常驻", t_lock_stale)
     lab.case("F4 坏状态文件", "不抛 Traceback、不覆盖原文件", t_corrupt)
     lab.case("F5 观测命令", "history/schedule/metrics 可跑可解析", t_observe)
 
@@ -490,8 +626,10 @@ def live(lab: Lab, at_min: int, wait_min: int) -> None:
     label = f"【实机自检】{datetime.now():%H:%M}"
     print(f"   注入一次性提醒：今天 {when}（{at_min} 分钟后）")
 
-    p = lab.run([sys.executable, str(lab.once), "--workspace", str(real), when, label,
-                 "--window-min", "5"], timeout=120)
+    p = lab.run(
+        [sys.executable, str(lab.once), "--workspace", str(real), when, label, "--window-min", "5"],
+        timeout=120,
+    )
     print(f"   rtc_once exit={p.returncode}  {p.stderr.strip()[:120]}")
     ids = [w["id"] for w in lab.routines()["alarmWindows"] if w.get("oneOff") and label in w.get("label", "")]
     lab.ok(ids, "注入失败：routines.json 里找不到本次测试窗口")
@@ -515,8 +653,11 @@ def live(lab: Lab, at_min: int, wait_min: int) -> None:
         c = lab.case("L2 宿主真触发", "cron 在窗口内跑到了这条提醒", lambda: None)
         c.detail = f"state={fired['state']} fire={fired['fireCount']}"
     else:
-        lab.case("L2 宿主真触发", "cron 在窗口内跑到了这条提醒",
-                 lambda: (_ for _ in ()).throw(AssertionError(f"{wait_min} 分钟内没触发")))
+        lab.case(
+            "L2 宿主真触发",
+            "cron 在窗口内跑到了这条提醒",
+            lambda: (_ for _ in ()).throw(AssertionError(f"{wait_min} 分钟内没触发")),
+        )
 
     # cron 侧证据
     def t_cron_ok():
@@ -554,7 +695,9 @@ def report(lab: Lab, out: Path) -> int:
     total = len(lab.cases)
     n = {s: sum(1 for c in lab.cases if c.status == s) for s in ("PASS", "FAIL", "XFAIL", "XPASS", "SKIP")}
     print("\n" + "=" * 72)
-    print(f"结果：{n['PASS']}/{total} 通过 · 失败 {n['FAIL']} · 已知缺陷 {n['XFAIL']} · 意外通过 {n['XPASS']}")
+    print(
+        f"结果：{n['PASS']}/{total} 通过 · 失败 {n['FAIL']} · 已知缺陷 {n['XFAIL']} · 意外通过 {n['XPASS']}"
+    )
     if n["FAIL"] or n["XPASS"]:
         print("需要处理：")
         for c in lab.cases:
@@ -567,11 +710,13 @@ def report(lab: Lab, out: Path) -> int:
                 print(f"  ! {c.cid} {c.title}\n    {c.detail}")
     print("=" * 72)
 
-    data = {"generatedAt": datetime.now().isoformat(timespec="seconds"),
-            "workspace": str(lab.real_ws), "rtc": str(lab.rtc),
-            "summary": {**n, "total": total},
-            "cases": [{"id": c.cid, "title": c.title, "status": c.status,
-                       "detail": c.detail} for c in lab.cases]}
+    data = {
+        "generatedAt": datetime.now().isoformat(timespec="seconds"),
+        "workspace": str(lab.real_ws),
+        "rtc": str(lab.rtc),
+        "summary": {**n, "total": total},
+        "cases": [{"id": c.cid, "title": c.title, "status": c.status, "detail": c.detail} for c in lab.cases],
+    }
     out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"报告：{out}")
     return 0 if not n["FAIL"] and not n["XPASS"] else 1
