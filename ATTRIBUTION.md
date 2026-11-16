@@ -33,7 +33,7 @@
 
 | 贡献者 | 范围 | 落点 |
 |---|---|---|
-| [@nqble](https://github.com/nqble) | 2026-11 外部审计：独立复现审计发现 ①（stale-lock 接管丢写入），并给出「持久 sidecar + 操作系统持锁」的替换方案（Windows `msvcrt.locking` / POSIX `fcntl.flock`），带 Windows 侧六项针对性检查与既有行为测试 | 分支 `feat/os-lock` 的 PR：重写 `_exclusive_file_lock`，删除按 mtime 接管的旧实现 |
+| [@nqble](https://github.com/nqble) | 2026-11 外部审计：独立复现审计发现 ①（stale-lock 接管丢写入），并给出「持久 sidecar + 操作系统持锁」的替换方案（Windows `msvcrt.locking` / POSIX `fcntl.flock`），带 Windows 侧六项针对性检查与既有行为测试 | PR [#19](https://github.com/Janlhin/RTC-kit/pull/19)：重写 `_exclusive_file_lock`，删除按 mtime 接管的旧实现 |
 
 审计提交的是**讨论用补丁，不是可直接部署的成品**。仓库在采纳时做了四处改动，与原补丁不同：
 
