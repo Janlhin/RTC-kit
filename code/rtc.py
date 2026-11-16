@@ -884,6 +884,12 @@ BACKUP_FILES = (
     "AGENTS.md",
     "tasks.md",
 )
+# state/backups 只认程序自己写的三类；模型/人随手 cp 的 routines.<时间>.json 不进归档
+BACKUP_ROUTINE_PATTERNS = (
+    "routines.program-last.json",
+    "routines.handedit-*.json",
+    "routines.corrupt-*.json",
+)
 
 
 def backup_config() -> tuple[list[Path], int]:
@@ -910,18 +916,37 @@ def backup_config() -> tuple[list[Path], int]:
     return targets, keep
 
 
-def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], list[str]]:
-    """把工作区档案压成一份 zip 写到每个目标盘；返回（写成功的路径, 错误列表）。"""
+def archive_members() -> list[tuple[Path, str]]:
+    """归档要带哪些文件。
+
+    `state/backups` 只认程序自己写的那三类（底稿 / 手改证据 / 坏件），
+    模型或人随手 `cp` 出来的 `routines.<时间>.json` 不进归档——否则翻历史时
+    会看到两份 routines，一份 10 个窗口一份 7 个，没人分得清哪份是真的。
+    """
     members: list[tuple[Path, str]] = []
     for rel in BACKUP_FILES:
         p = WORKSPACE / rel
         if p.is_file():
             members.append((p, rel))
-    for sub in ("state/schedule", "state/backups"):
-        d = WORKSPACE / sub
-        if d.is_dir():
-            for f in sorted(d.glob("*.json")):
-                members.append((f, f"{sub}/{f.name}"))
+    schedule = WORKSPACE / "state" / "schedule"
+    if schedule.is_dir():
+        for f in sorted(schedule.glob("*.json")):
+            members.append((f, f"state/schedule/{f.name}"))
+    backups = WORKSPACE / "state" / "backups"
+    if backups.is_dir():
+        seen: set[Path] = set()
+        for pat in BACKUP_ROUTINE_PATTERNS:
+            for f in sorted(backups.glob(pat)):
+                if f in seen:
+                    continue
+                seen.add(f)
+                members.append((f, f"state/backups/{f.name}"))
+    return members
+
+
+def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], list[str]]:
+    """把工作区档案压成一份 zip 写到每个目标盘；返回（写成功的路径, 错误列表）。"""
+    members = archive_members()
     if not members:
         return [], ["工作区里没有可备份的档案（还没生成过数据？）"]
 
@@ -1099,16 +1124,7 @@ def git_archive(now: datetime) -> tuple[bool, list[str]]:
 
     today = now.date().isoformat()
     day_dir = repo / "archive" / today
-    members: list[tuple[Path, str]] = []
-    for rel in BACKUP_FILES:
-        p = WORKSPACE / rel
-        if p.is_file():
-            members.append((p, rel))
-    for sub in ("state/schedule", "state/backups"):
-        d = WORKSPACE / sub
-        if d.is_dir():
-            for f in sorted(d.glob("*.json")):
-                members.append((f, f"{sub}/{f.name}"))
+    members = archive_members()
     if not members:
         return False, []
 

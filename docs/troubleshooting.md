@@ -237,6 +237,15 @@ E:\RTC-Backup\RTC-20261116.zip
 > 所以「这周漏了几次」这类统计从第一天起就有数据。`.db` 是射频库，`.sql` 是它的文本版
 > ——git 里看 `.sql` 才知道今天多了哪几行。
 
+**哪些东西不会进备份**（`BACKUP_FILES` 是显式白名单，不是「打包整个目录」）：
+
+| 不进备份 | 为什么 |
+|---|---|
+| `state/gateway.heartbeat`、`gateway.lifecycle.json`、`gateway.start-attestation.json`、`dashboard_clients.heartbeat` | 这些是**宿主网关写的**，只是目录共享才落在 `state/`。RTC 自己的心跳是 `state/heartbeat.json` |
+| `state/backups/routines.<时间>.json` 这类手抄副本 | 只收程序自己写的三类：`routines.program-last.json`、`routines.handedit-*`、`routines.corrupt-*`。否则归档里会出现两份 routines，没人分得清哪份是真的 |
+| `state/backups/_model-made/` | 模型或人手动 `cp` 的东西统一隔离在这，永不归档 |
+| `state/archive/` | 一次性归档（如模型写的 issues 快照），不进每日备份 |
+
 **多久一次、留几份**：每天一次（同一天重复跑不会重写），每个盘留最近 30 份（约 30 KB/天）。
 
 **想改目标盘或保留天数**，写一份 `rules/backup.json`：

@@ -1842,6 +1842,37 @@ class TestBackup(RtcCase):
         finally:
             shutil.rmtree(target, ignore_errors=True)
 
+    def test_backup_ignores_handmade_copies_in_state_backups(self):
+        """实机事故：模型/人 `cp` 出来的 routines.<时间>.json 被当成档案收走，
+        归档里于是出现两份 routines（一份 10 窗口一份 7 窗口），没人分得清哪份是真的。
+        只认程序自己写的那三类。"""
+        import zipfile
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        self.assertTrue((bdir / "routines.program-last.json").is_file(), "程序底稿没生成")
+        # 模拟模型手抄 + 程序的手改证据
+        (bdir / "routines.20261116_180845.json").write_text("{}", encoding="utf-8")
+        (bdir / "routines.handedit-20261116-161521.json").write_text("{}", encoding="utf-8")
+        (bdir / "notes.json").write_text("{}", encoding="utf-8")
+
+        target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
+        try:
+            rc, out, err = self.cli("backup", "--to", str(target))
+            self.assertEqual(rc, 0, err)
+            with zipfile.ZipFile(target / self._zip_names(target)[0]) as z:
+                names = z.namelist()
+            self.assertIn("state/backups/routines.program-last.json", names, "程序底稿必须进归档")
+            self.assertIn("state/backups/routines.handedit-20261116-161521.json", names,
+                          "手改证据必须进归档")
+            self.assertNotIn("state/backups/routines.20261116_180845.json", names,
+                             "手抄副本不该进归档")
+            self.assertNotIn("state/backups/notes.json", names, "无关 json 不该进归档")
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+
     def test_backup_keeps_only_latest_n(self):
         self.write_routine(base_routine())
         self.cli("plan", now="2026-11-16T08:00:00+08:00")
