@@ -87,6 +87,32 @@ def default_skills_dir() -> Path:
     return Path.home() / ".hermes" / "skills"
 
 
+def _ensure_utf8_stdio() -> None:
+    """控制台编码兜底。
+
+    GitHub Actions 的 Windows runner 控制台是 cp1252，打印中文会直接抛
+    UnicodeEncodeError——CI 第一次跑就死在一行 `print("[install] --dry-run：…")`。
+    只在当前编码表示不了中文时才切 UTF-8；中文 Windows 的 cp936 控制台保持原样，
+    免得把它本来正常的显示改成乱码。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        enc = getattr(stream, "encoding", None)
+        if not enc:
+            continue
+        try:
+            "安装".encode(enc)
+            continue
+        except (UnicodeEncodeError, LookupError):
+            pass
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def _placeholders_for(code_dir: Path, workspace: Path) -> dict:
     """路径类占位符 → 真实绝对路径。都是「由部署决定」的值，安装时确定性填死。"""
     return {
@@ -234,6 +260,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    _ensure_utf8_stdio()
     ap = argparse.ArgumentParser(description="RTC-kit 安装接地器")
     ap.add_argument("--workspace", required=True, help="RTC 工作区目录（rules/routines.json 将在此）")
     ap.add_argument("--harness-scripts-dir", default=None, help="Harness 的 scripts 目录（默认 ~/.hermes/scripts）")

@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,10 +39,11 @@ class TestSubstituteSkill(unittest.TestCase):
     def test_no_mixed_separators(self):
         out = install.substitute_skill(
             "python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} ack", self.code, self.ws)
-        self.assertNotIn(str(self.code) + "/", out, "拼出了混斜线路径")
-        self.assertNotIn(str(self.ws) + "/", out)
-        if os.sep == "\\":
-            self.assertIn(str(self.code) + "\\rtc.py", out)
+        # 「混斜线」= 出现了非本平台分隔符；POSIX 上 / 本来就是对的，不能反过来断言
+        wrong = "/" if os.sep == "\\" else "\\"
+        self.assertNotIn(str(self.code) + wrong, out, "拼出了混斜线路径")
+        self.assertNotIn(str(self.ws) + wrong, out)
+        self.assertIn(str(self.code) + os.sep + "rtc.py", out)
 
     def test_user_fill_placeholders_are_only_reported(self):
         out = install.substitute_skill("td-{{DATE_COMPACT}}-a", self.code, self.ws)
@@ -69,10 +71,25 @@ class TestInstallRun(unittest.TestCase):
         alarm = (base / "skills" / "alarm-clock" / "SKILL.md").read_text(encoding="utf-8")
         self.assertEqual(install.remaining_placeholders(alarm), [],
                          "alarm-clock 不该留任何占位符")
-        self.assertNotIn(str(base / "scripts") + "/", alarm, "装出来的技能里不该有混斜线路径")
+        wrong = "/" if os.sep == "\\" else "\\"
+        self.assertNotIn(str(base / "scripts") + wrong, alarm, "装出来的技能里不该有混斜线路径")
 
         routine = base / "ws" / "rules" / "routines.json"
         self.assertTrue(routine.is_file(), "工作区应当有可运行的初始 routines.json")
+
+
+class TestConsoleEncoding(unittest.TestCase):
+    """CI 的 Windows runner 控制台是 cp1252：打印中文不能把安装器打死。"""
+
+    def test_dry_run_survives_non_utf8_console(self):
+        env = dict(os.environ, PYTHONIOENCODING="cp1252")
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "install.py"),
+             "--workspace", str(Path(tempfile.mkdtemp(prefix="rtc-enc-"))) + os.sep + "ws",
+             "--dry-run"],
+            env=env, capture_output=True, text=True, errors="replace")
+        self.assertEqual(proc.returncode, 0,
+                         f"cp1252 控制台下安装器崩了：{(proc.stderr or '')[-400:]}")
 
 
 if __name__ == "__main__":
