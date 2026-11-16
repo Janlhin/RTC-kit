@@ -28,9 +28,11 @@
   - --smoke 需要宿主的定时器在跑（Hermes 即网关 + 两条 cron）。超时不等于装坏，
     只是"提醒响了没"这件事无法在本次安装里被证实。
 """
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -45,8 +47,8 @@ from pathlib import Path
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_OFFSET = "+08:00"
 SMOKE_LABEL = "【安装自检】链路测试"
-SMOKE_LEAD_MIN = 2      # 自检提醒定在「现在 + 2 分钟」
-SMOKE_WINDOW_MIN = 4    # 窗口宽 4 分钟：无论当前是第几分钟，都必然覆盖到一个 5 分钟刻度
+SMOKE_LEAD_MIN = 2  # 自检提醒定在「现在 + 2 分钟」
+SMOKE_WINDOW_MIN = 4  # 窗口宽 4 分钟：无论当前是第几分钟，都必然覆盖到一个 5 分钟刻度
 SMOKE_DEFAULT_WAIT = 330
 
 DEFAULT_ROUTINE = {
@@ -59,18 +61,54 @@ DEFAULT_ROUTINE = {
         "holidayOverrides": [{"date": "2030-01-01", "type": "holiday", "note": "示例：新年"}],
     },
     "alarmWindows": [
-        {"id": "wake", "label": "起床", "start": "08:10", "end": "08:40",
-         "intervalMin": 5, "expectFires": 7, "ackHints": ["起了", "好了"]},
-        {"id": "meds-am", "label": "早间事项", "start": "09:00", "end": "09:25",
-         "intervalMin": 5, "expectFires": 6, "ackHints": ["好了", "办了"]},
-        {"id": "meds-noon", "label": "午间事项", "start": "12:00", "end": "12:25",
-         "intervalMin": 5, "expectFires": 6, "ackHints": ["好了", "办了"]},
-        {"id": "meds-pm", "label": "晚间事项", "start": "19:00", "end": "19:25",
-         "intervalMin": 5, "expectFires": 6, "ackHints": ["好了", "办了"]},
+        {
+            "id": "wake",
+            "label": "起床",
+            "start": "08:10",
+            "end": "08:40",
+            "intervalMin": 5,
+            "expectFires": 7,
+            "ackHints": ["起了", "好了"],
+        },
+        {
+            "id": "meds-am",
+            "label": "早间事项",
+            "start": "09:00",
+            "end": "09:25",
+            "intervalMin": 5,
+            "expectFires": 6,
+            "ackHints": ["好了", "办了"],
+        },
+        {
+            "id": "meds-noon",
+            "label": "午间事项",
+            "start": "12:00",
+            "end": "12:25",
+            "intervalMin": 5,
+            "expectFires": 6,
+            "ackHints": ["好了", "办了"],
+        },
+        {
+            "id": "meds-pm",
+            "label": "晚间事项",
+            "start": "19:00",
+            "end": "19:25",
+            "intervalMin": 5,
+            "expectFires": 6,
+            "ackHints": ["好了", "办了"],
+        },
     ],
     "rollcalls": [
-        {"hour": 9, "minute": 0, "kindByDateType": {"workday": "report", "weekend": "none", "holiday": "none"}},
-        {"hour": 20, "minute": 0, "kindByDateType": {"workday": "summary", "weekend": "summary", "holiday": "summary"}},
+        {
+            "hour": 9,
+            "minute": 0,
+            "kindByDateType": {"workday": "report", "weekend": "none", "holiday": "none"},
+        },
+        {
+            "hour": 20,
+            "minute": 0,
+            "kindByDateType": {"workday": "summary", "weekend": "summary", "holiday": "summary"},
+        },
     ],
     "phases": [
         {"name": "active", "start": "08:00", "end": "23:00", "proactiveAllowed": True},
@@ -127,10 +165,8 @@ def _ensure_utf8_stdio() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
-        try:
+        with contextlib.suppress(ValueError, OSError):
             reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
-            pass
 
 
 def _placeholders_for(code_dir: Path, workspace: Path) -> dict:
@@ -175,14 +211,15 @@ def substitute_skill(template: str, code_dir: Path, workspace: Path) -> str:
 def remaining_placeholders(text: str) -> list:
     """还剩哪些 ``{{XXX}}``。
 
-    路径类占位符已由本脚本填死；剩下的都是 `CONTRIBUTING.md` 里「由部署 / 用户
+    路径类占位符已由本脚本填死；剩下的都是 `docs/contributing.md` 里「由部署 / 用户
     决定」的填充项（时区、作息时刻、项目名……），安装器不猜，只提示。
     """
     return sorted(set(re.findall(r"\{\{[A-Z][A-Z0-9_]*\}\}", text)))
 
 
-def install_skills(repo: Path, skills_dir: Path, scripts_dir: Path,
-                   workspace: Path, dry_run: bool, category: str = "rtc") -> list:
+def install_skills(
+    repo: Path, skills_dir: Path, scripts_dir: Path, workspace: Path, dry_run: bool, category: str = "rtc"
+) -> list:
     """把仓库里**所有**带 SKILL.md 的技能接地后写进 Harness。
 
     只装 alarm-clock 是不够的：daily-routine / daily-task-prep / daily-task-manager /
@@ -207,8 +244,7 @@ def install_skills(repo: Path, skills_dir: Path, scripts_dir: Path,
         if leftovers:
             shown = "、".join(leftovers[:3])
             more = f" 等 {len(leftovers)} 处" if len(leftovers) > 3 else ""
-            print(f"[install] 提示：{name} 有需按你作息填的占位符：{shown}{more}"
-                  "（装完再改，不影响提醒本身）")
+            print(f"[install] 提示：{name} 有需按你作息填的占位符：{shown}{more}（装完再改，不影响提醒本身）")
         installed.append(name)
     return installed
 
@@ -239,8 +275,9 @@ def backup_targets_for(workspace: Path) -> list:
     return out
 
 
-def scaffold_workspace(repo: Path, code_dir: Path, workspace: Path,
-                       dry_run: bool, force: bool = False) -> dict:
+def scaffold_workspace(
+    repo: Path, code_dir: Path, workspace: Path, dry_run: bool, force: bool = False
+) -> dict:
     """搭工作区骨架。已存在的**用户文件**一律不覆盖（除非 force）。
 
     返回 {相对路径: "created" | "skipped" | "planned" | "overwritten"}，供打印与测试。
@@ -251,22 +288,21 @@ def scaffold_workspace(repo: Path, code_dir: Path, workspace: Path,
     files = {
         "rules/routines.json": json.dumps(default_routine(), ensure_ascii=False, indent=2) + "\n",
         "rules/backup.json": json.dumps(
-            {"targets": backup_targets_for(workspace), "keep": 30},
-            ensure_ascii=False, indent=2) + "\n",
+            {"targets": backup_targets_for(workspace), "keep": 30}, ensure_ascii=False, indent=2
+        )
+        + "\n",
         "errors.md": ERRORS_HEADER,
         "tasks.md": "# tasks.md — 今天要做什么\n\n## Today\n\n### 我\n\n"
-                    "## 待安排（有日期）\n\n## 待安排（没日期）\n",
+        "## 待安排（有日期）\n\n## 待安排（没日期）\n",
         "AGENTS.md": "",
     }
 
     agents_tpl = repo / "templates" / "AGENTS.example.md"
     tasks_tpl = repo / "templates" / "tasks.example.md"
     if agents_tpl.is_file():
-        files["AGENTS.md"] = substitute_skill(agents_tpl.read_text(encoding="utf-8"),
-                                              code_dir, workspace)
+        files["AGENTS.md"] = substitute_skill(agents_tpl.read_text(encoding="utf-8"), code_dir, workspace)
     if tasks_tpl.is_file():
-        files["tasks.md"] = substitute_skill(tasks_tpl.read_text(encoding="utf-8"),
-                                             code_dir, workspace)
+        files["tasks.md"] = substitute_skill(tasks_tpl.read_text(encoding="utf-8"), code_dir, workspace)
 
     result = {}
     for rel, text in files.items():
@@ -289,8 +325,7 @@ def smoke_target(now: datetime) -> str:
 
 
 def _run_quiet(cmd: list) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def run_smoke(scripts_dir: Path, workspace: Path, wait_sec: int = SMOKE_DEFAULT_WAIT) -> int:
@@ -308,13 +343,22 @@ def run_smoke(scripts_dir: Path, workspace: Path, wait_sec: int = SMOKE_DEFAULT_
     now = datetime.now()
     at = smoke_target(now)
     py = sys.executable or "python"
-    proc = _run_quiet([py, str(once), at, SMOKE_LABEL,
-                       "--date", now.date().isoformat(),
-                       "--window-min", str(SMOKE_WINDOW_MIN),
-                       "--workspace", str(workspace)])
+    proc = _run_quiet(
+        [
+            py,
+            str(once),
+            at,
+            SMOKE_LABEL,
+            "--date",
+            now.date().isoformat(),
+            "--window-min",
+            str(SMOKE_WINDOW_MIN),
+            "--workspace",
+            str(workspace),
+        ]
+    )
     if proc.returncode != 0:
-        print("[install] 自检注入失败：" + (proc.stderr or proc.stdout or "").strip()[-300:],
-              file=sys.stderr)
+        print("[install] 自检注入失败：" + (proc.stderr or proc.stdout or "").strip()[-300:], file=sys.stderr)
         return 2
 
     print(f"[install] 已注入自检提醒：{at}（约 {SMOKE_LEAD_MIN} 分钟后）")
@@ -340,8 +384,10 @@ def run_smoke(scripts_dir: Path, workspace: Path, wait_sec: int = SMOKE_DEFAULT_
     print("[install] 接下来的排查顺序（不是装坏了，多半是宿主没在跑）：", file=sys.stderr)
     print("  1) 宿主网关在跑吗：hermes gateway status", file=sys.stderr)
     print("  2) 两条 cron 建了吗：hermes cron list（应有 rtc-plan / rtc-due）", file=sys.stderr)
-    print("  3) 直接手跑一次判断：python " + str(rtc) + " --workspace " + str(workspace) + " due",
-          file=sys.stderr)
+    print(
+        "  3) 直接手跑一次判断：python " + str(rtc) + " --workspace " + str(workspace) + " due",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -414,8 +460,9 @@ def run(args: argparse.Namespace) -> int:
     print("\n[install] 2/5 接地技能")
     tpl_root = repo / "skills"
     if tpl_root.is_dir():
-        names = install_skills(repo, skills_dir, scripts_dir, workspace, dry_run,
-                               str(getattr(args, "skills_category", "rtc")))
+        names = install_skills(
+            repo, skills_dir, scripts_dir, workspace, dry_run, str(getattr(args, "skills_category", "rtc"))
+        )
         print(f"[install] 技能共 {len(names)} 个：{'、'.join(names)}")
     else:
         print(f"[install] 找不到技能模板目录：{tpl_root}", file=sys.stderr)
@@ -425,19 +472,27 @@ def run(args: argparse.Namespace) -> int:
     scaffold = scaffold_workspace(repo, scripts_dir, workspace, dry_run, force)
     for rel in ("rules/routines.json", "rules/backup.json", "AGENTS.md", "tasks.md", "errors.md"):
         state = scaffold.get(rel, "?")
-        label = {"created": "已生成", "skipped": "已存在，跳过（不动你的数据）",
-                 "planned": "将生成", "overwritten": "已覆盖（--force）"}.get(state, state)
+        label = {
+            "created": "已生成",
+            "skipped": "已存在，跳过（不动你的数据）",
+            "planned": "将生成",
+            "overwritten": "已覆盖（--force）",
+        }.get(state, state)
         print(f"[install] {rel}: {label}")
     if scaffold.get("rules/backup.json") == "created":
         tgts = backup_targets_for(workspace)
         if tgts:
             print(f"[install] 每日备份目标：{'、'.join(tgts)}（每个盘留最近 30 份）")
         else:
-            print("[install] 未找到第二块本地盘：每日备份暂不启用。"
-                  "接一块盘后在 rules/backup.json 里的 targets 写上路径即可。")
+            print(
+                "[install] 未找到第二块本地盘：每日备份暂不启用。"
+                "接一块盘后在 rules/backup.json 里的 targets 写上路径即可。"
+            )
     if scaffold.get("rules/routines.json") == "created":
-        print("[install] 默认时刻表已就位：起床 08:10、早间 09:00、午间 12:00、晚间 19:00"
-              "（用 set-time 改，别手改 JSON）")
+        print(
+            "[install] 默认时刻表已就位：起床 08:10、早间 09:00、午间 12:00、晚间 19:00"
+            "（用 set-time 改，别手改 JSON）"
+        )
 
     # 4/5 宿主登记（可选）
     if getattr(args, "with_host", False):
@@ -453,19 +508,22 @@ def run(args: argparse.Namespace) -> int:
         if dry_run:
             print(f"[install] 将注入 {smoke_target(datetime.now())} 的一次性提醒并等待触发")
         else:
-            smoke_rc = run_smoke(scripts_dir, workspace,
-                                 int(getattr(args, "smoke_wait", SMOKE_DEFAULT_WAIT)))
+            smoke_rc = run_smoke(scripts_dir, workspace, int(getattr(args, "smoke_wait", SMOKE_DEFAULT_WAIT)))
     else:
         print("\n[install] 5/5 链路自检：未要求（加 --smoke 可当场验证提醒真的会响）")
 
     # cron 命令
     print("\n[install] 两条 cron（网关运行时执行；或加 --setup-cron 让本脚本执行）：")
-    cmd_plan = (f'hermes cron create "0 6 * * *" --name rtc-plan --no-agent '
-                f'--script rtc_plan.py --deliver <target> --failure-deliver <target> '
-                f'--catch-up on --timezone {args.tz_offset}')
-    cmd_due = (f'hermes cron create "*/5 * * * *" --name rtc-due --no-agent '
-               f'--script rtc_due.py --deliver <target> --failure-deliver <target> '
-               f'--catch-up off --timezone {args.tz_offset}')
+    cmd_plan = (
+        f'hermes cron create "0 6 * * *" --name rtc-plan --no-agent '
+        f"--script rtc_plan.py --deliver <target> --failure-deliver <target> "
+        f"--catch-up on --timezone {args.tz_offset}"
+    )
+    cmd_due = (
+        f'hermes cron create "*/5 * * * *" --name rtc-due --no-agent '
+        f"--script rtc_due.py --deliver <target> --failure-deliver <target> "
+        f"--catch-up off --timezone {args.tz_offset}"
+    )
     print(f"  {cmd_plan}")
     print(f"  {cmd_due}")
     print("  说明：<target> 换成你的投递渠道（如微信 iLink bot）；首次部署先 --deliver local 观察两天。")
@@ -488,21 +546,29 @@ def main() -> int:
     _ensure_utf8_stdio()
     ap = argparse.ArgumentParser(description="RTC-kit 安装接地器")
     ap.add_argument("--workspace", required=True, help="RTC 工作区目录（rules/routines.json 将在此）")
-    ap.add_argument("--harness-scripts-dir", default=None, help="Harness 的 scripts 目录（默认 ~/.hermes/scripts）")
-    ap.add_argument("--harness-skills-dir", default=None, help="Harness 的 skills 目录（默认 ~/.hermes/skills）")
-    ap.add_argument("--skills-category", default="rtc",
-                    help="技能写在 skills/<类别>/<技能>/ 下的类别名；宿主按父目录识别，默认 rtc；传空串则平铺")
+    ap.add_argument(
+        "--harness-scripts-dir", default=None, help="Harness 的 scripts 目录（默认 ~/.hermes/scripts）"
+    )
+    ap.add_argument(
+        "--harness-skills-dir", default=None, help="Harness 的 skills 目录（默认 ~/.hermes/skills）"
+    )
+    ap.add_argument(
+        "--skills-category",
+        default="rtc",
+        help="技能写在 skills/<类别>/<技能>/ 下的类别名；宿主按父目录识别，默认 rtc；传空串则平铺",
+    )
     ap.add_argument("--code-src", default=None, help="源码 code/ 目录（默认脚本所在仓库的 code/）")
     ap.add_argument("--tz-offset", default=DEFAULT_OFFSET, help="工作区时区偏移，默认 +08:00")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不写文件")
-    ap.add_argument("--force", action="store_true",
-                    help="覆盖已存在的工作区文件（会丢用户数据，慎用）")
-    ap.add_argument("--with-host", action="store_true",
-                    help="把工作区登记成宿主项目（当前支持 Hermes）")
-    ap.add_argument("--smoke", action="store_true",
-                    help="注入一条两分钟后的提醒并确认它真的触发了")
-    ap.add_argument("--smoke-wait", type=int, default=SMOKE_DEFAULT_WAIT,
-                    help=f"自检最多等多少秒（默认 {SMOKE_DEFAULT_WAIT}）")
+    ap.add_argument("--force", action="store_true", help="覆盖已存在的工作区文件（会丢用户数据，慎用）")
+    ap.add_argument("--with-host", action="store_true", help="把工作区登记成宿主项目（当前支持 Hermes）")
+    ap.add_argument("--smoke", action="store_true", help="注入一条两分钟后的提醒并确认它真的触发了")
+    ap.add_argument(
+        "--smoke-wait",
+        type=int,
+        default=SMOKE_DEFAULT_WAIT,
+        help=f"自检最多等多少秒（默认 {SMOKE_DEFAULT_WAIT}）",
+    )
     ap.add_argument("--setup-cron", action="store_true", help="尝试执行 hermes cron create（需网关在跑）")
     return run(ap.parse_args())
 

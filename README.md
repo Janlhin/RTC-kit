@@ -75,22 +75,60 @@ cancel     取消
 
 ---
 
+## 技术栈与版本
+
+| 项 | 值 | 登记位置 |
+|---|---|---|
+| 语言 | Python 3.11 / 3.13（CI 双版本） | `.python-version`、`.github/workflows/tests.yml` |
+| 包管理 | pip + `pyproject.toml`（无 lockfile，CI 固定版本区间） | `pyproject.toml` |
+| 测试框架 | `unittest`（标准库） | `code/tests/` |
+| 覆盖率 | `coverage.py`，阈值见 `pyproject.toml` | `pyproject.toml` |
+| Lint / 格式 | `ruff` | `pyproject.toml` |
+| 类型检查 | `mypy` | `pyproject.toml` |
+| 脚本入口 | PowerShell 7.4+（`pwsh`），禁止 `.cmd` / `.bat` | `scripts/*.ps1` |
+
+## 目录结构
+
+| 路径 | 职责 |
+|---|---|
+| `code/` | 确定性脚本（`rtc.py` 主链路、`rtc_plan.py` / `rtc_due.py` / `rtc_once.py` 宿主入口）与回归测试 |
+| `contract/` | 机器可读契约（JSON Schema）与可校验示例 |
+| `rules/` | 声明式规则：`routines` / `priority-map` / `auto-resolver` / `formats` |
+| `skills/` | 5 份技能说明，由运行时加载 |
+| `templates/` | 工作区模板，全部为 `{{占位符}}` |
+| `platform/` | 运行时适配示例（`hermes` / `openclaw`） |
+| `docs/` | 架构、协作、故障处置、审计记录 |
+| `scripts/` | 门禁脚本（`verify.ps1` 为唯一验收入口） |
+| `tools/` | 实验与一次性工具，不属于主链路 |
+| `.github/` | CI 工作流 |
+
+## 验收标准
+
+以下命令全部退出码 0，才算「改对了」：
+
+```powershell
+pwsh -NoLogo -NoProfile -File scripts/verify.ps1
+python -m unittest discover -s code/tests -p "test_*.py"
+python install.py --workspace ./_smoke-ws --dry-run
+```
+
+`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。
+
 ## 目录一览
 
 | 路径 | 内容 |
 |---|---|
-| `README.md` | 本文件 |
-| `ARCHITECTURE.md` | 分层架构、职责边界、为什么这样切、演进路径 |
-| `AUDIT-2026-11-09-RESPONSE.md` | 对 2026-11-09 外部审计的逐条处置记录 |
-| `CONTRIBUTING.md` | 怎么改、怎么填占位符、什么不能提交 |
-| `ATTRIBUTION.md` | 与上游项目的关系、许可边界 |
+| `README.md` | 本文件：定位、技术栈、目录、验收、已知限制 |
+| `AGENTS.md` | AI 协作约束（只放入口、禁止清单与链接） |
+| `DECISIONS.md` | 决策日志（含被否决方案与理由） |
+| `TASKS.md` | 任务队列与待裁决台账 |
+| `MANIFEST.md` | 第三方来源登记（URL / 版本 / 许可结论） |
 | `LICENSE` | AGPL-3.0（仅适用于本仓库原创内容） |
-| `contract/` | JSON Schema + 可校验的示例实例 |
-| `rules/` | 声明式规则（`routines` / `priority-map` / `auto-resolver` / `formats`） |
-| `skills/` | 5 个技能说明 |
-| `templates/` | 工作区模板（全部 `*.example.md`） |
-| `code/` | `rtc.py`（主链路实现）、`metrics.mjs`（旁路统计）、`tests/`（回归测试） |
-| `platform/` | 运行时适配示例 |
+| `docs/architecture.md` | 分层架构、职责边界、为什么这样切、演进路径 |
+| `docs/contributing.md` | 怎么改、怎么填占位符、什么不能提交 |
+| `docs/troubleshooting.md` | 故障处置、备份与恢复 |
+| `docs/attribution.md` | 与上游项目的关系、许可边界 |
+| `docs/audit/2026-11-09-response.md` | 外部审计的逐条处置记录 |
 
 ## 包路径 → 运行时工作区路径
 
@@ -115,12 +153,15 @@ cancel     取消
 
 ---
 
-## 状态与边界
+## 已知限制
 
-- 这是一套**规格与模板**，不是开箱即用的产品。它需要你填配置、选运行时、建定时任务。
-- 示例代码只覆盖「统计记账」这一条旁路，**提醒主链路的调度实现由使用方自己决定**——这正是刻意留出的解耦点。
-- 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天会压一份 zip 写到**其他本地盘**的 `RTC-Backup`（同盘不算备份，目标盘由 `rules/backup.json` 指定），也可以按天提交进你自己的私有 git 仓库（任何平台都行）。恢复办法见 `docs/troubleshooting.md` §7 / §8。
-- 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文。详见 `ATTRIBUTION.md`。
+- 这是一套**规格与模板**，不是开箱即用的产品：需要填配置、选运行时、建定时任务。
+- 提醒主链路的调度由 `code/rtc.py` 承担，但**投递**取决于宿主；不同宿主的 payload 与失败语义不同，本仓库只给示例。
+- `code/metrics.mjs` 是可选旁路统计，**不随主链路维护**；主链路统计走 `rtc.py metrics`。
+- 覆盖率当前未达语句 80% / 分支 70%，阈值按实测基线逐季上调（见 `TASKS.md` T-002 / T-003）。
+- `mypy` 尚未收紧到 `--strict`，存量注解分批补（见 `TASKS.md` T-004）。
+- 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天压一份 zip 到**其他本地盘**的 `RTC-Backup`（目标盘由 `rules/backup.json` 指定），也可按天提交进私有 git 仓库。恢复办法见 `docs/troubleshooting.md` §7 / §8。
+- 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文，详见 `docs/attribution.md`。
 
 ## 许可
 

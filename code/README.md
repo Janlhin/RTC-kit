@@ -285,4 +285,4 @@ python rtc.py metrics schedule --date 2026-12-15
 
 ## 尚未提供的部分
 
-**提醒主链路的调度代码刻意不在这里**。理由见 `ARCHITECTURE.md` 第四节：它属于运行时适配层，不同平台的 payload 种类、会话目标、投递方式都不同。请按 `platform/` 下的示例自行实现，或用运行时的 `command` 类载荷调用你自己的 `due` 脚本。
+**提醒主链路的调度代码刻意不在这里**。理由见 `../docs/architecture.md` 第四节：它属于运行时适配层，不同平台的 payload 种类、会话目标、投递方式都不同。请按 `platform/` 下的示例自行实现，或用运行时的 `command` 类载荷调用你自己的 `due` 脚本。

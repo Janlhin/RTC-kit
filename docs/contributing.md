@@ -3,7 +3,7 @@
 ## 先读两页
 
 1. `README.md` —— 这是什么
-2. `ARCHITECTURE.md` —— 哪层归谁管
+2. `architecture.md` —— 哪层归谁管
 
 改动前先判断你的修改属于哪一层。**最常见的错误是把运行时细节写进 `rules/`**。
 

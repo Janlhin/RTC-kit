@@ -56,4 +56,4 @@ npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json \
 
 ## 契约稳定性
 
-`version` 字段用于演进。加字段视为向后兼容；改字段含义或删字段必须升 `version` 并在 `CONTRIBUTING.md` 里说明迁移方式。
+`version` 字段用于演进。加字段视为向后兼容；改字段含义或删字段必须升 `version` 并在 `../docs/contributing.md` 里说明迁移方式。

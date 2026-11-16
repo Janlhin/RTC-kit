@@ -5,6 +5,7 @@
 stdout 非空 = 要投递的提醒文案；stdout 为空 = Hermes 视为静默，不投递。
 调试时可用环境变量 RTC_NOW 覆盖当前时间（仅本地手工测试用）。
 """
+
 import os
 import sys
 from pathlib import Path

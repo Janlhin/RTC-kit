@@ -5,6 +5,7 @@
 成功且无异常时 stdout 为空（静默）。自检发现「可能没送到」的情况才输出，
 宿主会把这几行原样投递出去。
 """
+
 import os
 import sys
 from pathlib import Path

@@ -13,6 +13,7 @@
 
 不会跑 due（跑一次就会把响铃消耗掉）；到点由 cron 的 rtc-due 投递。
 """
+
 import argparse
 import hashlib
 import json
@@ -20,12 +21,14 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any, cast
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # 标准库类型里 TextIO 没有 reconfigure；实际解释器上是 TextIOWrapper。
+    cast(Any, sys.stdout).reconfigure(encoding="utf-8", errors="replace")
+    cast(Any, sys.stderr).reconfigure(encoding="utf-8", errors="replace")
 
 HERE = Path(__file__).resolve().parent
 RT = HERE / "rtc.py"
@@ -40,7 +43,9 @@ def seal_routine(ws: Path, routines: Path) -> None:
     try:
         payload = {
             "digest": hashlib.sha256(routines.read_bytes()).hexdigest(),
-            "windows": len((json.loads(routines.read_text(encoding="utf-8")) or {}).get("alarmWindows") or []),
+            "windows": len(
+                (json.loads(routines.read_text(encoding="utf-8")) or {}).get("alarmWindows") or []
+            ),
             "at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
         seal = ws / "state" / "routine-seal.json"
@@ -106,23 +111,28 @@ def main() -> int:
     if any(w.get("id") == wid for w in windows):
         return fail(f"窗口 {wid} 已存在，如需修改请先删除 routines.json 里对应条目")
 
-    windows.append({
-        "id": wid,
-        "label": args.label,
-        "start": start,
-        "end": end,
-        "intervalMin": 5,
-        "expectFires": 1,
-        "oneOff": True,
-        "ackHints": [args.ack],
-        "validFrom": iso,
-        "validUntil": iso,
-    })
+    windows.append(
+        {
+            "id": wid,
+            "label": args.label,
+            "start": start,
+            "end": end,
+            "intervalMin": 5,
+            "expectFires": 1,
+            "oneOff": True,
+            "ackHints": [args.ack],
+            "validFrom": iso,
+            "validUntil": iso,
+        }
+    )
     routines.write_bytes((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
     proc = subprocess.run(
         [sys.executable, str(RT), "--workspace", str(ws), "plan", "--force"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         # 回滚配置写入，避免留下未生效的脏配置
@@ -140,8 +150,16 @@ def main() -> int:
     # 否则已送达/已确认的提醒会被复活成 pending（违反不复活 / 不误消）。
     if before and isinstance(before.get("windows"), list):
         runtime_keys = (
-            "fireCount", "state", "lastFiredAt", "ackedAt", "ackText",
-            "missedAt", "missedReason", "checked", "disabled", "cancelledAt",
+            "fireCount",
+            "state",
+            "lastFiredAt",
+            "ackedAt",
+            "ackText",
+            "missedAt",
+            "missedReason",
+            "checked",
+            "disabled",
+            "cancelledAt",
         )
         old_by_id = {w.get("id"): w for w in before["windows"]}
         try:
@@ -152,9 +170,7 @@ def main() -> int:
                     for key in runtime_keys:
                         if key in old:
                             w[key] = old[key]
-            state_path.write_bytes(
-                (json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-            )
+            state_path.write_bytes((json.dumps(current, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
         except (OSError, ValueError) as exc:
             print(f"警告：合并既有状态失败（{exc}），请检查 state/alarms.json", file=sys.stderr)
 

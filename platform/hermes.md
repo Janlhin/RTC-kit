@@ -75,7 +75,7 @@ raise SystemExit(rtc.main(["--workspace", r"C:\path\to\workspace", "due"]))
 iLink sendmessage session not ready: ret=-2 errmsg=prepare failed
 ```
 
-表现是「任务 `completed`，但用户什么都没收到」。对策见 `AUDIT-2026-11-09-RESPONSE.md` 第 7 条：给主链路加兜底通道，或把投递失败做成可见信号。
+表现是「任务 `completed`，但用户什么都没收到」。对策见 `../docs/audit/2026-11-09-response.md` 第 7 条：给主链路加兜底通道，或把投递失败做成可见信号。
 
 ## 验收顺序
 
