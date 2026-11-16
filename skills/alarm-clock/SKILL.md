@@ -233,6 +233,9 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 - ❌ 手改 `rules/routines.json` 里的日期（推迟用 `postpone` 命令）
 - ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
+- ❌ 顺着投递页脚里的「stop reminder rtc-due」去停任务。`rtc-due` 是所有提醒的心脏，
+  停了等于全部不响；用户这么说时先讲清后果（一句话），确认后才动手。同理，
+  `rtc-plan` 停了第二天就没有时刻表。
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
 - ❌ 打开或手改任何名字带 `.example` / `.md` 的文件（`rules/routines.example.md`、`rules/routines.md` 都是模板，不是运行配置）
 - ❌ 读到文件不一致就「顺手修好」
