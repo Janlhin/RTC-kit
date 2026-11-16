@@ -26,9 +26,15 @@ RTC 是「判断 + 写入」与「定时触发」分离的两层：
 
 ## §0 只读一个文件
 
-需要看状态时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。
+需要看**状态**时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。
 
-不要读 `tasks.md`、`AGENTS.md`、`MEMORY.md`、`HEARTBEAT.md`。多读一个文件就多一份延迟，也多一次判断错误的可能。
+不要读 `tasks.md`、`MEMORY.md`、`HEARTBEAT.md`。多读一个文件就多一份延迟，也多一次判断错误的可能。
+
+**行程例外**：`{{WORKSPACE_DIR}}/AGENTS.md` 里有一个自动生成的 `<!-- RTC:BRIEF -->` 区块——现在在响什么、接下来是几点什么、今天已过什么。
+
+- 用户问「我今天要干嘛 / 接下来是什么 / 这条提醒是什么」→ **直接念这个区块**，不要反问、不要凭印象编。
+- 需要最新数据 → `python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} brief`。
+- 这个区块由 `plan` / `due` / `ack` 自动刷新，**不要手改**。
 
 ## §0.5 唯一可改的文件
 
