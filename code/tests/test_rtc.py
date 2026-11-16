@@ -1254,15 +1254,161 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
                          state_before, "今日状态不应被改动")
 
     def test_cas_rejects_edit_between_check_and_replace(self):
-        """审计要求：check 与 replace 之间被外部改写时不得静默覆盖。"""
+        """审计要求：临门再验必须抓出 check 与 replace 之间的外部改写。
+
+        旧测试直接传错 digest，只命中第一道守卫（读取后即比对），没触及
+        「写临时文件 -> 原子改名」之间的窗口。这里让 file_digest 在第二次
+        调用（临门再验）时真去改一次磁盘文件，模拟一次并发编辑，断言
+        atomic_write 抛 Conflict、且磁盘文件保留外部编辑而非被覆盖。
+        """
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        orig_digest = rtc.file_digest(rtc.ROUTINE)
-        r = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+        real_digest = rtc.file_digest
+        orig_digest = real_digest(rtc.ROUTINE)
+        calls = {"n": 0}
+
+        def fake_digest(p):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # 临门再验前，模拟另一进程改了时刻表（真实的磁盘写入）
+                rb = json.loads(p.read_text(encoding="utf-8"))
+                for x in rb["alarmWindows"]:
+                    if x["id"] == "report":
+                        x["start"] = "16:00"
+                p.write_text(json.dumps(rb, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+            return real_digest(p)
+
+        rtc.file_digest = fake_digest
+        self.addCleanup(lambda: setattr(rtc, "file_digest", real_digest))
+
+        data = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
         with self.assertRaises(rtc.Conflict):
-            rtc.atomic_write(rtc.ROUTINE, r, expected_rev=None,
-                             expected_digest="0" * 64)
-        self.assertEqual(rtc.file_digest(rtc.ROUTINE), orig_digest,
-                         "守卫不匹配时文件必须一字未动")
+            rtc.atomic_write(rtc.ROUTINE, data, expected_rev=None,
+                             expected_digest=orig_digest)
+
+        # 磁盘文件必须保留外部编辑，而非被 data 覆盖
+        rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+        report = next(x for x in rb["alarmWindows"] if x["id"] == "report")
+        self.assertEqual(report["start"], "16:00",
+                         "临门再验必须拒绝把并发编辑覆盖掉")
+
+
+class TestLockOwnership(unittest.TestCase):
+    """审计发现 ①：stale-lock 接管既不许两个写入者同时进入临界区，
+    也不许一方删掉另一方的锁。"""
+
+    def _lock_for(self, name):
+        d = tempfile.mkdtemp(prefix="rtc-lock-")
+        p = Path(d) / name
+        return p, p.with_name(p.name + ".lock")
+
+    def test_fresh_acquire_writes_token(self):
+        p, lock = self._lock_for("a.json")
+        self.assertTrue(rtc._try_acquire_lock(lock, "A", lock.with_name(lock.name + ".A")))
+        self.assertEqual(lock.read_bytes().decode(), "A")
+
+    def test_live_lock_not_taken_over(self):
+        p, lock = self._lock_for("a.json")
+        rtc._try_acquire_lock(lock, "A", lock.with_name(lock.name + ".A"))
+        self.assertEqual(lock.read_bytes().decode(), "A")
+        # 锁新鲜 → 第二个写入者必须拿不到
+        self.assertFalse(rtc._try_acquire_lock(lock, "B", lock.with_name(lock.name + ".B")))
+        self.assertEqual(lock.read_bytes().decode(), "A")
+
+    def test_stale_lock_takeover_yields_single_owner(self):
+        p, lock = self._lock_for("a.json")
+        lock.write_bytes(b"ghost")
+        import time as _t
+        old = _t.time() - (rtc._LOCK_STALE_S + 5)
+        os.utime(str(lock), (old, old))
+        # A 接管陈旧锁
+        self.assertTrue(rtc._try_acquire_lock(lock, "A", lock.with_name(lock.name + ".A")))
+        self.assertEqual(lock.read_bytes().decode(), "A")
+        # 接管后锁变新鲜，B 不得再拿到（不会出现「两者都拿到」）
+        self.assertFalse(rtc._try_acquire_lock(lock, "B", lock.with_name(lock.name + ".B")))
+        self.assertEqual(lock.read_bytes().decode(), "A")
+
+    def test_owner_does_not_delete_other_owners_lock(self):
+        p, lock = self._lock_for("a.json")
+        with rtc._exclusive_file_lock(p):
+            owner = lock.read_bytes().decode()
+            self.assertTrue(owner, "进入临界区后锁必须含本持有者令牌")
+            # 模拟 A 临界区过长、锁被 B 接管
+            lock.write_bytes(b"B")
+        # A 退出时不得删掉 B 的锁
+        self.assertTrue(lock.exists(), "A 退出不得删除 B 接管的锁")
+        self.assertEqual(lock.read_bytes().decode(), "B")
+
+    def test_concurrent_writers_no_lost_update(self):
+        import threading
+        counter_path = Path(tempfile.mkdtemp(prefix="rtc-cnt-")) / "counter.json"
+        counter_path.write_text(json.dumps({"n": 0}))
+        n_threads, per = 8, 20
+        conflicts = {"n": 0}
+
+        def worker():
+            done = 0
+            while done < per:
+                try:
+                    with rtc._exclusive_file_lock(counter_path):
+                        d = json.loads(counter_path.read_text())
+                        d["n"] += 1
+                        counter_path.write_text(json.dumps(d))
+                    done += 1
+                except rtc.Conflict:
+                    # 极少发生（锁等待超时）；重试以保证最终计数正确，
+                    # 同时不掩盖「两个写入者同时进入临界区」这类真正的丢失更新。
+                    conflicts["n"] += 1
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        final = json.loads(counter_path.read_text())["n"]
+        self.assertEqual(final, n_threads * per,
+                         f"并发写入丢失更新：期望 {n_threads * per}，实际 {final}")
+        # 冲突重试只是环境兜底：正常情况下几乎不应触发，确保我们测的是锁本身
+        self.assertLessEqual(conflicts["n"], n_threads * per,
+                             "冲突次数异常偏高，锁可能未正常串行化")
+
+
+class TestDueConflictSilent(RtcCase):
+    """审计发现 ②：due 写入冲突必须保持静默（空 stdout、退出 0），
+    诊断走 stderr，绝不重复投递文案（issue #4 §11）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_routine(base_routine())
+        rtc.set_workspace(self.ws)
+
+    def test_due_conflict_is_silent(self):
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        orig = rtc.atomic_write
+
+        def fake(path, data, expected_rev=None, expected_digest=None):
+            # 只在「本次 fire 写入」上注入冲突：有窗口处于 ringing/delivered 即视为 fire
+            if path == rtc.STATE and any(
+                w.get("state") in ("ringing", "delivered") for w in data.get("windows", [])
+            ):
+                raise rtc.Conflict("injected: due state conflict")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = fake
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rtc.cmd_due(argparse.Namespace(now="2026-05-10T07:05:00+08:00"))
+        self.assertEqual(rc, 0, "due 冲突应退出 0")
+        self.assertEqual(out.getvalue(), "", "due 冲突必须空 stdout（不投递）")
+        self.assertIn("写入冲突", err.getvalue(), "诊断必须留在 stderr")
+
+        # 状态未被本次写入破坏：fireCount 仍为 0（下一次 due 会重试并成功）
+        st = json.loads(rtc.STATE.read_text(encoding="utf-8"))
+        wake = next(w for w in st["windows"] if w["id"] == "wake")
+        self.assertEqual(wake["fireCount"], 0, "冲突那次不得记录 fire")
 
 
 class TestSetTime(RtcCase):
