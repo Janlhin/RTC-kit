@@ -27,6 +27,9 @@
 node_modules/
 dist/
 
+# 运行时锁 sidecar（常驻本机状态，不入库）
+*.lock
+
 # 系统
 .DS_Store
 Thumbs.db

@@ -29,7 +29,24 @@
 
 架构思想与抽象方法不受著作权约束；受保护的是具体表达。本文件的定位是工程溯源说明，不是法律意见。
 
+## 外部审计与协作
+
+| 贡献者 | 范围 | 落点 |
+|---|---|---|
+| [@nqble](https://github.com/nqble) | 2026-11 外部审计：独立复现审计发现 ①（stale-lock 接管丢写入），并给出「持久 sidecar + 操作系统持锁」的替换方案（Windows `msvcrt.locking` / POSIX `fcntl.flock`），带 Windows 侧六项针对性检查与既有行为测试 | 分支 `feat/os-lock` 的 PR：重写 `_exclusive_file_lock`，删除按 mtime 接管的旧实现 |
+
+审计提交的是**讨论用补丁，不是可直接部署的成品**。仓库在采纳时做了四处改动，与原补丁不同：
+
+1. 补 POSIX inode 守卫——`flock` 锁的是 inode，sidecar 被删除/重建后锁不住新文件，拿到锁后必须比对 `os.stat(path).st_ino` 与 `os.fstat(fd).st_ino`；
+2. 重写锁协议测试（原补丁会让 4 个 `TestLockOwnership` 用例直接崩溃）；
+3. `.gitignore` 增加 `*.lock`——sidecar 常驻，属于本机状态；
+4. 文档与注释统一为中文，保持仓库风格。
+
+范围边界：该方案只解决**单文件写入互斥**。多文件回滚恢复、`reply-to-ack` 桥不在其范围内，仍由仓库自身的 CAS 与 ack 语义承担；`flock` 在 POSIX 是咨询锁，覆盖不了不走本协议的编辑器与旧写者。
+
 ## 本仓库独立实现的部分
+
+
 
 - 闹钟窗口状态机与 ack 语义
 - 时刻表与「一天内相位」的声明式表达
