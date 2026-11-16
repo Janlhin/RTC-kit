@@ -175,7 +175,7 @@ def substitute_skill(template: str, code_dir: Path, workspace: Path) -> str:
 def remaining_placeholders(text: str) -> list:
     """还剩哪些 ``{{XXX}}``。
 
-    路径类占位符已由本脚本填死；剩下的都是 `CONTRIBUTING.md` 里「由部署 / 用户
+    路径类占位符已由本脚本填死；剩下的都是 `docs/contributing.md` 里「由部署 / 用户
     决定」的填充项（时区、作息时刻、项目名……），安装器不猜，只提示。
     """
     return sorted(set(re.findall(r"\{\{[A-Z][A-Z0-9_]*\}\}", text)))

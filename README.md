@@ -80,10 +80,10 @@ cancel     取消
 | 路径 | 内容 |
 |---|---|
 | `README.md` | 本文件 |
-| `ARCHITECTURE.md` | 分层架构、职责边界、为什么这样切、演进路径 |
-| `AUDIT-2026-11-09-RESPONSE.md` | 对 2026-11-09 外部审计的逐条处置记录 |
-| `CONTRIBUTING.md` | 怎么改、怎么填占位符、什么不能提交 |
-| `ATTRIBUTION.md` | 与上游项目的关系、许可边界 |
+| `docs/architecture.md` | 分层架构、职责边界、为什么这样切、演进路径 |
+| `docs/audit/2026-11-09-response.md` | 对 2026-11-09 外部审计的逐条处置记录 |
+| `docs/contributing.md` | 怎么改、怎么填占位符、什么不能提交 |
+| `docs/attribution.md` | 与上游项目的关系、许可边界 |
 | `LICENSE` | AGPL-3.0（仅适用于本仓库原创内容） |
 | `contract/` | JSON Schema + 可校验的示例实例 |
 | `rules/` | 声明式规则（`routines` / `priority-map` / `auto-resolver` / `formats`） |
@@ -120,7 +120,7 @@ cancel     取消
 - 这是一套**规格与模板**，不是开箱即用的产品。它需要你填配置、选运行时、建定时任务。
 - 示例代码只覆盖「统计记账」这一条旁路，**提醒主链路的调度实现由使用方自己决定**——这正是刻意留出的解耦点。
 - 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天会压一份 zip 写到**其他本地盘**的 `RTC-Backup`（同盘不算备份，目标盘由 `rules/backup.json` 指定），也可以按天提交进你自己的私有 git 仓库（任何平台都行）。恢复办法见 `docs/troubleshooting.md` §7 / §8。
-- 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文。详见 `ATTRIBUTION.md`。
+- 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文。详见 `docs/attribution.md`。
 
 ## 许可
 
