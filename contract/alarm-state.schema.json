@@ -12,7 +12,8 @@
     "timezone": { "type": "string" },
     "planDate": { "type": "string", "format": "date", "description": "本账本属于哪一天。不等于今天时由日切或首次唤醒补建。" },
     "planKind": { "enum": ["workday", "weekend", "holiday"] },
-    "generatedBy": { "type": "string", "description": "daily-task-prep 或 alarm-clock:catchup" },
+    "generatedBy": { "type": "string", "description": "谁写的这份计划。rtc-plan = code/rtc.py plan 生成（主路径）；daily-task-prep = 技能在无代码环境下手写（降级路径）。判断「今天是否已 prep」时两者都算" },
+
     "generatedAt": { "type": "string", "format": "date-time" },
     "windows": { "type": "array", "items": { "$ref": "#/$defs/window" } },
     "history": {

@@ -28,9 +28,9 @@ YYYY-MM-DD holiday   说明
 | id | 名称 | 窗口 | 间隔 | 次数 | ack 关键词 |
 |---|---|---|---|---|---|
 | `{{WINDOW_A_ID}}` | 起床 | `{{WAKE_TIME}}` – `{{WAKE_END}}` | 5 分钟 | 6 | {{ACK_HINTS_A}} |
-| `meds-am` | 例行事项 A | `{{MORNING_TIME}}` – `{{MORNING_END}}` | 5 分钟 | 6 | 好了 / 办了 |
-| `meds-noon` | 例行事项 B | `{{NOON_TIME}}` – `{{NOON_END}}` | 5 分钟 | 6 | 好了 / 办了 |
-| `meds-pm` | 例行事项 C | `{{EVENING_TIME}}` – `{{EVENING_END}}` | 5 分钟 | 6 | 好了 / 办了 |
+| `vitamin-bc-am` | 维生素B/C | `{{MORNING_TIME}}` – `{{MORNING_END}}` | 5 分钟 | 6 | 好了 / 办了 |
+| `vitamin-bc-noon` | 维生素B/C | `{{NOON_TIME}}` – `{{NOON_END}}` | 5 分钟 | 6 | 好了 / 办了 |
+| `vitamin-bc-pm` | 维生素B/C | `{{EVENING_TIME}}` – `{{EVENING_END}}` | 5 分钟 | 6 | 好了 / 办了 |
 
 规则：
 
@@ -121,8 +121,8 @@ cron 只能给一套触发表达式，**日期类型差异由技能按「星期 
 
 ```
 {
-  "id": "trip-shenzhen",
-  "label": "深圳行程",
+  "id": "travel",
+  "label": "旅游",
   "start": "09:00", "end": "09:15", "intervalMin": 5, "expectFires": 1,
   "ackHints": ["好了"],
   "oneOff": true,
