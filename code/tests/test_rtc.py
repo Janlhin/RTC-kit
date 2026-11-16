@@ -1689,5 +1689,55 @@ class TestBrief(RtcCase):
         self.assertIn("起床 已确认", text, "确认后简报没刷新")
 
 
+class TestHandEditedRoutine(RtcCase):
+    """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
+
+    实机上发生过：模型照着技能里的 JSON 模板，把宿主目录那份 routines.json
+    从 4 个窗口改写成 1 个自己编的一次性提醒——没人发现，也没人被告知。
+    """
+
+    def test_external_edit_is_reported_and_backed_up(self):
+        self.write_routine(base_routine())
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("被 RTC 之外", out, "第一次 plan 只是建印章，不该报警")
+
+        hand = {
+            "version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00",
+            "dateTypes": {"workday": [1, 2, 3, 4, 5], "weekend": [0, 6]},
+            "alarmWindows": [
+                {"id": "go-out-1535", "label": "今天 15:35 出门", "start": "15:35",
+                 "end": "15:40", "intervalMin": 5, "expectFires": 1,
+                 "ackHints": ["知道了"], "oneOff": True,
+                 "validFrom": "2026-11-16", "validUntil": "2026-11-16"},
+            ],
+        }
+        self.write_routine(hand)
+        rc, out, err = self.cli("plan", "--force", now="2026-11-16T08:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("被 RTC 之外的东西改过", out)
+        self.assertIn("4", out)
+        self.assertIn("现在是 1", out)
+
+        backups = sorted((self.ws / "state" / "backups").glob("routines.handedit-*.json"))
+        self.assertEqual(len(backups), 1, "手改的原件必须留一份")
+        self.assertIn("go-out-1535", backups[0].read_text(encoding="utf-8"))
+
+    def test_program_writes_stay_quiet(self):
+        self.write_routine(base_routine())
+        for i in range(3):
+            rc, out, err = self.cli("plan", "--force", now=f"2026-11-16T08:0{i}:00+08:00")
+            self.assertEqual(rc, 0, err)
+            self.assertNotIn("被 RTC 之外", out, f"第 {i + 1} 次程序写入被误报成手改")
+
+    def test_minimal_handwritten_file_gets_a_clean_error(self):
+        """模型实机写的那份只有 version + alarmWindows：要报错，不要抛栈。"""
+        self.write_routine({"version": 1, "alarmWindows": []})
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 3, f"形状不对应当是退出码 3，不是栈：{err[-300:]}")
+        self.assertIn("dateTypes", err)
+        self.assertNotIn("Traceback", err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

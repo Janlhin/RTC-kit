@@ -40,6 +40,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -261,7 +262,7 @@ def atomic_write(path: Path, data: dict, expected_rev: int | None,
     return new_digest
 
 
-_ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows")
+_ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
 
 
 def load_routine() -> dict:
@@ -689,6 +690,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
 
 def cmd_plan(args) -> int:
     routine = load_routine()
+    hand_edit = audit_routine(routine)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
     today = now.date().isoformat()
@@ -773,7 +775,7 @@ def cmd_plan(args) -> int:
             fill_snapshot_results(old["planDate"], prev_results)
 
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
-    for line in self_check(state, now, first_run=(old is None)):
+    for line in hand_edit + self_check(state, now, first_run=(old is None)):
         print(line)
 
     # 行程推到会话入口：模型不跑命令也知道今天排了什么
@@ -1228,7 +1230,81 @@ CANCELLED_REASON = "cancelled"
 
 def _write_routine(routine: dict, digest: str | None) -> None:
     """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。"""
-    atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+    new_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+    seal_routine(new_digest)
+
+
+# ---------------------------------------------------------------- 手改探测
+# 为什么要这个：技能里写着「绝不手改 routines.json」，但那是**文字约束**。
+# 弱模型会照着技能里给的 JSON 模板直接写文件（实机就这样把 4 个默认窗口
+# 换成了 1 个自己编的），而文字约束拦不住它。这里给一条**可验证**的约束：
+# 程序每次写完都记一份摘要，下次 plan 发现摘要对不上，就说明这文件被
+# RTC 之外的东西改过——备份原件 + 当场说出来。不阻断提醒，但不再沉默。
+
+ROUTINE_SEAL = "routine-seal.json"
+BACKUP_DIR = "backups"
+
+
+def seal_path() -> Path:
+    return WORKSPACE / "state" / ROUTINE_SEAL
+
+
+def seal_routine(digest: str | None = None) -> None:
+    """记下「程序最后一次写出的 routines.json 长什么样」。
+
+    除了摘要，还留一份内容副本：手改把文件写坏时，至少还有一份能照着修的底稿。
+    """
+    try:
+        data = {
+            "digest": digest or file_digest(ROUTINE),
+            "windows": len((load_json(ROUTINE) or {}).get("alarmWindows") or []),
+            "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        p = seal_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+        last = WORKSPACE / "state" / BACKUP_DIR / "routines.program-last.json"
+        last.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROUTINE, last)
+    except (OSError, ValueError, TypeError):
+        pass  # 印章写不进去不影响提醒本身
+
+
+def audit_routine(routine: dict) -> list[str]:
+    """时刻表被程序之外的东西改过吗？返回要报告给人的行（正常时为空）。"""
+    try:
+        if not seal_path().exists():
+            seal_routine()
+            return []
+        seal = load_json(seal_path())
+        want = seal.get("digest")
+        was = seal.get("windows")
+    except (Validation, ValueError, TypeError, OSError, AttributeError):
+        seal_routine()
+        return []
+
+    got = file_digest(ROUTINE)
+    if want and got == want:
+        return []
+
+    now_windows = len((routine.get("alarmWindows") or []))
+    backup = None
+    try:
+        bdir = WORKSPACE / "state" / BACKUP_DIR
+        bdir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        backup = bdir / f"routines.handedit-{stamp}.json"
+        shutil.copyfile(ROUTINE, backup)
+    except OSError:
+        backup = None
+
+    msg = (f"⚠️ {ROUTINE.name} 被 RTC 之外的东西改过"
+           f"（上次程序写出 {was if was is not None else '?'} 个窗口，现在是 {now_windows} 个）")
+    if backup:
+        msg += f"；原件已备份到 {backup}"
+    msg += "。改时刻表请用 set-time / postpone / disable 命令，别手写 JSON。"
+    return [msg]
+
 
 
 def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:

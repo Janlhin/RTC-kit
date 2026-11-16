@@ -36,9 +36,18 @@ RTC 是「判断 + 写入」与「定时触发」分离的两层：
 - 需要最新数据 → `python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} brief`。
 - 这个区块由 `plan` / `due` / `ack` 自动刷新，**不要手改**。
 
-## §0.5 唯一可改的文件
+## §0.5 你碰不到任何文件
 
-只有 `<workspace>/rules/routines.json` 是运行时配置。**绝不**打开或手改任何带 `.example`、`.md` 后缀的文件（如 `rules/routines.example.md`、`rules/routines.md`）——那些是模板与文档，改了不会生效，还会让你误以为改好了。本技能是 `rules/routines.json` 的**唯一权威**：其他日常类技能（daily-routine 等）不修改时刻表，遇到改时间 / 改期请回到本技能走命令。所有改动只通过 `rtc.py` 的子命令完成。
+`<workspace>/rules/routines.json` 是**程序的文件**：只有 `rtc.py` / `rtc_once.py` 写它，
+它们每次写完会记一份摘要，别的进程动过就当场报「被 RTC 之外的东西改过」并备份原件。
+所以：
+
+- **你不能打开、手写、覆盖 `routines.json`**，也不能写任何 `state/*.json`。
+- 你的活儿只有一件：把用户的话翻成下面这些命令，跑完回一句人话。
+- 命令跑不了（没有 python / 路径不对 / 退出码非 0）→ **直说做不到，并给出原因**。
+  **不要退回去手写 JSON**，那会让整张时刻表失去保护。
+
+`rules/routines.example.md`、`rules/routines.md` 是说明书，不是配置；改了不生效。
 
 ## §1 用户说「起了 / 好了 / 别响了」—— 你是唯一的 ack 桥
 
@@ -127,47 +136,29 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 > 这个要加进时刻表才会响，加吗？
 
-同意了就加一个**一次性窗口**：
+同意了就跑这一条命令（**不要写 JSON**）：
 
-```json
-{
-  "id": "trip-<日期>",
-  "label": "<用户说的事>",
-  "start": "15:00", "end": "15:15", "intervalMin": 5, "expectFires": 1,
-  "ackHints": ["好了"],
-  "oneOff": true,
-  "validFrom": "<那一天>", "validUntil": "<那一天>"
-}
+```bash
+python {{CODE_DIR}}/rtc_once.py 15:00 "用户说的事" --workspace {{WORKSPACE_DIR}}
 ```
+
+- 退出码 `0` → 回一句 `加好了，15:00 提醒你。`
+- 非 `0` → 把 stderr 的原话告诉用户，并说「没加上」——**不许说「已设置」**。
+- 要指定别的日期：加 `--date YYYY-MM-DD`。
 
 要点：
 
-- `oneOff: true` → 只响一次，**送达即完成**（`state: delivered`），不需要用户确认
-- `validFrom` 与 `validUntil` 同日 → 只在这一天存在，第二天不再生成
-- `end` 决定容错有多宽：精确时刻的事（会议、航班）用 `start + 15` 分钟；
-  「那天做就行」的事（旅游、生日、还款）用 `end` = 当天 `23:45`——**当天任何时候开机都能收到**
-- `expectFires` 必须是 `1`，否则契约校验会拒绝
+- 它只响一次，**送达即完成**，不需要用户确认
+- 窗口默认 4 分钟（`--window-min` 别改小）：宿主每 5 分钟才检查一次，
+  窗口窄于 4 分钟就可能整条错过
+- 精确时刻的事（会议、航班）就写那个时刻；「那天做就行」的事（旅游、生日、还款）
+  用 `--date` 指那天，并告诉用户「那天任何时候开机都能收到」
 
-**带截止日的事**（版本限时活动、还款日、截止日之前要交的东西）用 `dueDate`：
+**带截止日的事**（限时活动、还款、要交的东西）：先问清截止日，再用 `--date <开始日>` 建，
+文案里写清「截止 X 月 X 日」——**不要自己算剩余天数**，代码会在文案里自动带「距截止还有 N 天」。
 
-```json
-{
-  "id": "zzz", "label": "<活动名>",
-  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
-  "ackHints": ["好了"],
-  "dueDate": "<截止日>",
-  "validFrom": "<开始提醒的日期>", "validUntil": "<截止日>"
-}
-```
-
-`rtc.py` 会自动把剩余天数写进文案（「距截止还有 2 天」「明天截止」「最后一天！」）——
-**不要自己算天数，也不要自己写「截止 X/X」**，那是代码的事。
-
-> 提示：Hermes 部署里已有便捷脚本 `rtc_once.py`——
-> `python {{CODE_DIR}}/rtc_once.py HH:MM "内容" [--date YYYY-MM-DD]`
-> 会自动追加 `oneOff` 窗口并跑 `plan --force`，比手改 JSON 安全。
-
-**不要自己建定时任务**，也不要往 `alarms.json` 里手写窗口。
+> ⚠️ 不要自己建定时任务，不要写 `rules/routines.json`，不要往 `state/*.json` 里塞窗口。
+> 三种「一次性提醒」的 JSON 写法属于代码，不属于你；你只需要会用上面那条命令。
 
 ## §4 响的时候说什么
 
@@ -185,19 +176,15 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 ## §4.1 带清单的提醒
 
-窗口带 `checklist` 就是一份要逐项打勾的单子。到点提醒会把整张单子发给你，并标出还剩几项。
+窗口带清单字段就是一份要逐项打勾的单子。到点提醒会把整张单子发给你，并标出还剩几项。
 
-```json
-{
-  "id": "pack",
-  "label": "清点并带走",
-  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
-  "ackHints": ["好了"],
-  "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"]
-}
-```
+**清单只能在时刻表里预先写好（由维护者加），你不能自建。** 用户说「帮我列个出门清单提醒」时：
 
-用户说「电饭煲拿到了」时：
+> 清单类提醒现在需要我在配置里加一行，你说说要带哪几项？我记下来，等下一次配置时加上。
+
+把它记进 `{{WORKSPACE_DIR}}/errors.md`，别为了「先应付一下」去手写 `routines.json`。
+
+用户勾掉一项时跑命令：
 
 ```
 python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --item "电饭煲"
