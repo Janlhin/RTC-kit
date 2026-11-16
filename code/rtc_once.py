@@ -23,6 +23,10 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = Path(__file__).resolve().parent
 RT = HERE / "rtc.py"
 DEFAULT_WS = Path(os.environ.get("RTC_WORKSPACE") or (Path.home() / "RTC"))
