@@ -1,0 +1,51 @@
+[project]
+name = "rtc-kit"
+version = "0.1.0"
+description = "RTC-kit：可复用的「提醒 + 任务 + 判断」规则包与确定性脚本"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-only" }
+
+[project.optional-dependencies]
+dev = [
+    "jsonschema>=4.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "coverage>=7.6",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["tools/one-off"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = [
+    # 与项目约定冲突的规则：中文注释与文档字符串里必然出现全角标点
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["code", "install.py"]
+exclude = ["code/tests"]
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["code", "install.py"]
+omit = ["code/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# 基线：2026-11-16 实测 77%（含子进程；只统计父进程曾低到 16%，那是假数字）。
+# 目标 80 / 分支 70，逐季上调，见 TASKS.md T-002 / T-003。
+fail_under = 77
