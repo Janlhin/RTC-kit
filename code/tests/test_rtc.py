@@ -114,6 +114,39 @@ class TestOneOff(RtcCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "一次性提醒不能响第二次")
 
+    def test_oneoff_message_has_no_ack_hint(self):
+        """一次性提醒送达即完成，还教「回复就不响了」等于告诉用户一件不存在的事。"""
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-10T09:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.window("travel")["state"], "delivered")
+        self.assertNotIn("就不响了", out, f"一次性提醒不该带确认提示：{out!r}")
+
+    def test_repeating_message_hints_only_first_and_last(self):
+        """会反复响的窗口：只在第 1 次和最后一次提怎么停，中途别每句都念。"""
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "meds", "label": "吃药", "start": "09:00", "end": "09:20",
+            "intervalMin": 5, "expectFires": 5, "ackHints": ["吃了"],
+        }]
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+
+        outs = []
+        for hhmm in ("09:00", "09:05", "09:10", "09:15", "09:20"):
+            rc, out, _ = self.cli("due", now=f"2026-11-10T{hhmm}:00+08:00")
+            self.assertEqual(rc, 0)
+            outs.append(out)
+
+        self.assertIn("就不响了", outs[0], "第一次该教怎么停")
+        self.assertIn("就不响了", outs[-1], "最后一次该再提一遍")
+        for mid in outs[1:-1]:
+            if mid.strip():
+                self.assertNotIn("就不响了", mid, f"中途不该再念：{mid!r}")
+        for i, out in enumerate(outs[1:], start=2):
+            if out.strip():
+                self.assertIn(f"第 {i} 次", out, f"第 {i} 次没标次数：{out!r}")
+
     def test_force_after_delivery_keeps_delivered(self):
         """实机事故：16:35 那条已投递（日志有 delivered to weixin），
         之后任何一次 plan --force 重建时窗口已过期 → 被写成 skipped 0/1，

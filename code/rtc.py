@@ -1299,8 +1299,12 @@ def cmd_due(args) -> int:
             row.append(f"{mark} {it['label']}")
         for i in range(0, len(row), 6):
             lines.append(" ".join(row[i:i + 6]))
-        lines.append(f"逐项打勾说「{items[0]['label']}拿到了」；全部拿到说「{hit['ackHint']}」")
-    elif n == 1 or n % 2 == 1:
+        # 清单只在第一次响时教一遍怎么勾，之后靠「还剩 N 项」自己看
+        if n == 1:
+            lines.append(f"逐项说「{items[0]['label']}拿到了」；全部打完说「{hit['ackHint']}」")
+    elif hit.get("expectFires", 1) > 1 and (n == 1 or n == hit["expectFires"]):
+        # 只响一次的提醒：送达即完成，说「回复就不响了」纯属添乱。
+        # 会反复响的：第一次教一遍，最后一次再提醒一遍怎么停，中间靠「第 N 次」自己看。
         lines.append(f"回复「{hit['ackHint']}」就不响了。")
     print("\n".join(lines))
     return 0
