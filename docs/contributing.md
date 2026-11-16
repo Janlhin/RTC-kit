@@ -3,7 +3,7 @@
 ## 先读两页
 
 1. `README.md` —— 这是什么
-2. `ARCHITECTURE.md` —— 哪层归谁管
+2. `architecture.md` —— 哪层归谁管
 
 改动前先判断你的修改属于哪一层。**最常见的错误是把运行时细节写进 `rules/`**。
 
@@ -90,7 +90,25 @@ grep -rniE 'token|secret|password|api[_-]?key|C:\\Users|/home/' .
 
 - 一个提交一件事
 - 提交信息用中文或英文均可，但要写清「改了哪一层、为什么」
+- 标题用 Conventional Commits：`type(scope): 主题`，type 取 `feat` / `fix` / `docs` / `style` / `refactor` / `perf` / `test` / `build` / `ci` / `chore` / `revert`
 - 不要提交生成物或本机状态
+
+## 提交前跑什么
+
+只有一条命令，退出码 0 才算改对：
+
+```powershell
+pwsh -NoLogo -NoProfile -File scripts/verify.ps1
+```
+
+`scripts/install-hooks.ps1` 会把 `core.hooksPath` 指到 `.husky`，之后每次 `git commit` 自动跑 `-Fast`（不跑测试与覆盖率，保证提交不被拖慢）。
+
+**解释器要对**：`ruff` / `mypy` / `coverage` 不在标准库里。`verify.ps1` 优先用 `$env:PYTHON`，其次仓库内 `.venv`，最后才是 PATH 上的 `python`。看到 `No module named ruff` 说明选错了解释器，不是门禁本身坏了：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install ruff mypy coverage jsonschema
+```
 
 ## 许可
 

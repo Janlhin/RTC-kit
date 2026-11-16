@@ -4,7 +4,7 @@
   "timezone": "{{TIMEZONE}}",
   "planDate": "{{DATE}}",
   "planKind": "workday",
-  "generatedBy": "daily-task-prep",
+  "generatedBy": "rtc-plan",
   "generatedAt": "{{DATE}}T{{CUTOVER_TIME}}:00{{TZ_OFFSET}}",
   "windows": [
     {

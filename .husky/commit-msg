@@ -1,0 +1,2 @@
+#!/bin/sh
+exec pwsh -NoLogo -NoProfile -File "$(dirname "$0")/../scripts/hooks/commit-msg.ps1" "$1"

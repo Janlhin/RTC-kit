@@ -31,3 +31,18 @@ dist/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 校验工具缓存与本地工作区
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+_smoke-ws/
