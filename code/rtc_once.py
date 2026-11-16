@@ -15,6 +15,7 @@
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -22,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RT = HERE / "rtc.py"
-DEFAULT_WS = Path(r"C:\Users\<user>\RTC")
+DEFAULT_WS = Path(os.environ.get("RTC_WORKSPACE") or (Path.home() / "RTC"))
 
 
 def fail(msg: str) -> int:
