@@ -67,6 +67,10 @@ try {
             & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-semver.ps1')
         }
 
+        Step '文档命令（子命令/参数存在 + 链路冒烟）' {
+            & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'verify-docs.ps1')
+        }
+
         Step '格式（ruff format --check）' {
             & $py -m ruff format --check code install.py
         }

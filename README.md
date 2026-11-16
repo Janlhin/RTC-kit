@@ -112,7 +112,7 @@ python -m unittest discover -s code/tests -p "test_*.py"
 python install.py --workspace ./_smoke-ws --dry-run
 ```
 
-`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。
+`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。
 
 ## 目录一览
 
