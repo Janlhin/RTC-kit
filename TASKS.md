@@ -23,7 +23,7 @@
 
 | 编号 | 状态 | 问题 | 方法 | 完成判据 | 创建 | 完成 |
 |---|---|---|---|---|---|---|
-| T-010 | todo | `rtc.py` 2721 行、8 个领域挤在一个文件，改一处容易误伤另一处 | 按职责拆 `rtc_core` / `rtc_archive` / `rtc_metrics` / `rtc_brief`，命令面零变化 | `python -m unittest discover -s code/tests -p "test_*.py"` → 0，且 `rtc.py` ≤ 250 行 | 2026-11-16 | — |
+| T-010 | done | `rtc.py` 2788 行、8 个领域挤在一个文件，改一处容易误伤另一处 | 拆成 `rtc_core` / `rtc_archive` / `rtc_metrics` / `rtc_brief`，`rtc.py` 退成单命名空间薄壳（见 D-008），命令面零变化 | 149 条测试一条不改全绿；拆前/拆后 6 条命令输出逐字节一致；`rtc.py` 30 行 | 2026-11-16 | 2026-11-16 |
 | T-011 | todo | 备份方案只差恢复文档：没有 `docs/RESTORE.md`，也没真删过 `alarms.json` 演练 | 写恢复文档并做一次删除恢复演练 | 删除 `state/alarms.json` 后按文档恢复，`rtc.py status` 与备份时刻一致 → 0 | 2026-11-16 | — |
 | T-012 | todo | 外部审计提出的锁实现（持久 sidecar + 操作系统持锁）尚未合并与实机验证 | 先停旧写手，再按两套锁协议不可重叠的前提合并并实测 | 两个进程并发写同一 `alarms.json`，一成一败且无静默丢写 → 0 | 2026-11-16 | — |
 | T-013 | todo | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段 → 0 | 2026-11-16 | — |
