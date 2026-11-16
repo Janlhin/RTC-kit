@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rtc  # noqa: E402
 
-WS = os.environ.get("RTC_WORKSPACE", r"C:\Users\<user>\RTC")
+WS = os.environ.get("RTC_WORKSPACE") or str(Path.home() / "RTC")
 argv = ["--workspace", WS, "plan"]
 if os.environ.get("RTC_NOW"):
     argv += ["--now", os.environ["RTC_NOW"]]
