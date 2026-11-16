@@ -33,6 +33,7 @@
 
 环境变量 RTC_WORKSPACE 可代替 --workspace；都不给时用当前目录。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,10 +51,12 @@ import uuid as _uuid
 import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import Any, cast
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # 标准库类型里 TextIO 没有 reconfigure；实际解释器上是 TextIOWrapper。
+    cast(Any, sys.stdout).reconfigure(encoding="utf-8", errors="replace")
+    cast(Any, sys.stderr).reconfigure(encoding="utf-8", errors="replace")
 
 WORKSPACE = Path(os.environ.get("RTC_WORKSPACE") or Path.cwd())
 STATE = WORKSPACE / "state" / "alarms.json"
@@ -228,8 +231,7 @@ def _exclusive_file_lock(path: Path):
             pass
 
 
-def atomic_write(path: Path, data: dict, expected_rev: int | None,
-                 expected_digest: str | None = None) -> str:
+def atomic_write(path: Path, data: dict, expected_rev: int | None, expected_digest: str | None = None) -> str:
     """写入前比对 rev 与内容摘要；不一致则抛 Conflict，绝不覆盖别人的写入。
 
     rev 适合程序自己写的账本；摘要适合人会手改的配置文件（时刻表）。
@@ -340,8 +342,7 @@ def _restore_from_last_backup() -> str | None:
     seal_routine()
 
     windows = len(data.get("alarmWindows") or [])
-    msg = (f"⚠️ {ROUTINE.name} 被写坏了，已从程序底稿自动恢复（{windows} 个窗口）"
-           f"，提醒继续正常")
+    msg = f"⚠️ {ROUTINE.name} 被写坏了，已从程序底稿自动恢复（{windows} 个窗口），提醒继续正常"
     if bad:
         msg += f"；坏件留在 {bad}"
     return msg
@@ -349,7 +350,8 @@ def _restore_from_last_backup() -> str | None:
 
 def take_notices() -> list[str]:
     """取走待播报的提示（自愈、手改等），只播一次。"""
-    got, _ = NOTICES[:], NOTICES.clear()
+    got = list(NOTICES)
+    NOTICES.clear()
     return got
 
 
@@ -407,9 +409,7 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
     else:
         gap_min = (now - hb).total_seconds() / 60
         if gap_min > HEARTBEAT_STALE_MIN:
-            probs.append(
-                f"⚠️ 调度器最近一次心跳在 {gap_min / 60:.1f} 小时前，这段时间里的窗口可能没响"
-            )
+            probs.append(f"⚠️ 调度器最近一次心跳在 {gap_min / 60:.1f} 小时前，这段时间里的窗口可能没响")
 
     yesterday = (now.date() - timedelta(days=1)).isoformat()
     for h in state.get("history", []):
@@ -422,9 +422,15 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
 
 # ---------------------------------------------------------------- 日程快照
 
-def schedule_snapshot(routine: dict, kind: str, windows: list[dict],
-                      day_iso: str, generated_at: str,
-                      results: dict | None = None) -> dict:
+
+def schedule_snapshot(
+    routine: dict,
+    kind: str,
+    windows: list[dict],
+    day_iso: str,
+    generated_at: str,
+    results: dict | None = None,
+) -> dict:
     """当天完整计划的快照。写一次，留永久——回答「那天到底是什么安排」。
 
     窗口的 start/end 用生成时的实际值（含日期），有效期从时刻表定义取回。
@@ -550,9 +556,7 @@ def in_valid_range(w: dict, day_iso: str) -> bool:
     vu = w.get("validUntil")
     if vf and day_iso < vf:
         return False
-    if vu and day_iso > vu:
-        return False
-    return True
+    return not (vu and day_iso > vu)
 
 
 def day_disabled(routine: dict, kind: str) -> bool:
@@ -560,15 +564,12 @@ def day_disabled(routine: dict, kind: str) -> bool:
 
     禁用日 = 合法空日：静默，不报配置错误。
     """
-    if kind == "weekend" and routine.get("weekendAlarms") is False:
-        return True
-    if kind == "holiday" and routine.get("holidayAlarms") is False:
-        return True
-    return False
+    return (kind == "weekend" and routine.get("weekendAlarms") is False) or (
+        kind == "holiday" and routine.get("holidayAlarms") is False
+    )
 
 
-def build_windows(routine: dict, d: date, kind: str, now: datetime,
-                  strict: bool = True) -> list[dict]:
+def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool = True) -> list[dict]:
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
@@ -600,9 +601,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
         else:
             exp = expect_fires(time(sh, sm), time(eh, em), int(w["intervalMin"]))
             if w.get("expectFires") and int(w["expectFires"]) != exp:
-                raise Validation(
-                    f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符"
-                )
+                raise Validation(f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符")
         expired = now > end
         out.append(
             {
@@ -682,20 +681,25 @@ def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
     merged = []
     for w in fresh:
         p = prev.get(w["id"])
-        if p and p.get("state") == "ringing":
+        if p is None:
+            _migrate_checklist({}, w)
+            merged.append(w)
+            continue
+        pstate = p.get("state")
+        if pstate == "ringing":
             merged.append(p)
             continue
-        keep = bool(p) and p.get("state") in TERMINAL
-        if keep and w.get("dueDate") and p.get("state") != "cancelled":
-            keep = False          # 倒计时：每天重新开始，直到截止日（但被取消的不重开）
+        keep = bool(pstate) and pstate in TERMINAL
+        if keep and w.get("dueDate") and pstate != "cancelled":
+            keep = False  # 倒计时：每天重新开始，直到截止日（但被取消的不重开）
         if keep and w.get("checklist"):
             # 清单：只有全部打完才保留终态；没打完就次日继续（勾选状态带过去）
             done = set(w.get("checked") or [])
-            keep = p.get("state") == "acked" and len(done) >= len(w["checklist"])
+            keep = pstate == "acked" and len(done) >= len(w["checklist"])
         if keep:
             merged.append(p)
         else:
-            _migrate_checklist(p or {}, w)
+            _migrate_checklist(p, w)
             merged.append(w)
     return merged
 
@@ -766,11 +770,8 @@ def cmd_plan(args) -> int:
         return 0
 
     kind = plan_kind(now.date(), routine)
-    if day_disabled(routine, kind):
-        # 契约里显式禁用的日期类型 → 合法空日：静默，但照常落盘 state
-        fresh = []
-    else:
-        fresh = build_windows(routine, now.date(), kind, now)
+    # 契约里显式禁用的日期类型 → 合法空日：静默，但照常落盘 state
+    fresh = [] if day_disabled(routine, kind) else build_windows(routine, now.date(), kind, now)
 
     if old and old.get("planDate") == today:
         windows = carry_forward(old, fresh)
@@ -780,7 +781,9 @@ def cmd_plan(args) -> int:
         for w in fresh:
             _migrate_checklist(prev_windows.get(w["id"], {}), w)
         windows = fresh
-    history = rollover(old, today) if not (old and old.get("planDate") == today) else list(old.get("history", []))
+    history = (
+        rollover(old, today) if not (old and old.get("planDate") == today) else list(old.get("history", []))
+    )
     total = sum(w["expectFires"] for w in windows)
     if len(windows) != len(fresh):
         raise Validation(f"窗口数 {len(windows)} 与时刻表 {len(fresh)} 不符")
@@ -983,7 +986,7 @@ def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], li
     for t in targets:
         try:
             files = sorted(t.glob(BACKUP_GLOB))
-            for old in (files[:-keep] if keep > 0 else []):
+            for old in files[:-keep] if keep > 0 else []:
                 old.unlink()
         except OSError:
             pass
@@ -1008,7 +1011,8 @@ def daily_backup(now: datetime) -> list[str]:
     if not targets and not has_git:
         return []  # 一样都没配，静默；手动 backup / gitarchive 会明确告诉你
 
-    written, errors = ([], [])
+    written: list[Path] = []
+    errors: list[str] = []
     if targets:
         written, errors = backup_now(targets, keep, today)
     did_git = False
@@ -1028,7 +1032,8 @@ def daily_backup(now: datetime) -> list[str]:
                     "errors": errors,
                 },
                 ensure_ascii=False,
-            ) + "\n",
+            )
+            + "\n",
             encoding="utf-8",
         )
     except OSError:
@@ -1063,6 +1068,7 @@ def cmd_backup(args) -> int:
 # 压缩包只防「盘坏」，不防「机器没了」。这条路把档案按天提交进一个私人 git 仓库，
 # 远端随便写：GitHub / Gitee / GitLab / 自建 / 本地裸库都行（URL 或路径原样交给 git）。
 
+
 def git_archive_config() -> dict:
     """读 rules/backup.json 里的 git 段。没有就返回空 dict（=不启用）。"""
     cfg = WORKSPACE / BACKUP_CFG
@@ -1079,10 +1085,22 @@ def git_archive_config() -> dict:
 def _git(args: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str]:
     try:
         p = subprocess.run(
-            ["git", "-c", "user.name=RTC", "-c", "user.email=rtc@localhost",
-             "-c", "commit.gpgsign=false", *args],
-            cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout,
+            [
+                "git",
+                "-c",
+                "user.name=RTC",
+                "-c",
+                "user.email=rtc@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
         )
         return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
     except (OSError, subprocess.SubprocessError) as e:
@@ -1151,8 +1169,12 @@ def git_archive(now: datetime) -> tuple[bool, list[str]]:
 
     for remote in remotes:
         target = remote
-        if remote not in ("origin",) and ("://" in remote or remote.startswith("git@")
-                                          or remote.startswith("ssh:") or remote.endswith(".git")):
+        if remote not in ("origin",) and (
+            "://" in remote
+            or remote.startswith("git@")
+            or remote.startswith("ssh:")
+            or remote.endswith(".git")
+        ):
             rc, out = _git(["remote", "add", "origin", remote], repo)
             if rc != 0:  # 已经有 origin 了，改掉
                 _git(["remote", "set-url", "origin", remote], repo)
@@ -1176,14 +1198,18 @@ def cmd_gitarchive(args) -> int:
         if args.remote:
             g["remotes"] = [args.remote]
     if not g:
-        print("gitarchive: 还没配置。在 rules/backup.json 里写 \"git\": "
-              "{\"dir\": \"...\", \"remotes\": [\"git@github.com:you/rtc-data.git\"]}", file=sys.stderr)
+        print(
+            'gitarchive: 还没配置。在 rules/backup.json 里写 "git": '
+            '{"dir": "...", "remotes": ["git@github.com:you/rtc-data.git"]}',
+            file=sys.stderr,
+        )
         return 3
     cfg = WORKSPACE / BACKUP_CFG
-    data = {}
+    data: dict[str, Any] = {}
     if cfg.exists():
         try:
-            data = load_json(cfg) or {}
+            loaded = load_json(cfg)
+            data = loaded if isinstance(loaded, dict) else {}
         except (Validation, ValueError, TypeError, OSError):
             data = {}
     data["git"] = g
@@ -1195,8 +1221,8 @@ def cmd_gitarchive(args) -> int:
         return 3
 
     did, errors = git_archive(datetime.now().astimezone())
-    for e in errors:
-        print(f"gitarchive: {e}", file=sys.stderr)
+    for msg in errors:
+        print(f"gitarchive: {msg}", file=sys.stderr)
     if errors:
         return 3
     print(f"gitarchive: {'已提交并推送' if did else '内容没变化，跳过'}")
@@ -1220,6 +1246,9 @@ def cmd_due(args) -> int:
         if rc != 0:
             return rc
         state = load_state()
+    if state is None:
+        print("due: 计划生成后仍没有状态文件，本 tick 放弃", file=sys.stderr)
+        return 3
 
     rev = int(state["rev"])
     changed = False
@@ -1314,7 +1343,7 @@ def cmd_due(args) -> int:
             mark = "☑" if it["id"] in done else "☐"
             row.append(f"{mark} {it['label']}")
         for i in range(0, len(row), 6):
-            lines.append(" ".join(row[i:i + 6]))
+            lines.append(" ".join(row[i : i + 6]))
         # 清单只在第一次响时教一遍怎么勾，之后靠「还剩 N 项」自己看
         if n == 1:
             lines.append(f"逐项说「{items[0]['label']}拿到了」；全部打完说「{hit['ackHint']}」")
@@ -1567,8 +1596,7 @@ def cmd_postpone(args) -> int:
     for k, v in changes.items():
         w[k] = v
     try:
-        post_digest = atomic_write(ROUTINE, routine, expected_rev=None,
-                                  expected_digest=digest)
+        post_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
     except Conflict as e:
         print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
@@ -1603,8 +1631,7 @@ def cmd_postpone(args) -> int:
                     else:
                         w.pop(k, None)
                 try:
-                    atomic_write(ROUTINE, routine, expected_rev=None,
-                                 expected_digest=post_digest)
+                    atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=post_digest)
                 except Conflict as rb_err:
                     # 部分应用（退出码 3，与「校验失败」共用 3，但语义不同）：
                     # 时刻表已成功推迟到 {target}，但今日状态因并发编辑回滚失败、
@@ -1626,12 +1653,19 @@ def cmd_postpone(args) -> int:
 
     # --- 3. 今天的快照同步：被跳过的那一次不再出现在当天安排里
     if outcome == "skipped":
+        # skipped 只在「今天有计划且该窗口还在跑」时才出现
+        assert state is not None
         try:
-            rest = [x for x in state.get("windows", [])
-                    if not (x["id"] == args.window and x.get("state") == "skipped")]
-            write_schedule_snapshot(schedule_snapshot(
-                routine, state.get("planKind", "workday"), rest,
-                state["planDate"], now.isoformat()))
+            rest = [
+                x
+                for x in state.get("windows", [])
+                if not (x["id"] == args.window and x.get("state") == "skipped")
+            ]
+            write_schedule_snapshot(
+                schedule_snapshot(
+                    routine, state.get("planKind", "workday"), rest, state["planDate"], now.isoformat()
+                )
+            )
         except OSError as e:
             print(f"postpone: 快照更新失败 {e}", file=sys.stderr)
 
@@ -1711,7 +1745,7 @@ def audit_routine(routine: dict) -> list[str]:
     if want and got == want:
         return []
 
-    now_windows = len((routine.get("alarmWindows") or []))
+    now_windows = len(routine.get("alarmWindows") or [])
     backup = None
     try:
         bdir = WORKSPACE / "state" / BACKUP_DIR
@@ -1722,13 +1756,14 @@ def audit_routine(routine: dict) -> list[str]:
     except OSError:
         backup = None
 
-    msg = (f"⚠️ {ROUTINE.name} 被 RTC 之外的东西改过"
-           f"（上次程序写出 {was if was is not None else '?'} 个窗口，现在是 {now_windows} 个）")
+    msg = (
+        f"⚠️ {ROUTINE.name} 被 RTC 之外的东西改过"
+        f"（上次程序写出 {was if was is not None else '?'} 个窗口，现在是 {now_windows} 个）"
+    )
     if backup:
         msg += f"；原件已备份到 {backup}"
     msg += "。改时刻表请用 set-time / postpone / disable 命令，别手写 JSON。"
     return [msg]
-
 
 
 def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:
@@ -1740,8 +1775,7 @@ def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:
     """
     defs = routine.get("alarmWindows") or []
     dead_ids = {
-        w["id"] for w in defs
-        if w.get("oneOff") and (w.get("validUntil") or w.get("validFrom") or "") < today
+        w["id"] for w in defs if w.get("oneOff") and (w.get("validUntil") or w.get("validFrom") or "") < today
     }
     if not dead_ids:
         return []
@@ -1756,8 +1790,7 @@ def _find_window(routine: dict, wid: str) -> dict | None:
     return None
 
 
-def _mark_state(state: dict | None, wid: str, new_state: str,
-                now: datetime, reason: str) -> str:
+def _mark_state(state: dict | None, wid: str, new_state: str, now: datetime, reason: str) -> str:
     """把今天 state 里某个窗口改成给定终态。返回结果标记。"""
     if not state:
         return "not_planned"
@@ -1816,8 +1849,7 @@ def cmd_set_time(args) -> int:
             return 3
 
     if end <= start:
-        print(f"set-time: end ({args.end or w['end']}) 必须晚于 start ({args.start})",
-              file=sys.stderr)
+        print(f"set-time: end ({args.end or w['end']}) 必须晚于 start ({args.start})", file=sys.stderr)
         return 3
 
     w["start"] = args.start
@@ -1887,8 +1919,7 @@ def cmd_cancel(args) -> int:
                 # 这个窗口只存在于那一天 → 整件事取消
                 w["disabled"] = True
                 _write_routine(routine, digest)
-                print(f"cancel: {args.window} 在 {target.isoformat()} 的那次已取消",
-                      file=sys.stderr)
+                print(f"cancel: {args.window} 在 {target.isoformat()} 的那次已取消", file=sys.stderr)
                 return 0
             skip = set(w.get("skipDates") or [])
             skip.add(target.isoformat())
@@ -1901,6 +1932,8 @@ def cmd_cancel(args) -> int:
     state = load_state()
     outcome = _mark_state(state, args.window, "cancelled", now, CANCELLED_REASON)
     if outcome == "changed":
+        # _mark_state 只在 state 存在时返回 changed
+        assert state is not None
         rev = int(state["rev"])
         state["rev"] = rev + 1
         try:
@@ -1927,7 +1960,7 @@ def cmd_cancel(args) -> int:
             w["validUntil"] = today
             truncated = True
         else:
-            truncated = True      # 已经到期的安排，截断后等于不再生成
+            truncated = True  # 已经到期的安排，截断后等于不再生成
     if truncated:
         _write_routine(routine, digest)
 
@@ -1962,6 +1995,8 @@ def cmd_complete(args) -> int:
     state = load_state()
     outcome = _mark_state(state, args.window, "acked", now, args.text or "")
     if outcome == "changed":
+        # _mark_state 只在 state 存在时返回 changed
+        assert state is not None
         rev = int(state["rev"])
         state["rev"] = rev + 1
         try:
@@ -2007,6 +2042,8 @@ def cmd_disable(args) -> int:
     state = load_state()
     outcome = _mark_state(state, args.window, "cancelled", now, CANCELLED_REASON)
     if outcome == "changed":
+        # _mark_state 只在 state 存在时返回 changed
+        assert state is not None
         rev = int(state["rev"])
         state["rev"] = rev + 1
         try:
@@ -2062,8 +2099,8 @@ def preview_schedule(routine: dict, day_iso: str) -> dict | None:
 
 def outcome_text(r: dict) -> str:
     """把一条执行结果说成人话。"""
-    st = r.get("state")
-    reason = r.get("missedReason")
+    st = str(r.get("state") or "")
+    reason = str(r.get("missedReason") or "")
     fires = int(r.get("fires") or 0)
     names = {
         "delivered": "已送达（一次性，无需确认）",
@@ -2110,9 +2147,11 @@ def cmd_schedule(args) -> int:
             d = date.fromisoformat(s["date"])
             dow = "一二三四五六日"[d.weekday()]
             fires = sum(w["expectFires"] for w in s["windows"])
-            print(f"{s['date']}（周{dow}）{s['planKind']:<8} "
-                  f"{len(s['windows'])} 窗口 / {fires} 次  "
-                  f"播报 {len(s['rollcalls'])}  周专项 {len(s['weeklyChores'])}")
+            print(
+                f"{s['date']}（周{dow}）{s['planKind']:<8} "
+                f"{len(s['windows'])} 窗口 / {fires} 次  "
+                f"播报 {len(s['rollcalls'])}  周专项 {len(s['weeklyChores'])}"
+            )
         return 0
 
     if not args.date:
@@ -2153,8 +2192,10 @@ def cmd_schedule(args) -> int:
             span = ""
             if w.get("validFrom") or w.get("validUntil"):
                 span = f"  有效期 {w.get('validFrom') or '不限'} ~ {w.get('validUntil') or '不限'}"
-            line = (f"  {t0}–{t1}  {w['label']:<12} 每 {w['intervalMin']} 分钟 × {w['expectFires']} 次"
-                    f"  确认词：{w.get('ackHint')}{tag}{span}")
+            line = (
+                f"  {t0}–{t1}  {w['label']:<12} 每 {w['intervalMin']} 分钟 × {w['expectFires']} 次"
+                f"  确认词：{w.get('ackHint')}{tag}{span}"
+            )
             # 结果：那天实际怎么了
             r = results.get(w["id"])
             if r:
@@ -2163,8 +2204,7 @@ def cmd_schedule(args) -> int:
         # 快照里可能有「结果」，但窗口已不在计划里（如当天被推迟走了）
         extra = [k for k in results if k not in {w["id"] for w in s["windows"]}]
         for k in extra:
-            print(f"  {'—':<13} {'':<12} （计划里没有，但有结果）"
-                  f"  → {outcome_text(results[k])}")
+            print(f"  {'—':<13} {'':<12} （计划里没有，但有结果）  → {outcome_text(results[k])}")
     else:
         print("窗口：（无）")
     if s["rollcalls"]:
@@ -2235,8 +2275,7 @@ def cmd_history(args) -> int:
         print(json.dumps({"date": s["date"], "results": res}, ensure_ascii=False, indent=2))
         return 0
     if not res:
-        print(f"history: {args.date} 还没有归档的执行结果"
-              f"（快照只有计划——结果在次日归档时回填）")
+        print(f"history: {args.date} 还没有归档的执行结果（快照只有计划——结果在次日归档时回填）")
         return 0
     print(f"{args.date} 的执行结果（{len(res)} 项）：")
     for wid, r in res.items():
@@ -2267,7 +2306,13 @@ def cmd_status(args) -> int:
             }
         )
     if args.json:
-        print(json.dumps({"planDate": state["planDate"], "rev": state["rev"], "windows": rows}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"planDate": state["planDate"], "rev": state["rev"], "windows": rows},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     print(f"{state['planDate']}  {state['planKind']}  rev={state['rev']}")
     hb = read_heartbeat()
@@ -2358,9 +2403,17 @@ def metrics_sync(state: dict) -> int:
                              label=excluded.label, start=excluded.start, end=excluded.end,
                              expect=excluded.expect, one_off=excluded.one_off,
                              valid_from=excluded.valid_from, valid_until=excluded.valid_until""",
-                        (s.get("date"), w["id"], w.get("label"), w.get("start"), w.get("end"),
-                         int(w.get("expectFires", 0)), 1 if w.get("oneOff") else 0,
-                         w.get("validFrom"), w.get("validUntil")),
+                        (
+                            s.get("date"),
+                            w["id"],
+                            w.get("label"),
+                            w.get("start"),
+                            w.get("end"),
+                            int(w.get("expectFires", 0)),
+                            1 if w.get("oneOff") else 0,
+                            w.get("validFrom"),
+                            w.get("validUntil"),
+                        ),
                     )
                     snap_count += 1
                 # 「有结果但已不在计划里」的条目（如当天被推迟走的窗口）也要进索引，
@@ -2375,8 +2428,17 @@ def metrics_sync(state: dict) -> int:
                            VALUES (?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(date, window) DO UPDATE SET
                              label=excluded.label, start=NULL, end=NULL""",
-                        (s.get("date"), wid, r.get("label") or wid, None, None,
-                         int(r.get("expect") or 0), 0, None, None),
+                        (
+                            s.get("date"),
+                            wid,
+                            r.get("label") or wid,
+                            None,
+                            None,
+                            int(r.get("expect") or 0),
+                            0,
+                            None,
+                            None,
+                        ),
                     )
                     snap_count += 1
         con.commit()
@@ -2418,7 +2480,9 @@ def cmd_metrics(args) -> int:
             rows = con.execute(
                 """SELECT date, window, label, start, end, expect, one_off,
                           valid_from, valid_until
-                   FROM schedule WHERE date=?""", (args.date,)).fetchall()
+                   FROM schedule WHERE date=?""",
+                (args.date,),
+            ).fetchall()
             if not rows:
                 print(f"metrics: schedule 表里没有 {args.date}", file=sys.stderr)
                 con.close()
@@ -2426,14 +2490,15 @@ def cmd_metrics(args) -> int:
             for r in rows:
                 # start/end 可能为 NULL：「有结果但已不在计划里」的条目（当天被推迟走的）
                 span = f"{r[3][11:16]}–{r[4][11:16]}" if r[3] and r[4] else "（已移出计划）"
-                print(f"{r[0]}  {r[1]:<12} {r[2]:<12} {span}"
-                      f"  ×{r[5]}" + ("  [一次性]" if r[6] else "")
-                      + (f"  {r[7]}~{r[8]}" if r[7] or r[8] else ""))
+                print(
+                    f"{r[0]}  {r[1]:<12} {r[2]:<12} {span}"
+                    f"  ×{r[5]}"
+                    + ("  [一次性]" if r[6] else "")
+                    + (f"  {r[7]}~{r[8]}" if r[7] or r[8] else "")
+                )
         else:
-            rows = con.execute(
-                "SELECT date, COUNT(*) FROM schedule GROUP BY date ORDER BY date").fetchall()
-            print(f"schedule 表覆盖 {len(rows)} 天"
-                  + (f"：{rows[0][0]} ~ {rows[-1][0]}" if rows else ""))
+            rows = con.execute("SELECT date, COUNT(*) FROM schedule GROUP BY date ORDER BY date").fetchall()
+            print(f"schedule 表覆盖 {len(rows)} 天" + (f"：{rows[0][0]} ~ {rows[-1][0]}" if rows else ""))
         con.close()
         return 0
 
@@ -2518,8 +2583,7 @@ def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
 
     ringing = [w for w in windows if w.get("state") == "ringing"]
     pending = [w for w in windows if w.get("state") == "pending" and key(w) > now.isoformat()]
-    done = [w for w in windows
-            if w.get("state") in ("acked", "delivered", "missed", "skipped", "cancelled")]
+    done = [w for w in windows if w.get("state") in ("acked", "delivered", "missed", "skipped", "cancelled")]
 
     lines = [head]
     if ringing:
@@ -2540,15 +2604,18 @@ def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
             gap = 0
         lines.append(f"接下来：{_hhmm(nxt['start'])} {nxt['label']}（还有 {_span(gap)}）")
         if len(rest) > 1:
-            lines.append("再往后：" + "、".join(
-                f"{_hhmm(w['start'])} {w['label']}" for w in rest[1:4]))
+            lines.append("再往后：" + "、".join(f"{_hhmm(w['start'])} {w['label']}" for w in rest[1:4]))
     else:
         lines.append("接下来：今天没有更晚的安排了。")
 
     if done:
-        lines.append("今天已过：" + "、".join(
-            f"{_hhmm(w['start'])} {w['label']} {_STATE_WORD.get(w.get('state'), w.get('state'))}"
-            for w in sorted(done, key=key)))
+        lines.append(
+            "今天已过："
+            + "、".join(
+                f"{_hhmm(w['start'])} {w['label']} {_STATE_WORD.get(w.get('state'), w.get('state'))}"
+                for w in sorted(done, key=key)
+            )
+        )
     return lines
 
 

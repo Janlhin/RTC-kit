@@ -8,8 +8,10 @@
     python -m unittest discover -s code/tests -v
     python code/tests/test_rtc.py
 """
+
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -20,17 +22,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-import argparse
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "code"))
 import rtc  # noqa: E402  (回滚竞态测试直接调 cmd_postpone)
+
 RTC = REPO / "code" / "rtc.py"
 SCHEMA = REPO / "contract" / "routine.schema.json"
 ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
 
 try:
     import jsonschema  # noqa: F401
+
     HAVE_JSONSCHEMA = True
 except ImportError:
     HAVE_JSONSCHEMA = False
@@ -38,13 +41,23 @@ except ImportError:
 
 def base_routine(**over) -> dict:
     r = {
-        "version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00",
+        "version": 1,
+        "timezone": "Asia/Shanghai",
+        "tzOffset": "+08:00",
         "dateTypes": {"workday": [1, 2, 3, 4, 5], "weekend": [0, 6], "holidayOverrides": []},
         "alarmWindows": [
-            {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]},
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
         ],
-        "rollcalls": [], "phases": [],
+        "rollcalls": [],
+        "phases": [],
     }
     r.update(over)
     return r
@@ -61,7 +74,8 @@ class RtcCase(unittest.TestCase):
 
     def write_routine(self, routine: dict):
         (self.ws / "rules" / "routines.json").write_text(
-            json.dumps(routine, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(routine, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def cli(self, *args, now=None):
         cmd = [sys.executable, str(RTC), "--workspace", str(self.ws)] + list(args)
@@ -87,11 +101,20 @@ class TestOneOff(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "travel", "label": "旅游", "start": "09:00", "end": "09:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "oneOff": True, "validFrom": "2026-11-10", "validUntil": "2026-11-10",
-        }]
+        r["alarmWindows"] = [
+            {
+                "id": "travel",
+                "label": "旅游",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-10",
+                "validUntil": "2026-11-10",
+            }
+        ]
         self.write_routine(r)
 
     def test_fires_once_then_delivered(self):
@@ -125,10 +148,17 @@ class TestOneOff(RtcCase):
     def test_repeating_message_hints_only_first_and_last(self):
         """会反复响的窗口：只在第 1 次和最后一次提怎么停，中途别每句都念。"""
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "meds", "label": "吃药", "start": "09:00", "end": "09:20",
-            "intervalMin": 5, "expectFires": 5, "ackHints": ["吃了"],
-        }]
+        r["alarmWindows"] = [
+            {
+                "id": "meds",
+                "label": "吃药",
+                "start": "09:00",
+                "end": "09:20",
+                "intervalMin": 5,
+                "expectFires": 5,
+                "ackHints": ["吃了"],
+            }
+        ]
         self.write_routine(r)
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
 
@@ -184,8 +214,7 @@ class TestOneOff(RtcCase):
     def test_ack_on_delivered_has_no_match(self):
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
         self.cli("due", now="2026-11-10T09:00:00+08:00")
-        rc, _, _ = self.cli("ack", "--window", "trip", "--text", "好了",
-                             now="2026-11-10T09:05:00+08:00")
+        rc, _, _ = self.cli("ack", "--window", "trip", "--text", "好了", now="2026-11-10T09:05:00+08:00")
         self.assertEqual(rc, 4, "已送达的一次性窗口没有可确认的匹配")
 
 
@@ -195,11 +224,19 @@ class TestValidity(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "season", "label": "版本限时任务", "start": "10:00", "end": "10:25",
-            "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"],
-            "validFrom": "2026-11-10", "validUntil": "2026-11-12",
-        }]
+        r["alarmWindows"] = [
+            {
+                "id": "season",
+                "label": "版本限时任务",
+                "start": "10:00",
+                "end": "10:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+                "validFrom": "2026-11-10",
+                "validUntil": "2026-11-12",
+            }
+        ]
         self.write_routine(r)
 
     def test_generated_inside_range(self):
@@ -262,6 +299,7 @@ class TestSchema(unittest.TestCase):
     @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
     def test_oneoff_requires_expect_fires_one(self):
         import jsonschema
+
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         bad = base_routine()
         bad["alarmWindows"][0].update({"oneOff": True, "expectFires": 6})
@@ -271,11 +309,12 @@ class TestSchema(unittest.TestCase):
     @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
     def test_new_fields_accepted(self):
         import jsonschema
+
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         good = base_routine()
-        good["alarmWindows"][0].update({
-            "oneOff": True, "expectFires": 1,
-            "validFrom": "2026-11-10", "validUntil": "2026-11-10"})
+        good["alarmWindows"][0].update(
+            {"oneOff": True, "expectFires": 1, "validFrom": "2026-11-10", "validUntil": "2026-11-10"}
+        )
         errs = list(jsonschema.Draft202012Validator(schema).iter_errors(good))
         self.assertEqual(errs, [], f"合法配置不该被拒：{errs[:1]}")
 
@@ -303,8 +342,7 @@ class TestMainlineRegression(RtcCase):
         rc, out, _ = self.cli("due", now="2026-11-10T07:05:00+08:00")
         self.assertIn("第 2 次", out)
 
-        rc, _, _ = self.cli("ack", "--window", "wake", "--text", "起了",
-                             now="2026-11-10T07:06:00+08:00")
+        rc, _, _ = self.cli("ack", "--window", "wake", "--text", "起了", now="2026-11-10T07:06:00+08:00")
         self.assertEqual(rc, 0)
         self.assertEqual(self.window("wake")["state"], "acked")
 
@@ -341,9 +379,13 @@ class TestScheduleArchive(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["rollcalls"] = [{"hour": 20, "minute": 0,
-                           "kindByDateType": {"workday": "summary", "holiday": "summary",
-                                              "weekend": "summary"}}]
+        r["rollcalls"] = [
+            {
+                "hour": 20,
+                "minute": 0,
+                "kindByDateType": {"workday": "summary", "holiday": "summary", "weekend": "summary"},
+            }
+        ]
         r["weeklyChores"] = [{"dayOfWeek": 6, "label": "洗衣服", "attachToRollcallHour": 14}]
         self.write_routine(r)
 
@@ -354,8 +396,9 @@ class TestScheduleArchive(RtcCase):
         self.cli("plan", now="2026-12-15T06:00:00+08:00")
         sp = self.snapshot("2026-12-15")
         self.assertTrue(sp.exists(), "plan 必须写每日快照")
-        self.assertTrue(sp.is_relative_to(self.ws),
-                        "快照必须落在 --workspace 指定的目录里，不能写到进程 cwd 下")
+        self.assertTrue(
+            sp.is_relative_to(self.ws), "快照必须落在 --workspace 指定的目录里，不能写到进程 cwd 下"
+        )
         snap = json.loads(sp.read_text(encoding="utf-8"))
         self.assertEqual(snap["date"], "2026-12-15")
         self.assertEqual(snap["planKind"], "workday")
@@ -366,15 +409,16 @@ class TestScheduleArchive(RtcCase):
         self.assertEqual(snap["rollcalls"][0]["kind"], "summary")
 
     def test_snapshot_records_weekly_chore(self):
-        self.cli("plan", now="2026-12-19T06:00:00+08:00")   # 周六
+        self.cli("plan", now="2026-12-19T06:00:00+08:00")  # 周六
         snap = json.loads(self.snapshot("2026-12-19").read_text(encoding="utf-8"))
         self.assertEqual(len(snap["weeklyChores"]), 1)
         self.assertEqual(snap["weeklyChores"][0]["label"], "洗衣服")
 
     def test_snapshot_records_one_off_and_validity(self):
         r = base_routine()
-        r["alarmWindows"][0].update({"oneOff": True, "expectFires": 1,
-                                      "validFrom": "2026-12-15", "validUntil": "2026-12-15"})
+        r["alarmWindows"][0].update(
+            {"oneOff": True, "expectFires": 1, "validFrom": "2026-12-15", "validUntil": "2026-12-15"}
+        )
         self.write_routine(r)
         self.cli("plan", now="2026-12-15T06:00:00+08:00")
         w = json.loads(self.snapshot("2026-12-15").read_text(encoding="utf-8"))["windows"][0]
@@ -404,7 +448,7 @@ class TestScheduleArchive(RtcCase):
     def test_query_disabled_day_has_no_preview(self):
         """被显式禁用的日期类型推算不出安排 → 退出码 4。"""
         self.write_routine(base_routine(weekendAlarms=False))
-        rc, _, err = self.cli("schedule", "2026-11-14")   # 周六
+        rc, _, err = self.cli("schedule", "2026-11-14")  # 周六
         self.assertEqual(rc, 4)
         self.assertIn("没有", err)
 
@@ -418,10 +462,20 @@ class TestScheduleArchive(RtcCase):
     def test_future_date_is_previewed_from_config(self):
         """未来日期没有快照时，按配置推算——能看见自己预约了什么。"""
         r = base_routine()
-        r["alarmWindows"].append({
-            "id": "travel", "label": "旅游", "start": "09:00", "end": "23:45",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "oneOff": True, "validFrom": "2028-01-01", "validUntil": "2028-01-01"})
+        r["alarmWindows"].append(
+            {
+                "id": "travel",
+                "label": "旅游",
+                "start": "09:00",
+                "end": "23:45",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2028-01-01",
+                "validUntil": "2028-01-01",
+            }
+        )
         self.write_routine(r)
         rc, out, _ = self.cli("schedule", "2028-01-01")
         self.assertEqual(rc, 0, "未来日期应能推算出安排")
@@ -434,10 +488,20 @@ class TestScheduleArchive(RtcCase):
     def test_wide_window_oneoff_still_delivers_late_in_day(self):
         """宽容错窗口时，当天晚些开机也能收到。"""
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "travel", "label": "旅游", "start": "09:00", "end": "23:45",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "oneOff": True, "validFrom": "2026-12-15", "validUntil": "2026-12-15"}]
+        r["alarmWindows"] = [
+            {
+                "id": "travel",
+                "label": "旅游",
+                "start": "09:00",
+                "end": "23:45",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-12-15",
+                "validUntil": "2026-12-15",
+            }
+        ]
         self.write_routine(r)
         self.cli("plan", now="2026-12-15T09:30:00+08:00")
         rc, out, _ = self.cli("due", now="2026-12-15T09:31:00+08:00")
@@ -459,11 +523,20 @@ class TestCountdown(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "zzz", "label": "限时活动", "start": "20:00", "end": "20:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "dueDate": "2026-05-10",
-            "validFrom": "2026-05-08", "validUntil": "2026-05-10"}]
+        r["alarmWindows"] = [
+            {
+                "id": "zzz",
+                "label": "限时活动",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "dueDate": "2026-05-10",
+                "validFrom": "2026-05-08",
+                "validUntil": "2026-05-10",
+            }
+        ]
         self.write_routine(r)
 
     def test_counts_down_in_text(self):
@@ -504,8 +577,7 @@ class TestCountdown(RtcCase):
 
     def test_snapshot_records_due_date(self):
         self.cli("plan", now="2026-05-08T06:00:00+08:00")
-        snap = json.loads((self.ws / "state" / "schedule" / "2026-05-08.json")
-                          .read_text(encoding="utf-8"))
+        snap = json.loads((self.ws / "state" / "schedule" / "2026-05-08.json").read_text(encoding="utf-8"))
         self.assertEqual(snap["windows"][0]["dueDate"], "2026-05-10")
 
 
@@ -515,10 +587,18 @@ class TestChecklist(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "pack", "label": "清点并带走", "start": "20:00", "end": "20:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"]}]
+        r["alarmWindows"] = [
+            {
+                "id": "pack",
+                "label": "清点并带走",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"],
+            }
+        ]
         self.write_routine(r)
 
     def test_due_lists_all_items(self):
@@ -531,12 +611,12 @@ class TestChecklist(RtcCase):
 
     def test_check_by_label_or_index(self):
         self.cli("plan", now="2026-05-12T06:00:00+08:00")
-        rc, out, err = self.cli("check", "--window", "pack", "--item", "电饭煲",
-                                 now="2026-05-12T20:05:00+08:00")
+        rc, out, err = self.cli(
+            "check", "--window", "pack", "--item", "电饭煲", now="2026-05-12T20:05:00+08:00"
+        )
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "check 的 stdout 必须为空——它由用户交互触发，不该被投递")
-        rc, _, _ = self.cli("check", "--window", "pack", "--item", "2",
-                             now="2026-05-12T20:06:00+08:00")
+        rc, _, _ = self.cli("check", "--window", "pack", "--item", "2", now="2026-05-12T20:06:00+08:00")
         self.assertEqual(rc, 0)
         self.assertEqual(self.state()["windows"][0]["checked"], ["1", "2"])
 
@@ -554,8 +634,7 @@ class TestChecklist(RtcCase):
     def test_all_checked_completes_window(self):
         self.cli("plan", now="2026-05-12T06:00:00+08:00")
         for i in range(1, 5):
-            self.cli("check", "--window", "pack", "--item", str(i),
-                     now="2026-05-12T20:05:00+08:00")
+            self.cli("check", "--window", "pack", "--item", str(i), now="2026-05-12T20:05:00+08:00")
         w = self.state()["windows"][0]
         self.assertEqual(w["state"], "acked", "全部打完即视为完成")
         self.assertEqual(len(w["checked"]), 4)
@@ -563,8 +642,7 @@ class TestChecklist(RtcCase):
     def test_completed_list_stops_reminding(self):
         self.cli("plan", now="2026-05-12T06:00:00+08:00")
         for i in range(1, 5):
-            self.cli("check", "--window", "pack", "--item", str(i),
-                     now="2026-05-12T20:05:00+08:00")
+            self.cli("check", "--window", "pack", "--item", str(i), now="2026-05-12T20:05:00+08:00")
         self.cli("plan", now="2026-05-13T06:00:00+08:00")
         self.assertEqual(self.state()["windows"][0]["state"], "acked")
         rc, out, _ = self.cli("due", now="2026-05-13T20:00:00+08:00")
@@ -572,16 +650,18 @@ class TestChecklist(RtcCase):
 
     def test_unknown_item(self):
         self.cli("plan", now="2026-05-12T06:00:00+08:00")
-        rc, _, err = self.cli("check", "--window", "pack", "--item", "不存在的东西",
-                               now="2026-05-12T20:05:00+08:00")
+        rc, _, err = self.cli(
+            "check", "--window", "pack", "--item", "不存在的东西", now="2026-05-12T20:05:00+08:00"
+        )
         self.assertEqual(rc, 4)
         self.assertIn("没有", err)
 
     def test_undo(self):
         self.cli("plan", now="2026-05-12T06:00:00+08:00")
         self.cli("check", "--window", "pack", "--item", "电饭煲", now="2026-05-12T20:05:00+08:00")
-        rc, _, _ = self.cli("check", "--window", "pack", "--item", "电饭煲", "--undo",
-                             now="2026-05-12T20:06:00+08:00")
+        rc, _, _ = self.cli(
+            "check", "--window", "pack", "--item", "电饭煲", "--undo", now="2026-05-12T20:06:00+08:00"
+        )
         self.assertEqual(rc, 0)
         self.assertEqual(self.state()["windows"][0]["checked"], [])
 
@@ -592,16 +672,25 @@ class TestPostpone(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "thermos", "label": "洗保温杯", "start": "20:00", "end": "20:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "oneOff": True, "validFrom": "2026-05-10", "validUntil": "2026-05-10"}]
+        r["alarmWindows"] = [
+            {
+                "id": "thermos",
+                "label": "洗保温杯",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-05-10",
+                "validUntil": "2026-05-10",
+            }
+        ]
         self.write_routine(r)
 
     def test_today_is_skipped_and_tomorrow_fires_at_same_time(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        rc, out, err = self.cli("postpone", "--window", "thermos",
-                                 now="2026-05-10T08:00:00+08:00")
+        rc, out, err = self.cli("postpone", "--window", "thermos", now="2026-05-10T08:00:00+08:00")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "postpone 由用户触发，stdout 不该被投递出去")
 
@@ -629,8 +718,7 @@ class TestPostpone(RtcCase):
         entry = next((h for h in hist if h["id"] == "thermos"), None)
         self.assertIsNotNone(entry, "推迟的窗口也要进归档")
         self.assertEqual(entry["state"], "skipped")
-        self.assertEqual(entry["missedReason"], "postponed",
-                         "归档要保留推迟原因，不能丢")
+        self.assertEqual(entry["missedReason"], "postponed", "归档要保留推迟原因，不能丢")
 
     def test_does_not_repeat_next_day(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
@@ -648,8 +736,9 @@ class TestPostpone(RtcCase):
 
     def test_days_moves_further(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        rc, _, err = self.cli("postpone", "--window", "thermos", "--days", "3",
-                               now="2026-05-10T08:00:00+08:00")
+        rc, _, err = self.cli(
+            "postpone", "--window", "thermos", "--days", "3", now="2026-05-10T08:00:00+08:00"
+        )
         self.assertEqual(rc, 0)
         routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
         w = next(x for x in routine["alarmWindows"] if x["id"] == "thermos")
@@ -657,37 +746,49 @@ class TestPostpone(RtcCase):
         self.assertEqual(w["validUntil"], "2026-05-13")
 
     def test_unknown_window(self):
-        rc, _, err = self.cli("postpone", "--window", "nope",
-                               now="2026-05-10T08:00:00+08:00")
+        rc, _, err = self.cli("postpone", "--window", "nope", now="2026-05-10T08:00:00+08:00")
         self.assertEqual(rc, 4)
         self.assertIn("没有", err)
 
     def test_target_not_later_than_today(self):
         for target in ("2026-05-09", "2026-05-10"):
-            rc, _, err = self.cli("postpone", "--window", "thermos", "--to", target,
-                                   now="2026-05-10T08:00:00+08:00")
+            rc, _, err = self.cli(
+                "postpone", "--window", "thermos", "--to", target, now="2026-05-10T08:00:00+08:00"
+            )
             self.assertEqual(rc, 3, target)
             self.assertIn("不晚于今天", err)
 
     def test_bad_date_format(self):
-        rc, _, err = self.cli("postpone", "--window", "thermos", "--to", "05-11",
-                               now="2026-05-10T08:00:00+08:00")
+        rc, _, err = self.cli(
+            "postpone", "--window", "thermos", "--to", "05-11", now="2026-05-10T08:00:00+08:00"
+        )
         self.assertEqual(rc, 3)
         self.assertIn("YYYY-MM-DD", err)
 
     def test_target_conflicting_with_date_types(self):
         """推迟到该窗口不生效的日期类型 → 拒绝，而不是明天静默不响。"""
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "thermos", "label": "洗保温杯", "start": "20:00", "end": "20:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "oneOff": True, "dateTypes": ["workday"],
-            "validFrom": "2026-05-10", "validUntil": "2026-05-10"}]
+        r["alarmWindows"] = [
+            {
+                "id": "thermos",
+                "label": "洗保温杯",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "dateTypes": ["workday"],
+                "validFrom": "2026-05-10",
+                "validUntil": "2026-05-10",
+            }
+        ]
         self.write_routine(r)
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
         # 2026-05-16 是周六，dateTypes=["workday"] 不生效
-        rc, _, err = self.cli("postpone", "--window", "thermos", "--to", "2026-05-16",
-                               now="2026-05-10T08:00:00+08:00")
+        rc, _, err = self.cli(
+            "postpone", "--window", "thermos", "--to", "2026-05-16", now="2026-05-10T08:00:00+08:00"
+        )
         self.assertEqual(rc, 3)
         self.assertIn("dateTypes", err)
 
@@ -698,15 +799,22 @@ class TestPostponePeriodic(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
-            "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]}]
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            }
+        ]
         self.write_routine(r)
 
     def test_skips_today_only(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        rc, _, err = self.cli("postpone", "--window", "wake",
-                               now="2026-05-10T08:00:00+08:00")
+        rc, _, err = self.cli("postpone", "--window", "wake", now="2026-05-10T08:00:00+08:00")
         self.assertEqual(rc, 0)
         self.assertIn("跳过", err)
 
@@ -738,30 +846,41 @@ class TestPostponeCountdown(RtcCase):
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "zzz", "label": "限时活动", "start": "20:00", "end": "20:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "dueDate": "2026-05-12",
-            "validFrom": "2026-05-10", "validUntil": "2026-05-12"}]
+        r["alarmWindows"] = [
+            {
+                "id": "zzz",
+                "label": "限时活动",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "dueDate": "2026-05-12",
+                "validFrom": "2026-05-10",
+                "validUntil": "2026-05-12",
+            }
+        ]
         self.write_routine(r)
 
     def test_deadline_moves_and_countdown_recomputes(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        rc, _, err = self.cli("postpone", "--window", "zzz", "--to", "2026-05-13",
-                               now="2026-05-10T21:00:00+08:00")
+        rc, _, err = self.cli(
+            "postpone", "--window", "zzz", "--to", "2026-05-13", now="2026-05-10T21:00:00+08:00"
+        )
         self.assertEqual(rc, 0)
 
-        for day, expect in (("2026-05-11", "距截止还有 2 天"),
-                            ("2026-05-12", "明天截止"),
-                            ("2026-05-13", "最后一天")):
+        for day, expect in (
+            ("2026-05-11", "距截止还有 2 天"),
+            ("2026-05-12", "明天截止"),
+            ("2026-05-13", "最后一天"),
+        ):
             self.cli("plan", now=f"{day}T06:00:00+08:00")
             _, out, _ = self.cli("due", now=f"{day}T20:00:00+08:00")
             self.assertIn(expect, out, day)
 
     def test_stops_after_new_deadline(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        self.cli("postpone", "--window", "zzz", "--to", "2026-05-13",
-                 now="2026-05-10T21:00:00+08:00")
+        self.cli("postpone", "--window", "zzz", "--to", "2026-05-13", now="2026-05-10T21:00:00+08:00")
         self.cli("plan", now="2026-05-14T06:00:00+08:00")
         rc, out, _ = self.cli("due", now="2026-05-14T20:00:00+08:00")
         self.assertEqual(out, "")
@@ -774,11 +893,27 @@ class TestCancelCompleteDisable(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [
-            {"id": "meeting", "label": "临时会议", "start": "11:00", "end": "11:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "tea", "label": "喝茶", "start": "15:00", "end": "15:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+            {
+                "id": "meeting",
+                "label": "临时会议",
+                "start": "11:00",
+                "end": "11:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "tea",
+                "label": "喝茶",
+                "start": "15:00",
+                "end": "15:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            },
         ]
         self.write_routine(r)
 
@@ -792,8 +927,7 @@ class TestCancelCompleteDisable(RtcCase):
 
     def test_cancel_one_off_stops_it_forever(self):
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
-        rc, out, err = self.cli("cancel", "--window", "meeting",
-                                 now="2026-11-13T08:00:00+08:00")
+        rc, out, err = self.cli("cancel", "--window", "meeting", now="2026-11-13T08:00:00+08:00")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "cancel 由用户触发，stdout 不该被投递出去")
 
@@ -801,8 +935,9 @@ class TestCancelCompleteDisable(RtcCase):
         self.assertEqual(out, "", "取消后今天不该响")
 
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
-        self.assertNotIn("meeting", [w["id"] for w in self.state().get("windows", [])],
-                         "一次性窗口取消后不该再生成")
+        self.assertNotIn(
+            "meeting", [w["id"] for w in self.state().get("windows", [])], "一次性窗口取消后不该再生成"
+        )
 
     def test_cancel_marks_state_cancelled(self):
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
@@ -820,8 +955,7 @@ class TestCancelCompleteDisable(RtcCase):
         entry = next((h for h in hist if h["id"] == "meeting"), None)
         self.assertIsNotNone(entry)
         self.assertEqual(entry["state"], "cancelled")
-        self.assertEqual(entry["missedReason"], "cancelled",
-                         "取消的原因要进归档，不能丢")
+        self.assertEqual(entry["missedReason"], "cancelled", "取消的原因要进归档，不能丢")
 
     def test_cancel_recurring_only_today(self):
         """周期窗口没有「这件事」可取消，只取消今天这一次。"""
@@ -840,27 +974,37 @@ class TestCancelCompleteDisable(RtcCase):
     def test_cancel_future_date(self):
         """取消还没到的一次性安排。"""
         r = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
-        r["alarmWindows"].append({
-            "id": "future", "label": "季度汇报", "start": "09:00", "end": "09:15",
-            "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-            "oneOff": True, "validFrom": "2027-03-01", "validUntil": "2027-03-01"})
+        r["alarmWindows"].append(
+            {
+                "id": "future",
+                "label": "季度汇报",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2027-03-01",
+                "validUntil": "2027-03-01",
+            }
+        )
         self.write_routine(r)
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
-        rc, _, err = self.cli("cancel", "--window", "future", "--date", "2027-03-01",
-                               now="2026-11-13T08:00:00+08:00")
+        rc, _, err = self.cli(
+            "cancel", "--window", "future", "--date", "2027-03-01", now="2026-11-13T08:00:00+08:00"
+        )
         self.assertEqual(rc, 0)
-        self.assertTrue(self.window_def("future").get("disabled"),
-                        "取消未来那次 = 那个窗口不再生成")
+        self.assertTrue(self.window_def("future").get("disabled"), "取消未来那次 = 那个窗口不再生成")
 
     def test_cancel_date_window_does_not_exist(self):
         """那天根本没有这个窗口 → 退 4 并说明，不静默无效。"""
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
-        rc, _, err = self.cli("cancel", "--window", "meeting", "--date", "2026-11-20",
-                               now="2026-11-13T08:00:00+08:00")
+        rc, _, err = self.cli(
+            "cancel", "--window", "meeting", "--date", "2026-11-20", now="2026-11-13T08:00:00+08:00"
+        )
         self.assertEqual(rc, 4)
         self.assertIn("不存在", err)
-        self.assertFalse(self.window_def("meeting").get("disabled"),
-                         "取消失败就不该改动配置")
+        self.assertFalse(self.window_def("meeting").get("disabled"), "取消失败就不该改动配置")
 
     def test_cancel_unknown_window(self):
         rc, _, err = self.cli("cancel", "--window", "nope", now="2026-11-13T08:00:00+08:00")
@@ -878,15 +1022,15 @@ class TestCancelCompleteDisable(RtcCase):
 
     def test_complete_acknowledges_and_disables(self):
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
-        rc, out, err = self.cli("complete", "--window", "tea", "--text", "喝完了",
-                                 now="2026-11-13T08:00:00+08:00")
+        rc, out, err = self.cli(
+            "complete", "--window", "tea", "--text", "喝完了", now="2026-11-13T08:00:00+08:00"
+        )
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
         w = self.window("tea")
         self.assertEqual(w["state"], "acked")
         self.assertEqual(w["ackText"], "喝完了")
-        self.assertTrue(self.window_def("tea").get("disabled"),
-                        "完成 = 以后不再提醒")
+        self.assertTrue(self.window_def("tea").get("disabled"), "完成 = 以后不再提醒")
 
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
         self.assertNotIn("tea", [w["id"] for w in self.state().get("windows", [])])
@@ -895,18 +1039,15 @@ class TestCancelCompleteDisable(RtcCase):
         """complete 与 ack 的区别：ack 只停今天，complete 连以后也停。"""
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
         self.cli("ack", "--window", "tea", "--text", "好了", now="2026-11-13T08:00:00+08:00")
-        self.assertFalse(self.window_def("tea").get("disabled"),
-                         "ack 不该停用窗口")
+        self.assertFalse(self.window_def("tea").get("disabled"), "ack 不该停用窗口")
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
-        self.assertIn("tea", [w["id"] for w in self.state().get("windows", [])],
-                      "ack 之后明天照常响")
+        self.assertIn("tea", [w["id"] for w in self.state().get("windows", [])], "ack 之后明天照常响")
 
     # ---------- disable / enable ----------
 
     def test_disable_stops_forever(self):
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
-        rc, out, err = self.cli("disable", "--window", "tea",
-                                 now="2026-11-13T08:00:00+08:00")
+        rc, out, err = self.cli("disable", "--window", "tea", now="2026-11-13T08:00:00+08:00")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
         self.assertTrue(self.window_def("tea").get("disabled"))
@@ -962,26 +1103,84 @@ class TestSevenOpsSameDay(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [
-            {"id": "travel", "label": "旅游", "start": "09:00", "end": "09:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "cancel-me", "label": "临时会议", "start": "11:00", "end": "11:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "postpone-me", "label": "取件", "start": "14:00", "end": "14:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "zzz", "label": "限时活动", "start": "20:00", "end": "20:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "dueDate": "2026-11-15",
-             "validFrom": "2026-11-13", "validUntil": "2026-11-15"},
-            {"id": "future", "label": "季度汇报", "start": "09:00", "end": "09:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2027-03-01", "validUntil": "2027-03-01"},
-            {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]},
-            {"id": "tea", "label": "喝茶", "start": "15:00", "end": "15:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+            {
+                "id": "travel",
+                "label": "旅游",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "cancel-me",
+                "label": "临时会议",
+                "start": "11:00",
+                "end": "11:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "postpone-me",
+                "label": "取件",
+                "start": "14:00",
+                "end": "14:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "zzz",
+                "label": "限时活动",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "dueDate": "2026-11-15",
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-15",
+            },
+            {
+                "id": "future",
+                "label": "季度汇报",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2027-03-01",
+                "validUntil": "2027-03-01",
+            },
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "tea",
+                "label": "喝茶",
+                "start": "15:00",
+                "end": "15:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            },
         ]
         self.write_routine(r)
 
@@ -994,21 +1193,19 @@ class TestSevenOpsSameDay(RtcCase):
         # ② 取消
         self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
         # ③ 推迟
-        self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14",
-                 now=f"{T}T08:20:00+08:00")
+        self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14", now=f"{T}T08:20:00+08:00")
         # ⑦ 永不提醒
         self.cli("disable", "--window", "tea", now=f"{T}T08:50:00+08:00")
         # ⑤ 取消未来的预约
-        self.cli("cancel", "--window", "future", "--date", "2027-03-01",
-                 now=f"{T}T08:55:00+08:00")
+        self.cli("cancel", "--window", "future", "--date", "2027-03-01", now=f"{T}T08:55:00+08:00")
 
         # 当天：只有旅游（09:00）和倒计时（20:00）该响
         expected = {
-            "07:00": "",        # wake 已完成
-            "09:00": "旅游",     # travel 一次性
-            "11:00": "",       # cancel-me 已取消
-            "14:00": "",       # postpone-me 已推迟
-            "15:00": "",       # tea 已停用
+            "07:00": "",  # wake 已完成
+            "09:00": "旅游",  # travel 一次性
+            "11:00": "",  # cancel-me 已取消
+            "14:00": "",  # postpone-me 已推迟
+            "15:00": "",  # tea 已停用
             "20:00": "限时活动",  # zzz 倒计时
         }
         for t, want in expected.items():
@@ -1038,14 +1235,13 @@ class TestSevenOpsSameDay(RtcCase):
     def test_seven_ops_keep_state_contract_valid(self):
         """七操作之后，状态文件仍要符合契约（additionalProperties: false）。"""
         import jsonschema
-        schema = json.loads(
-            (REPO / "contract" / "alarm-state.schema.json").read_text(encoding="utf-8"))
+
+        schema = json.loads((REPO / "contract" / "alarm-state.schema.json").read_text(encoding="utf-8"))
         T = "2026-11-13"
         self.cli("plan", now=f"{T}T06:00:00+08:00")
         self.cli("complete", "--window", "wake", now=f"{T}T07:05:00+08:00")
         self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
-        self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14",
-                 now=f"{T}T08:20:00+08:00")
+        self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14", now=f"{T}T08:20:00+08:00")
         self.cli("disable", "--window", "tea", now=f"{T}T08:50:00+08:00")
         errs = list(jsonschema.Draft202012Validator(schema).iter_errors(self.state()))
         self.assertEqual(errs, [], f"状态文件违反契约：{errs[:1]}")
@@ -1057,10 +1253,8 @@ class TestSevenOpsSameDay(RtcCase):
         self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
         rc, out, _ = self.cli("plan", "--force", now="2026-11-14T06:00:00+08:00")
-        self.assertNotIn("cancel-me", out,
-                         "取消 ≠ 漏响，不该触发「整段没响」告警")
-        self.assertIn("travel", out,
-                      "确实整段没响过的窗口仍要报出来——否则真漏了就没人知道")
+        self.assertNotIn("cancel-me", out, "取消 ≠ 漏响，不该触发「整段没响」告警")
+        self.assertIn("travel", out, "确实整段没响过的窗口仍要报出来——否则真漏了就没人知道")
 
 
 class TestExecutionArchive(RtcCase):
@@ -1070,18 +1264,54 @@ class TestExecutionArchive(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [
-            {"id": "postponed", "label": "取件", "start": "14:00", "end": "14:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "cancelled", "label": "临时会议", "start": "11:00", "end": "11:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "unfinished", "label": "没做完的事", "start": "16:00", "end": "16:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
-            {"id": "ok", "label": "正常响的", "start": "09:00", "end": "09:15",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["好了"],
-             "oneOff": True, "validFrom": "2026-11-13", "validUntil": "2026-11-13"},
+            {
+                "id": "postponed",
+                "label": "取件",
+                "start": "14:00",
+                "end": "14:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "cancelled",
+                "label": "临时会议",
+                "start": "11:00",
+                "end": "11:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "unfinished",
+                "label": "没做完的事",
+                "start": "16:00",
+                "end": "16:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
+            {
+                "id": "ok",
+                "label": "正常响的",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-13",
+                "validUntil": "2026-11-13",
+            },
         ]
         self.write_routine(r)
 
@@ -1092,8 +1322,7 @@ class TestExecutionArchive(RtcCase):
     def make_day(self):
         """跑出四种结局：推迟 / 取消 / 未完成 / 正常。"""
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
-        self.cli("postpone", "--window", "postponed", "--to", "2026-11-14",
-                 now="2026-11-13T08:00:00+08:00")
+        self.cli("postpone", "--window", "postponed", "--to", "2026-11-14", now="2026-11-13T08:00:00+08:00")
         self.cli("cancel", "--window", "cancelled", now="2026-11-13T08:10:00+08:00")
         self.cli("due", now="2026-11-13T09:00:00+08:00")
         self.cli("due", now="2026-11-13T20:00:00+08:00")
@@ -1169,11 +1398,10 @@ class TestExecutionArchive(RtcCase):
         self.make_day()
         self.cli("metrics", "sync")
         import sqlite3
+
         con = sqlite3.connect(self.ws / "state" / "metrics.db")
-        rows = dict(con.execute(
-            "SELECT window, label FROM daily WHERE date='2026-11-13'").fetchall())
-        reasons = dict(con.execute(
-            "SELECT window, missed FROM daily WHERE date='2026-11-13'").fetchall())
+        rows = dict(con.execute("SELECT window, label FROM daily WHERE date='2026-11-13'").fetchall())
+        reasons = dict(con.execute("SELECT window, missed FROM daily WHERE date='2026-11-13'").fetchall())
         con.close()
         self.assertEqual(rows.get("cancelled"), "临时会议", "label 不该是 id")
         self.assertEqual(rows.get("unfinished"), "没做完的事")
@@ -1216,10 +1444,24 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [
-            {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["起了"]},
-            {"id": "report", "label": "助理汇报", "start": "14:00", "end": "14:30",
-             "intervalMin": 5, "expectFires": 7, "ackHints": ["好了"]},
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "report",
+                "label": "助理汇报",
+                "start": "14:00",
+                "end": "14:30",
+                "intervalMin": 5,
+                "expectFires": 7,
+                "ackHints": ["好了"],
+            },
         ]
         self.write_routine(r)
         rtc.set_workspace(self.ws)
@@ -1253,19 +1495,21 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
 
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            rc = rtc.cmd_postpone(argparse.Namespace(
-                window="wake", to=None, days=1, deadline=False,
-                now="2026-05-10T08:00:00+08:00"))
+            rc = rtc.cmd_postpone(
+                argparse.Namespace(
+                    window="wake", to=None, days=1, deadline=False, now="2026-05-10T08:00:00+08:00"
+                )
+            )
         self.assertEqual(rc, 3, "并发编辑使回滚 CAS 失败，应报『部分应用』(rc=3)")
         self.assertIn("部分应用", err.getvalue(), "诊断不得谎报『已回滚』")
 
         rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
         report = next(x for x in rb["alarmWindows"] if x["id"] == "report")
-        self.assertEqual(report["start"], "15:00",
-                         "回滚不得覆盖并发改过的『助理汇报』（15:00）")
+        self.assertEqual(report["start"], "15:00", "回滚不得覆盖并发改过的『助理汇报』（15:00）")
         wake = next(x for x in rb["alarmWindows"] if x["id"] == "wake")
-        self.assertEqual(wake.get("skipDates"), ["2026-05-10"],
-                         "部分应用：推迟确实留在时刻表里，必须如实告知")
+        self.assertEqual(
+            wake.get("skipDates"), ["2026-05-10"], "部分应用：推迟确实留在时刻表里，必须如实告知"
+        )
 
     def test_rollback_restores_without_concurrent_edit(self):
         """审计发现 ②：没有并发编辑时，回滚必须真的把推迟撤销。
@@ -1292,17 +1536,20 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
 
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            rc = rtc.cmd_postpone(argparse.Namespace(
-                window="wake", to=None, days=1, deadline=False,
-                now="2026-05-10T08:00:00+08:00"))
+            rc = rtc.cmd_postpone(
+                argparse.Namespace(
+                    window="wake", to=None, days=1, deadline=False, now="2026-05-10T08:00:00+08:00"
+                )
+            )
         self.assertEqual(rc, 2, "状态冲突且无并发编辑时应成功回滚")
         self.assertIn("已回滚", err.getvalue())
 
         rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
         wake = next(x for x in rb["alarmWindows"] if x["id"] == "wake")
         self.assertNotIn("skipDates", wake, "推迟必须被撤销，不能残留")
-        self.assertEqual(json.loads(rtc.STATE.read_text(encoding="utf-8")),
-                         state_before, "今日状态不应被改动")
+        self.assertEqual(
+            json.loads(rtc.STATE.read_text(encoding="utf-8")), state_before, "今日状态不应被改动"
+        )
 
     def test_cas_rejects_edit_between_check_and_replace(self):
         """审计要求：临门再验必须抓出 check 与 replace 之间的外部改写。
@@ -1325,8 +1572,7 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
                 for x in rb["alarmWindows"]:
                     if x["id"] == "report":
                         x["start"] = "16:00"
-                p.write_text(json.dumps(rb, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
+                p.write_text(json.dumps(rb, ensure_ascii=False, indent=2), encoding="utf-8")
             return real_digest(p)
 
         rtc.file_digest = fake_digest
@@ -1334,14 +1580,12 @@ class TestPostponeRollbackPreservesConcurrentEdit(RtcCase):
 
         data = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
         with self.assertRaises(rtc.Conflict):
-            rtc.atomic_write(rtc.ROUTINE, data, expected_rev=None,
-                             expected_digest=orig_digest)
+            rtc.atomic_write(rtc.ROUTINE, data, expected_rev=None, expected_digest=orig_digest)
 
         # 磁盘文件必须保留外部编辑，而非被 data 覆盖
         rb = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
         report = next(x for x in rb["alarmWindows"] if x["id"] == "report")
-        self.assertEqual(report["start"], "16:00",
-                         "临门再验必须拒绝把并发编辑覆盖掉")
+        self.assertEqual(report["start"], "16:00", "临门再验必须拒绝把并发编辑覆盖掉")
 
 
 class TestLockOwnership(unittest.TestCase):
@@ -1370,6 +1614,7 @@ class TestLockOwnership(unittest.TestCase):
         p, lock = self._lock_for("a.json")
         lock.write_bytes(b"ghost")
         import time as _t
+
         old = _t.time() - (rtc._LOCK_STALE_S + 5)
         os.utime(str(lock), (old, old))
         # A 接管陈旧锁
@@ -1392,6 +1637,7 @@ class TestLockOwnership(unittest.TestCase):
 
     def test_concurrent_writers_no_lost_update(self):
         import threading
+
         counter_path = Path(tempfile.mkdtemp(prefix="rtc-cnt-")) / "counter.json"
         counter_path.write_text(json.dumps({"n": 0}))
         n_threads, per = 8, 20
@@ -1417,11 +1663,9 @@ class TestLockOwnership(unittest.TestCase):
         for t in threads:
             t.join()
         final = json.loads(counter_path.read_text())["n"]
-        self.assertEqual(final, n_threads * per,
-                         f"并发写入丢失更新：期望 {n_threads * per}，实际 {final}")
+        self.assertEqual(final, n_threads * per, f"并发写入丢失更新：期望 {n_threads * per}，实际 {final}")
         # 冲突重试只是环境兜底：正常情况下几乎不应触发，确保我们测的是锁本身
-        self.assertLessEqual(conflicts["n"], n_threads * per,
-                             "冲突次数异常偏高，锁可能未正常串行化")
+        self.assertLessEqual(conflicts["n"], n_threads * per, "冲突次数异常偏高，锁可能未正常串行化")
 
 
 class TestDueConflictSilent(RtcCase):
@@ -1469,10 +1713,24 @@ class TestSetTime(RtcCase):
         super().setUp()
         r = base_routine()
         r["alarmWindows"] = [
-            {"id": "wake", "label": "起床", "start": "08:10", "end": "08:40",
-             "intervalMin": 5, "expectFires": 7, "ackHints": ["起了"]},
-            {"id": "meds", "label": "吃药", "start": "09:00", "end": "09:20",
-             "intervalMin": 5, "expectFires": 5, "ackHints": ["好了"]},
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "08:10",
+                "end": "08:40",
+                "intervalMin": 5,
+                "expectFires": 7,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "meds",
+                "label": "吃药",
+                "start": "09:00",
+                "end": "09:20",
+                "intervalMin": 5,
+                "expectFires": 5,
+                "ackHints": ["好了"],
+            },
         ]
         self.write_routine(r)
 
@@ -1481,8 +1739,7 @@ class TestSetTime(RtcCase):
 
     def test_set_time_changes_start_and_keeps_length(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        rc, out, err = self.cli("set-time", "--window", "wake",
-                                "--start", "07:30", "--end", "08:00")
+        rc, out, err = self.cli("set-time", "--window", "wake", "--start", "07:30", "--end", "08:00")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "set-time 由用户触发，stdout 不该被投递出去")
         w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "wake")
@@ -1492,16 +1749,14 @@ class TestSetTime(RtcCase):
 
     def test_set_time_recomputes_expectFires_when_length_changes(self):
         self.cli("plan", now="2026-05-10T06:00:00+08:00")
-        rc, out, err = self.cli("set-time", "--window", "meds",
-                                "--start", "09:00", "--end", "09:30")
+        rc, out, err = self.cli("set-time", "--window", "meds", "--start", "09:00", "--end", "09:30")
         self.assertEqual(rc, 0)
         w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "meds")
         # 09:30-09:00=30 分钟 -> (30/5)+1 = 7
         self.assertEqual(w["expectFires"], 7)
 
     def test_set_time_rejects_end_not_later_than_start(self):
-        rc, out, err = self.cli("set-time", "--window", "wake",
-                                "--start", "09:00", "--end", "08:00")
+        rc, out, err = self.cli("set-time", "--window", "wake", "--start", "09:00", "--end", "08:00")
         self.assertEqual(rc, 3, "end 不晚于 start 应拒绝")
         self.assertIn("end", err)
 
@@ -1514,17 +1769,23 @@ class TestSetTime(RtcCase):
         self.assertEqual(rc, 3, "非法 HH:MM 应返回 3")
 
 
-
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""
 
     def setUp(self):
         super().setUp()
         r = base_routine()
-        r["alarmWindows"] = [{
-            "id": "noon", "label": "午间", "start": "12:00", "end": "12:25",
-            "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"],
-        }]
+        r["alarmWindows"] = [
+            {
+                "id": "noon",
+                "label": "午间",
+                "start": "12:00",
+                "end": "12:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        ]
         self.write_routine(r)
 
     def test_ack_missed_same_day_auto_pick(self):
@@ -1557,10 +1818,24 @@ class TestAckGrace(RtcCase):
         # 当天更早的窗口已 missed，但 later 正在响；回复应绑到正在响的
         r = base_routine()
         r["alarmWindows"] = [
-            {"id": "early", "label": "早间", "start": "08:00", "end": "08:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
-            {"id": "later", "label": "晚间", "start": "18:00", "end": "18:25",
-             "intervalMin": 5, "expectFires": 6, "ackHints": ["好了"]},
+            {
+                "id": "early",
+                "label": "早间",
+                "start": "08:00",
+                "end": "08:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            },
+            {
+                "id": "later",
+                "label": "晚间",
+                "start": "18:00",
+                "end": "18:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            },
         ]
         self.write_routine(r)
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
@@ -1574,7 +1849,6 @@ class TestAckGrace(RtcCase):
         self.assertEqual(rc, 0)
         self.assertEqual(self.window("later")["state"], "acked")
         self.assertEqual(self.window("early")["state"], "missed", "更早的 missed 不应被误绑")
-
 
 
 class TestStateCorruption(RtcCase):
@@ -1655,13 +1929,33 @@ class TestPruneExpiredOneOff(RtcCase):
     def test_expired_oneoff_is_pruned(self):
         r = base_routine()
         r["alarmWindows"].append(
-            {"id": "once-old-1400-20261114", "label": "旧提醒", "start": "14:00", "end": "14:04",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "oneOff": True,
-             "validFrom": "2026-11-14", "validUntil": "2026-11-14"})
+            {
+                "id": "once-old-1400-20261114",
+                "label": "旧提醒",
+                "start": "14:00",
+                "end": "14:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "oneOff": True,
+                "validFrom": "2026-11-14",
+                "validUntil": "2026-11-14",
+            }
+        )
         r["alarmWindows"].append(
-            {"id": "once-today-1500", "label": "今天的", "start": "15:00", "end": "15:04",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "oneOff": True,
-             "validFrom": "2026-11-18", "validUntil": "2026-11-18"})
+            {
+                "id": "once-today-1500",
+                "label": "今天的",
+                "start": "15:00",
+                "end": "15:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "oneOff": True,
+                "validFrom": "2026-11-18",
+                "validUntil": "2026-11-18",
+            }
+        )
         self.write_routine(r)
         rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
         self.assertEqual(rc, 0)
@@ -1676,9 +1970,19 @@ class TestPruneExpiredOneOff(RtcCase):
     def test_future_oneoff_untouched(self):
         r = base_routine()
         r["alarmWindows"].append(
-            {"id": "once-future", "label": "以后的", "start": "09:00", "end": "09:04",
-             "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "oneOff": True,
-             "validFrom": "2026-12-01", "validUntil": "2026-12-01"})
+            {
+                "id": "once-future",
+                "label": "以后的",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "oneOff": True,
+                "validFrom": "2026-12-01",
+                "validUntil": "2026-12-01",
+            }
+        )
         self.write_routine(r)
         self.cli("plan", now="2026-11-18T06:00:00+08:00")
         saved = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
@@ -1701,7 +2005,8 @@ class TestBrief(RtcCase):
             "<!-- RTC:BRIEF:BEGIN 自动生成，勿手改本区块；改时刻表请用 rtc.py -->\n"
             "旧内容\n"
             "<!-- RTC:BRIEF:END -->\n\n## 红线\n- 不建 cron\n",
-            encoding="utf-8")
+            encoding="utf-8",
+        )
 
     def test_brief_lists_next_window(self):
         self.write_routine(base_routine())
@@ -1757,13 +2062,23 @@ class TestHandEditedRoutine(RtcCase):
         was = sealed["windows"]
 
         hand = {
-            "version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00",
+            "version": 1,
+            "timezone": "Asia/Shanghai",
+            "tzOffset": "+08:00",
             "dateTypes": {"workday": [1, 2, 3, 4, 5], "weekend": [0, 6]},
             "alarmWindows": [
-                {"id": "go-out-1535", "label": "今天 15:35 出门", "start": "15:35",
-                 "end": "15:40", "intervalMin": 5, "expectFires": 1,
-                 "ackHints": ["知道了"], "oneOff": True,
-                 "validFrom": "2026-11-16", "validUntil": "2026-11-16"},
+                {
+                    "id": "go-out-1535",
+                    "label": "今天 15:35 出门",
+                    "start": "15:35",
+                    "end": "15:40",
+                    "intervalMin": 5,
+                    "expectFires": 1,
+                    "ackHints": ["知道了"],
+                    "oneOff": True,
+                    "validFrom": "2026-11-16",
+                    "validUntil": "2026-11-16",
+                },
             ],
         }
         self.write_routine(hand)
@@ -1806,19 +2121,22 @@ class TestHandEditedRoutine(RtcCase):
         self.assertIn("自动恢复", out)
         restored = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
         self.assertGreater(len(restored["alarmWindows"]), 0)
-        self.assertTrue(list((self.ws / "state" / "backups").glob("routines.corrupt-*.json")),
-                        "坏件也要留一份，便于追是谁写坏的")
+        self.assertTrue(
+            list((self.ws / "state" / "backups").glob("routines.corrupt-*.json")),
+            "坏件也要留一份，便于追是谁写坏的",
+        )
 
 
 class TestBackup(RtcCase):
     """每日快照是永久档案，只存在一块盘上；盘坏了就什么都没了。"""
 
     def _zip_names(self, target: Path) -> list[str]:
-        import zipfile
+
         return sorted(p.name for p in Path(target).glob("RTC-*.zip"))
 
     def test_backup_writes_zip_with_archive_members(self):
         import zipfile
+
         self.write_routine(base_routine())
         self.cli("plan", now="2026-11-16T08:00:00+08:00")
         target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
@@ -1831,8 +2149,7 @@ class TestBackup(RtcCase):
                 names = z.namelist()
                 self.assertIn("rules/routines.json", names)
                 self.assertIn("state/alarms.json", names)
-                self.assertTrue(any(n.startswith("state/schedule/") for n in names),
-                                "每日快照必须进备份")
+                self.assertTrue(any(n.startswith("state/schedule/") for n in names), "每日快照必须进备份")
 
             # 同一天再跑一次：不重写（否则每天都在覆盖，滚动保留就失效了）
             before = (target / zips[0]).stat().st_mtime_ns
@@ -1847,6 +2164,7 @@ class TestBackup(RtcCase):
         归档里于是出现两份 routines（一份 10 窗口一份 7 窗口），没人分得清哪份是真的。
         只认程序自己写的那三类。"""
         import zipfile
+
         self.write_routine(base_routine())
         self.cli("plan", now="2026-11-16T08:00:00+08:00")
         bdir = self.ws / "state" / "backups"
@@ -1864,14 +2182,11 @@ class TestBackup(RtcCase):
             with zipfile.ZipFile(target / self._zip_names(target)[0]) as z:
                 names = z.namelist()
             self.assertIn("state/backups/routines.program-last.json", names, "程序底稿必须进归档")
-            self.assertIn("state/backups/routines.handedit-20261116-161521.json", names,
-                          "手改证据必须进归档")
-            self.assertNotIn("state/backups/routines.20261116_180845.json", names,
-                             "手抄副本不该进归档")
+            self.assertIn("state/backups/routines.handedit-20261116-161521.json", names, "手改证据必须进归档")
+            self.assertNotIn("state/backups/routines.20261116_180845.json", names, "手抄副本不该进归档")
             self.assertNotIn("state/backups/notes.json", names, "无关 json 不该进归档")
         finally:
             shutil.rmtree(target, ignore_errors=True)
-
 
     def test_backup_keeps_only_latest_n(self):
         self.write_routine(base_routine())
@@ -1904,15 +2219,15 @@ class TestBackup(RtcCase):
         rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertEqual(out.strip(), "", "没有备份配置时 plan 不该多说什么")
-        self.assertFalse((self.ws / "state" / ".backup-last.json").exists(),
-                         "没配置就不该留下备份标记")
+        self.assertFalse((self.ws / "state" / ".backup-last.json").exists(), "没配置就不该留下备份标记")
 
     def test_plan_runs_backup_once_per_day(self):
         """cron 每天只调 plan，所以备份必须挂在 plan 上，且一天只跑一次。"""
         target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
         try:
             (self.ws / "rules" / "backup.json").write_text(
-                json.dumps({"targets": [str(target)], "keep": 30}), encoding="utf-8")
+                json.dumps({"targets": [str(target)], "keep": 30}), encoding="utf-8"
+            )
             self.write_routine(base_routine())
             self.cli("plan", now="2026-11-16T08:00:00+08:00")
             self.assertEqual(len(self._zip_names(target)), 1, "plan 应当顺手备份一次")
@@ -1935,6 +2250,7 @@ class TestMetricsAutoSync(RtcCase):
         db = self.ws / "state" / "metrics.db"
         self.assertTrue(db.is_file(), "plan 没生成 metrics.db")
         import sqlite3
+
         con = sqlite3.connect(db)
         try:
             daily = con.execute("SELECT COUNT(*) FROM daily").fetchone()[0]
@@ -1965,18 +2281,22 @@ class TestGitArchive(RtcCase):
 
     def _bare(self) -> Path:
         d = Path(tempfile.mkdtemp(prefix="rtc-bare-")) / "data.git"
-        subprocess.run(["git", "init", "--bare", "-b", "main", str(d)],
-                       check=True, capture_output=True)
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(d)], check=True, capture_output=True)
         self.addCleanup(shutil.rmtree, d.parent, True)
         return d
 
     def _config(self, bare: Path) -> Path:
         vault = self.ws.parent / "vault"
-        (self.ws / "rules" / "backup.json").write_text(json.dumps({
-            "targets": [],
-            "keep": 30,
-            "git": {"dir": str(vault), "remotes": [str(bare)], "branch": "main"},
-        }), encoding="utf-8")
+        (self.ws / "rules" / "backup.json").write_text(
+            json.dumps(
+                {
+                    "targets": [],
+                    "keep": 30,
+                    "git": {"dir": str(vault), "remotes": [str(bare)], "branch": "main"},
+                }
+            ),
+            encoding="utf-8",
+        )
         return vault
 
     def test_commits_and_pushes_today_archive(self):
@@ -1988,21 +2308,36 @@ class TestGitArchive(RtcCase):
         rc, out, err = self.cli("gitarchive")
         self.assertEqual(rc, 0, f"{out} {err}")
 
-        log = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
-                             capture_output=True, text=True, encoding="utf-8")
+        log = subprocess.run(
+            ["git", "--git-dir", str(bare), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
         self.assertIn("archive", log.stdout, "远端没有收到提交")
-        tree = subprocess.run(["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "main"],
-                              capture_output=True, text=True, encoding="utf-8")
+        tree = subprocess.run(
+            ["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "main"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
         self.assertIn("rules/routines.json", tree.stdout)
         self.assertIn("state/alarms.json", tree.stdout)
 
         # 再跑一次：没有变化就不该再产生提交，也不该报错
         rc2, out2, _ = self.cli("gitarchive")
         self.assertEqual(rc2, 0)
-        log2 = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
-                              capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(len(log2.stdout.strip().splitlines()),
-                         len(log.stdout.strip().splitlines()), "内容没变却又提交了一次")
+        log2 = subprocess.run(
+            ["git", "--git-dir", str(bare), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            len(log2.stdout.strip().splitlines()),
+            len(log.stdout.strip().splitlines()),
+            "内容没变却又提交了一次",
+        )
 
     def test_plan_drives_git_archive_daily(self):
         bare = self._bare()
@@ -2010,8 +2345,12 @@ class TestGitArchive(RtcCase):
         self.write_routine(base_routine())
         self.cli("plan", now="2026-11-16T08:00:00+08:00")
 
-        log = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
-                             capture_output=True, text=True, encoding="utf-8")
+        log = subprocess.run(
+            ["git", "--git-dir", str(bare), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
         self.assertIn("archive", log.stdout, "plan 没把档案推进 git")
 
     def test_unpushed_remote_is_reported(self):
@@ -2029,18 +2368,25 @@ class TestOnceScriptSeals(RtcCase):
 
     def test_once_seals_so_plan_does_not_cry_hand_edit(self):
         import hashlib
+
         self.write_routine(base_routine())
         once = Path(__file__).resolve().parents[1] / "rtc_once.py"
         proc = subprocess.run(
             [sys.executable, str(once), "15:00", "一次性-测试", "--workspace", str(self.ws)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
 
         routines = self.ws / "rules" / "routines.json"
         seal = json.loads((self.ws / "state" / "routine-seal.json").read_text(encoding="utf-8"))
-        self.assertEqual(seal["digest"], hashlib.sha256(routines.read_bytes()).hexdigest(),
-                         "rtc_once 写完没盖章 → 下次 plan 会误报手改")
+        self.assertEqual(
+            seal["digest"],
+            hashlib.sha256(routines.read_bytes()).hexdigest(),
+            "rtc_once 写完没盖章 → 下次 plan 会误报手改",
+        )
         self.assertTrue((self.ws / "state" / "backups" / "routines.program-last.json").is_file())
 
         rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
