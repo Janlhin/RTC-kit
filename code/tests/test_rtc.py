@@ -114,6 +114,57 @@ class TestOneOff(RtcCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "一次性提醒不能响第二次")
 
+    def test_oneoff_message_has_no_ack_hint(self):
+        """一次性提醒送达即完成，还教「回复就不响了」等于告诉用户一件不存在的事。"""
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-10T09:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.window("travel")["state"], "delivered")
+        self.assertNotIn("就不响了", out, f"一次性提醒不该带确认提示：{out!r}")
+
+    def test_repeating_message_hints_only_first_and_last(self):
+        """会反复响的窗口：只在第 1 次和最后一次提怎么停，中途别每句都念。"""
+        r = base_routine()
+        r["alarmWindows"] = [{
+            "id": "meds", "label": "吃药", "start": "09:00", "end": "09:20",
+            "intervalMin": 5, "expectFires": 5, "ackHints": ["吃了"],
+        }]
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+
+        outs = []
+        for hhmm in ("09:00", "09:05", "09:10", "09:15", "09:20"):
+            rc, out, _ = self.cli("due", now=f"2026-11-10T{hhmm}:00+08:00")
+            self.assertEqual(rc, 0)
+            outs.append(out)
+
+        self.assertIn("就不响了", outs[0], "第一次该教怎么停")
+        self.assertIn("就不响了", outs[-1], "最后一次该再提一遍")
+        for mid in outs[1:-1]:
+            if mid.strip():
+                self.assertNotIn("就不响了", mid, f"中途不该再念：{mid!r}")
+        for i, out in enumerate(outs[1:], start=2):
+            if out.strip():
+                self.assertIn(f"第 {i} 次", out, f"第 {i} 次没标次数：{out!r}")
+
+    def test_force_after_delivery_keeps_delivered(self):
+        """实机事故：16:35 那条已投递（日志有 delivered to weixin），
+        之后任何一次 plan --force 重建时窗口已过期 → 被写成 skipped 0/1，
+        「一年后查」看到的是「没响过」。
+
+        delivered 是终态，重建不许覆盖它。
+        """
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T09:00:00+08:00")
+        self.assertEqual(self.window("travel")["state"], "delivered")
+
+        rc, _, _ = self.cli("plan", "--force", now="2026-11-10T21:00:00+08:00")
+        self.assertEqual(rc, 0)
+        w = self.window("travel")
+        self.assertEqual(w["state"], "delivered", "已送达的记录被重建冲成 skipped")
+        self.assertEqual(w["fireCount"], 1, "fireCount 被清零")
+        self.assertIsNone(w.get("missedReason"), "已送达的窗口不该带 missedReason")
+
     def test_tolerates_missing_start_minute(self):
         """cron 恰好错过 start 那一分钟时，在 end 之前仍应送达。"""
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
@@ -1687,6 +1738,314 @@ class TestBrief(RtcCase):
         self.cli("ack", "--window", "wake", "--text", "起了", now="2026-11-10T07:06:00+08:00")
         text = self.agents_md().read_text(encoding="utf-8")
         self.assertIn("起床 已确认", text, "确认后简报没刷新")
+
+
+class TestHandEditedRoutine(RtcCase):
+    """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
+
+    实机上发生过：模型照着技能里的 JSON 模板，把宿主目录那份 routines.json
+    从 4 个窗口改写成 1 个自己编的一次性提醒——没人发现，也没人被告知。
+    """
+
+    def test_external_edit_is_reported_and_backed_up(self):
+        self.write_routine(base_routine())
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("被 RTC 之外", out, "第一次 plan 只是建印章，不该报警")
+        # 窗口数从印章里取，别写死——不同基线的时刻表窗口数并不一样
+        sealed = json.loads((self.ws / "state" / "routine-seal.json").read_text(encoding="utf-8"))
+        was = sealed["windows"]
+
+        hand = {
+            "version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00",
+            "dateTypes": {"workday": [1, 2, 3, 4, 5], "weekend": [0, 6]},
+            "alarmWindows": [
+                {"id": "go-out-1535", "label": "今天 15:35 出门", "start": "15:35",
+                 "end": "15:40", "intervalMin": 5, "expectFires": 1,
+                 "ackHints": ["知道了"], "oneOff": True,
+                 "validFrom": "2026-11-16", "validUntil": "2026-11-16"},
+            ],
+        }
+        self.write_routine(hand)
+        rc, out, err = self.cli("plan", "--force", now="2026-11-16T08:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("被 RTC 之外的东西改过", out)
+        self.assertIn(f"上次程序写出 {was} 个窗口", out)
+        self.assertIn("现在是 1", out)
+
+        backups = sorted((self.ws / "state" / "backups").glob("routines.handedit-*.json"))
+        self.assertEqual(len(backups), 1, "手改的原件必须留一份")
+        self.assertIn("go-out-1535", backups[0].read_text(encoding="utf-8"))
+
+    def test_program_writes_stay_quiet(self):
+        self.write_routine(base_routine())
+        for i in range(3):
+            rc, out, err = self.cli("plan", "--force", now=f"2026-11-16T08:0{i}:00+08:00")
+            self.assertEqual(rc, 0, err)
+            self.assertNotIn("被 RTC 之外", out, f"第 {i + 1} 次程序写入被误报成手改")
+
+    def test_minimal_handwritten_file_gets_a_clean_error(self):
+        """模型实机写的那份只有 version + alarmWindows：要报错，不要抛栈。"""
+        self.write_routine({"version": 1, "alarmWindows": []})
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 3, f"形状不对应当是退出码 3，不是栈：{err[-300:]}")
+        self.assertIn("dateTypes", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_truncated_routine_self_heals_from_last_good(self):
+        """实机事故：文件被写空 → 当天所有提醒全哑。程序手里有好文件就该自己长回来。"""
+        self.write_routine(base_routine())
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        last = self.ws / "state" / "backups" / "routines.program-last.json"
+        self.assertTrue(last.exists(), "程序写完必须留一份底稿")
+
+        (self.ws / "rules" / "routines.json").write_text("", encoding="utf-8")
+        rc, out, err = self.cli("plan", "--force", now="2026-11-16T08:05:00+08:00")
+        self.assertEqual(rc, 0, f"文件坏了不该让整天停摆：{err[-300:]}")
+        self.assertIn("自动恢复", out)
+        restored = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        self.assertGreater(len(restored["alarmWindows"]), 0)
+        self.assertTrue(list((self.ws / "state" / "backups").glob("routines.corrupt-*.json")),
+                        "坏件也要留一份，便于追是谁写坏的")
+
+
+class TestBackup(RtcCase):
+    """每日快照是永久档案，只存在一块盘上；盘坏了就什么都没了。"""
+
+    def _zip_names(self, target: Path) -> list[str]:
+        import zipfile
+        return sorted(p.name for p in Path(target).glob("RTC-*.zip"))
+
+    def test_backup_writes_zip_with_archive_members(self):
+        import zipfile
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
+        try:
+            rc, out, err = self.cli("backup", "--to", str(target))
+            self.assertEqual(rc, 0, err)
+            zips = self._zip_names(target)
+            self.assertEqual(len(zips), 1, f"应当只写一份：{zips}")
+            with zipfile.ZipFile(target / zips[0]) as z:
+                names = z.namelist()
+                self.assertIn("rules/routines.json", names)
+                self.assertIn("state/alarms.json", names)
+                self.assertTrue(any(n.startswith("state/schedule/") for n in names),
+                                "每日快照必须进备份")
+
+            # 同一天再跑一次：不重写（否则每天都在覆盖，滚动保留就失效了）
+            before = (target / zips[0]).stat().st_mtime_ns
+            rc2, _, _ = self.cli("backup", "--to", str(target))
+            self.assertEqual(rc2, 0)
+            self.assertEqual((target / zips[0]).stat().st_mtime_ns, before, "同日重复备份不该重写")
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_backup_ignores_handmade_copies_in_state_backups(self):
+        """实机事故：模型/人 `cp` 出来的 routines.<时间>.json 被当成档案收走，
+        归档里于是出现两份 routines（一份 10 窗口一份 7 窗口），没人分得清哪份是真的。
+        只认程序自己写的那三类。"""
+        import zipfile
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        self.assertTrue((bdir / "routines.program-last.json").is_file(), "程序底稿没生成")
+        # 模拟模型手抄 + 程序的手改证据
+        (bdir / "routines.20261116_180845.json").write_text("{}", encoding="utf-8")
+        (bdir / "routines.handedit-20261116-161521.json").write_text("{}", encoding="utf-8")
+        (bdir / "notes.json").write_text("{}", encoding="utf-8")
+
+        target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
+        try:
+            rc, out, err = self.cli("backup", "--to", str(target))
+            self.assertEqual(rc, 0, err)
+            with zipfile.ZipFile(target / self._zip_names(target)[0]) as z:
+                names = z.namelist()
+            self.assertIn("state/backups/routines.program-last.json", names, "程序底稿必须进归档")
+            self.assertIn("state/backups/routines.handedit-20261116-161521.json", names,
+                          "手改证据必须进归档")
+            self.assertNotIn("state/backups/routines.20261116_180845.json", names,
+                             "手抄副本不该进归档")
+            self.assertNotIn("state/backups/notes.json", names, "无关 json 不该进归档")
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+
+    def test_backup_keeps_only_latest_n(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
+        try:
+            for day in ("20200101", "20200102", "20200103"):
+                (target / f"RTC-{day}.zip").write_bytes(b"old")
+            rc, out, err = self.cli("backup", "--to", str(target), "--keep", "2")
+            self.assertEqual(rc, 0, err)
+            self.assertLessEqual(len(self._zip_names(target)), 2, "超出 keep 的旧档案要被删掉")
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+    def test_backup_failure_is_reported_not_swallowed(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        # 目标是一个「文件」而不是目录 → 建不出来，必须给退出码 3 而不是假装成功
+        bad = self.ws / "state" / "not-a-dir"
+        bad.write_text("x", encoding="utf-8")
+        rc, out, err = self.cli("backup", "--to", str(bad))
+        self.assertEqual(rc, 3, f"没有一份写成功就不能返回 0：{out} {err}")
+        self.assertIn("失败", err)
+
+    def test_no_config_means_no_backup_and_no_disk_scanning(self):
+        """没有 rules/backup.json 时绝不自己扫盘：
+        扫盘会在别人机器上往不认识的盘写字，测试也会污染真实磁盘。"""
+        self.write_routine(base_routine())
+        self.assertFalse((self.ws / "rules" / "backup.json").exists())
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.strip(), "", "没有备份配置时 plan 不该多说什么")
+        self.assertFalse((self.ws / "state" / ".backup-last.json").exists(),
+                         "没配置就不该留下备份标记")
+
+    def test_plan_runs_backup_once_per_day(self):
+        """cron 每天只调 plan，所以备份必须挂在 plan 上，且一天只跑一次。"""
+        target = Path(tempfile.mkdtemp(prefix="rtc-bk-"))
+        try:
+            (self.ws / "rules" / "backup.json").write_text(
+                json.dumps({"targets": [str(target)], "keep": 30}), encoding="utf-8")
+            self.write_routine(base_routine())
+            self.cli("plan", now="2026-11-16T08:00:00+08:00")
+            self.assertEqual(len(self._zip_names(target)), 1, "plan 应当顺手备份一次")
+            first = self._zip_names(target)[0]
+            stamp = (target / first).stat().st_mtime_ns
+            self.cli("plan", "--force", now="2026-11-16T12:00:00+08:00")
+            self.assertEqual((target / first).stat().st_mtime_ns, stamp, "同一天不该备份第二次")
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+
+class TestMetricsAutoSync(RtcCase):
+    """metrics.db 以前是个摆设：命令在，但没有任何东西去调它。
+    结果「一年后想统计」时库里一行都没有。现在 plan 每天顺手同步一次。"""
+
+    def test_plan_builds_and_dumps_metrics(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+
+        db = self.ws / "state" / "metrics.db"
+        self.assertTrue(db.is_file(), "plan 没生成 metrics.db")
+        import sqlite3
+        con = sqlite3.connect(db)
+        try:
+            daily = con.execute("SELECT COUNT(*) FROM daily").fetchone()[0]
+            schedule = con.execute("SELECT COUNT(*) FROM schedule").fetchone()[0]
+        finally:
+            con.close()
+        self.assertGreater(daily, 0, "daily 表是空的")
+        self.assertGreater(schedule, 0, "schedule 表是空的")
+
+        dump = self.ws / "state" / "metrics.sql"
+        self.assertTrue(dump.is_file(), "没有文本导出，git 里没法看出每天多了什么")
+        text = dump.read_text(encoding="utf-8")
+        self.assertIn("INSERT INTO", text, "导出里没有数据行")
+        self.assertIn("daily", text)
+
+    def test_dump_is_stable_when_nothing_changed(self):
+        """没有新数据时导出内容要一致，否则 git 里天天一堆噪声提交。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        first = (self.ws / "state" / "metrics.sql").read_text(encoding="utf-8")
+        self.cli("plan", "--force", now="2026-11-16T08:01:00+08:00")
+        second = (self.ws / "state" / "metrics.sql").read_text(encoding="utf-8")
+        self.assertEqual(first, second, "数据没变，导出却变了")
+
+
+class TestGitArchive(RtcCase):
+    """压缩包只防「盘坏」，不防「机器没了」：档案要能进私人 git 仓库。"""
+
+    def _bare(self) -> Path:
+        d = Path(tempfile.mkdtemp(prefix="rtc-bare-")) / "data.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(d)],
+                       check=True, capture_output=True)
+        self.addCleanup(shutil.rmtree, d.parent, True)
+        return d
+
+    def _config(self, bare: Path) -> Path:
+        vault = self.ws.parent / "vault"
+        (self.ws / "rules" / "backup.json").write_text(json.dumps({
+            "targets": [],
+            "keep": 30,
+            "git": {"dir": str(vault), "remotes": [str(bare)], "branch": "main"},
+        }), encoding="utf-8")
+        return vault
+
+    def test_commits_and_pushes_today_archive(self):
+        bare = self._bare()
+        self._config(bare)
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+
+        rc, out, err = self.cli("gitarchive")
+        self.assertEqual(rc, 0, f"{out} {err}")
+
+        log = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("archive", log.stdout, "远端没有收到提交")
+        tree = subprocess.run(["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("rules/routines.json", tree.stdout)
+        self.assertIn("state/alarms.json", tree.stdout)
+
+        # 再跑一次：没有变化就不该再产生提交，也不该报错
+        rc2, out2, _ = self.cli("gitarchive")
+        self.assertEqual(rc2, 0)
+        log2 = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
+                              capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(len(log2.stdout.strip().splitlines()),
+                         len(log.stdout.strip().splitlines()), "内容没变却又提交了一次")
+
+    def test_plan_drives_git_archive_daily(self):
+        bare = self._bare()
+        self._config(bare)
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+
+        log = subprocess.run(["git", "--git-dir", str(bare), "log", "--oneline"],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertIn("archive", log.stdout, "plan 没把档案推进 git")
+
+    def test_unpushed_remote_is_reported(self):
+        """远端写错不能假装成功——否则用户以为有备份，其实一个字节都没出去。"""
+        self._config(Path(tempfile.mkdtemp(prefix="rtc-nope-")) / "no-such-repo.git")
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        rc, out, err = self.cli("gitarchive")
+        self.assertNotEqual(rc, 0, "推不上去还返回 0，等于假成功")
+        self.assertIn("失败", err)
+
+
+class TestOnceScriptSeals(RtcCase):
+    """rtc_once.py 是我们自己的写入口，不能让自己的文件被报成「有人手改」。"""
+
+    def test_once_seals_so_plan_does_not_cry_hand_edit(self):
+        import hashlib
+        self.write_routine(base_routine())
+        once = Path(__file__).resolve().parents[1] / "rtc_once.py"
+        proc = subprocess.run(
+            [sys.executable, str(once), "15:00", "一次性-测试", "--workspace", str(self.ws)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
+
+        routines = self.ws / "rules" / "routines.json"
+        seal = json.loads((self.ws / "state" / "routine-seal.json").read_text(encoding="utf-8"))
+        self.assertEqual(seal["digest"], hashlib.sha256(routines.read_bytes()).hexdigest(),
+                         "rtc_once 写完没盖章 → 下次 plan 会误报手改")
+        self.assertTrue((self.ws / "state" / "backups" / "routines.program-last.json").is_file())
+
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("手改", out + err, "自己写的文件被当成人手改")
 
 
 if __name__ == "__main__":

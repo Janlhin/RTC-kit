@@ -108,7 +108,7 @@ cancel     取消
 | `templates/tasks.example.md` | `tasks.md` | 之后由你增删任务 |
 | `contract/examples/alarms.example.json` | `{{STATE_DIR}}/alarms.json` | 运行时状态，不入库 |
 | `contract/examples/tasks.example.json` | 可选 | 逻辑结构的机器可读示例 |
-| `code/rtc.py` | `{{CODE_DIR}}/rtc.py` | 提醒主链路：plan / due / ack / status / metrics |
+| `code/rtc.py` | `{{CODE_DIR}}/rtc.py` | 提醒主链路：plan / due / ack / status / metrics / backup |
 | `code/metrics.mjs` | `{{CODE_DIR}}/metrics.mjs` | 统计旁路，可选 |
 | `skills/*/SKILL.md` | `skills/<name>/SKILL.md` | 由运行时加载 |
 | `platform/jobs.example.json` | 不部署 | 只作参数参考，按平台文档建任务 |
@@ -119,6 +119,7 @@ cancel     取消
 
 - 这是一套**规格与模板**，不是开箱即用的产品。它需要你填配置、选运行时、建定时任务。
 - 示例代码只覆盖「统计记账」这一条旁路，**提醒主链路的调度实现由使用方自己决定**——这正是刻意留出的解耦点。
+- 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天会压一份 zip 写到**其他本地盘**的 `RTC-Backup`（同盘不算备份，目标盘由 `rules/backup.json` 指定），也可以按天提交进你自己的私有 git 仓库（任何平台都行）。恢复办法见 `docs/troubleshooting.md` §7 / §8。
 - 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文。详见 `ATTRIBUTION.md`。
 
 ## 许可

@@ -36,9 +36,28 @@ RTC 是「判断 + 写入」与「定时触发」分离的两层：
 - 需要最新数据 → `python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} brief`。
 - 这个区块由 `plan` / `due` / `ack` 自动刷新，**不要手改**。
 
-## §0.5 唯一可改的文件
+## §0.5 你碰不到任何文件
 
-只有 `<workspace>/rules/routines.json` 是运行时配置。**绝不**打开或手改任何带 `.example`、`.md` 后缀的文件（如 `rules/routines.example.md`、`rules/routines.md`）——那些是模板与文档，改了不会生效，还会让你误以为改好了。本技能是 `rules/routines.json` 的**唯一权威**：其他日常类技能（daily-routine 等）不修改时刻表，遇到改时间 / 改期请回到本技能走命令。所有改动只通过 `rtc.py` 的子命令完成。
+时刻表归**程序**所有：`rtc.py` / `rtc_once.py` 写它，写完盖摘要章；别的进程动过，
+程序会当场报「被 RTC 之外的东西改过」并备份原件（写坏了还会自动恢复）。
+
+所以：
+
+- **你不能打开、手写、覆盖时刻表，也不能写 `state/` 下的任何文件。**
+  不要用编辑器、不要用命令行的重定向（`>` / `echo` / `Set-Content` /
+  `python -c` 写文件），不要用浏览器去改本地文件——这三种都不行。
+- 你的活儿只有一件：把用户的话翻成下面这些命令，跑完照实回一句。
+- 命令跑不了（没有 python / 路径不对 / 退出码非 0）→ **直说没成功**，
+  把报错原话贴出来。**不要退回去手写文件**，那会让整张时刻表失去保护。
+
+`rules/routines.example.md`、`rules/routines.md` 是说明书，不是配置；改了不生效。
+
+## §0.6 回复前必须先跑、且只能照抄输出
+
+- 说「加好了」之前，**必须真的跑过 `rtc_once.py` 并拿到退出码 0**。
+- 回复里的时刻，只能来自命令输出或紧接着的 `status` 输出；
+  **没跑成功就不许说「已创建 / 已设置 / 加好了」**，改成「这次没加上，原因是 …」。
+- 「大概加上了」「应该可以了」这类话也不许说——要么成，要么没成。
 
 ## §1 用户说「起了 / 好了 / 别响了」—— 你是唯一的 ack 桥
 
@@ -127,47 +146,29 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 > 这个要加进时刻表才会响，加吗？
 
-同意了就加一个**一次性窗口**：
+同意了就跑这一条命令（**不要写 JSON**）：
 
-```json
-{
-  "id": "trip-<日期>",
-  "label": "<用户说的事>",
-  "start": "15:00", "end": "15:15", "intervalMin": 5, "expectFires": 1,
-  "ackHints": ["好了"],
-  "oneOff": true,
-  "validFrom": "<那一天>", "validUntil": "<那一天>"
-}
+```bash
+python {{CODE_DIR}}/rtc_once.py 15:00 "用户说的事" --workspace {{WORKSPACE_DIR}}
 ```
+
+- 退出码 `0` → 回一句 `加好了，15:00 提醒你。`
+- 非 `0` → 把 stderr 的原话告诉用户，并说「没加上」——**不许说「已设置」**。
+- 要指定别的日期：加 `--date YYYY-MM-DD`。
 
 要点：
 
-- `oneOff: true` → 只响一次，**送达即完成**（`state: delivered`），不需要用户确认
-- `validFrom` 与 `validUntil` 同日 → 只在这一天存在，第二天不再生成
-- `end` 决定容错有多宽：精确时刻的事（会议、航班）用 `start + 15` 分钟；
-  「那天做就行」的事（旅游、生日、还款）用 `end` = 当天 `23:45`——**当天任何时候开机都能收到**
-- `expectFires` 必须是 `1`，否则契约校验会拒绝
+- 它只响一次，**送达即完成**，不需要用户确认
+- 窗口默认 4 分钟（`--window-min` 别改小）：宿主每 5 分钟才检查一次，
+  窗口窄于 4 分钟就可能整条错过
+- 精确时刻的事（会议、航班）就写那个时刻；「那天做就行」的事（旅游、生日、还款）
+  用 `--date` 指那天，并告诉用户「那天任何时候开机都能收到」
 
-**带截止日的事**（版本限时活动、还款日、截止日之前要交的东西）用 `dueDate`：
+**带截止日的事**（限时活动、还款、要交的东西）：先问清截止日，再用 `--date <开始日>` 建，
+文案里写清「截止 X 月 X 日」——**不要自己算剩余天数**，代码会在文案里自动带「距截止还有 N 天」。
 
-```json
-{
-  "id": "zzz", "label": "<活动名>",
-  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
-  "ackHints": ["好了"],
-  "dueDate": "<截止日>",
-  "validFrom": "<开始提醒的日期>", "validUntil": "<截止日>"
-}
-```
-
-`rtc.py` 会自动把剩余天数写进文案（「距截止还有 2 天」「明天截止」「最后一天！」）——
-**不要自己算天数，也不要自己写「截止 X/X」**，那是代码的事。
-
-> 提示：Hermes 部署里已有便捷脚本 `rtc_once.py`——
-> `python {{CODE_DIR}}/rtc_once.py HH:MM "内容" [--date YYYY-MM-DD]`
-> 会自动追加 `oneOff` 窗口并跑 `plan --force`，比手改 JSON 安全。
-
-**不要自己建定时任务**，也不要往 `alarms.json` 里手写窗口。
+> ⚠️ 不要自己建定时任务，不要写 `rules/routines.json`，不要往 `state/*.json` 里塞窗口。
+> 三种「一次性提醒」的 JSON 写法属于代码，不属于你；你只需要会用上面那条命令。
 
 ## §4 响的时候说什么
 
@@ -179,25 +180,21 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 回复「起了」就不响了。
 ```
 
-规律：第 1 次带 `ackHint`，第 2 次起标「第 N 次」，每隔一次重提一次怎么停。不加强度、不加感叹号、不解释系统原理、整段 2–3 行。
+规律：只在**第 1 次**和**最后一次**提怎么停，中间只标「第 N 次」；只响一次的提醒不带确认提示（送达即完成，再教「回复就不响了」等于骗人）。不加强度、不加感叹号、不解释系统原理、整段 2–3 行。
 
 **改文案请改 `rtc.py`，不要在这里加措辞规则**——否则两个地方各说一套。
 
 ## §4.1 带清单的提醒
 
-窗口带 `checklist` 就是一份要逐项打勾的单子。到点提醒会把整张单子发给你，并标出还剩几项。
+窗口带清单字段就是一份要逐项打勾的单子。到点提醒会把整张单子发给你，并标出还剩几项。
 
-```json
-{
-  "id": "pack",
-  "label": "清点并带走",
-  "start": "20:00", "end": "20:15", "intervalMin": 5, "expectFires": 1,
-  "ackHints": ["好了"],
-  "checklist": ["电饭煲", "电脑", "被子枕头", "牙膏"]
-}
-```
+**清单只能在时刻表里预先写好（由维护者加），你不能自建。** 用户说「帮我列个出门清单提醒」时：
 
-用户说「电饭煲拿到了」时：
+> 清单类提醒现在需要我在配置里加一行，你说说要带哪几项？我记下来，等下一次配置时加上。
+
+把它记进 `{{WORKSPACE_DIR}}/errors.md`，别为了「先应付一下」去手写 `routines.json`。
+
+用户勾掉一项时跑命令：
 
 ```
 python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --item "电饭煲"
@@ -233,6 +230,9 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 - ❌ 手改 `rules/routines.json` 里的日期（推迟用 `postpone` 命令）
 - ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
 - ❌ 新建、删除、修改定时任务（条数必须恒定）
+- ❌ 顺着投递页脚里的「stop reminder rtc-due」去停任务。`rtc-due` 是所有提醒的心脏，
+  停了等于全部不响；用户这么说时先讲清后果（一句话），确认后才动手。同理，
+  `rtc-plan` 停了第二天就没有时刻表。
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
 - ❌ 打开或手改任何名字带 `.example` / `.md` 的文件（`rules/routines.example.md`、`rules/routines.md` 都是模板，不是运行配置）
 - ❌ 读到文件不一致就「顺手修好」

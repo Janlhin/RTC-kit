@@ -40,11 +40,14 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time as _time
 import uuid as _uuid
+import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -261,10 +264,30 @@ def atomic_write(path: Path, data: dict, expected_rev: int | None,
     return new_digest
 
 
-_ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows")
+_ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
+
+# 运行中攒下的「要跟人说一句」的话（自愈、手改），由 plan/due 播一次就清空
+NOTICES: list[str] = []
 
 
 def load_routine() -> dict:
+    """读时刻表并做最小形状校验；坏了就先想办法自愈。
+
+    实机教训：模型把 routines.json 写成了 0 字节，plan/due 双双失败，
+    用户一整天收不到任何提醒——而程序手里明明还留着上一份好文件。
+    所以校验失败时先尝试从程序底稿恢复，恢复了就在输出里说明一句。
+    """
+    try:
+        return _validate_routine()
+    except Validation:
+        notice = _restore_from_last_backup()
+        if not notice:
+            raise
+        NOTICES.append(notice)
+        return _validate_routine()
+
+
+def _validate_routine() -> dict:
     """读时刻表并做最小形状校验。
 
     「JSON 合法但结构不对」（整个文件被写成 `[]`、少了 tzOffset）同样会让
@@ -285,6 +308,49 @@ def load_routine() -> dict:
     if not isinstance(routine.get("alarmWindows"), list):
         raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
     return routine
+
+
+def _restore_from_last_backup() -> str | None:
+    """从程序最后写出的那份底稿恢复时刻表。成功返回要说的话，否则 None。"""
+    last = WORKSPACE / "state" / BACKUP_DIR / "routines.program-last.json"
+    if not last.exists():
+        return None
+    try:
+        data = load_json(last)
+    except (Validation, ValueError, TypeError, OSError):
+        return None
+    if not isinstance(data, dict) or any(k not in data for k in _ROUTINE_KEYS):
+        return None
+
+    bdir = WORKSPACE / "state" / BACKUP_DIR
+    bad = None
+    try:
+        bdir.mkdir(parents=True, exist_ok=True)
+        if ROUTINE.exists():
+            stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+            bad = bdir / f"routines.corrupt-{stamp}.json"
+            shutil.copyfile(ROUTINE, bad)
+    except OSError:
+        bad = None
+
+    try:
+        atomic_write(ROUTINE, data, expected_rev=None, expected_digest=None)
+    except (OSError, Validation, ValueError):
+        return None
+    seal_routine()
+
+    windows = len(data.get("alarmWindows") or [])
+    msg = (f"⚠️ {ROUTINE.name} 被写坏了，已从程序底稿自动恢复（{windows} 个窗口）"
+           f"，提醒继续正常")
+    if bad:
+        msg += f"；坏件留在 {bad}"
+    return msg
+
+
+def take_notices() -> list[str]:
+    """取走待播报的提示（自愈、手改等），只播一次。"""
+    got, _ = NOTICES[:], NOTICES.clear()
+    return got
 
 
 def load_state() -> dict | None:
@@ -582,7 +648,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
     return out
 
 
-TERMINAL = {"acked", "missed", "skipped", "cancelled"}
+TERMINAL = {"acked", "missed", "skipped", "cancelled", "delivered"}
 
 
 def _migrate_checklist(prev: dict, w: dict) -> None:
@@ -689,6 +755,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
 
 def cmd_plan(args) -> int:
     routine = load_routine()
+    hand_edit = audit_routine(routine)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
     today = now.date().isoformat()
@@ -772,8 +839,23 @@ def cmd_plan(args) -> int:
         if prev_results:
             fill_snapshot_results(old["planDate"], prev_results)
 
+    # SQL 索引：每天顺手同步一次，让「跨月统计」真的有数据可查。
+    # 失败不阻断提醒——metrics.db 只是派生索引，丢了下次还能重建。
+    try:
+        metrics_sync(state)
+        metrics_dump()
+    except (OSError, ValueError, TypeError) as e:
+        print(f"metrics: 自动同步失败 {type(e).__name__}: {e}", file=sys.stderr)
+
+    # 每天跑一次本地多盘备份：真档案在 state/schedule/*.json，丢了就是永久丢失
+    try:
+        for line in daily_backup(now):
+            print(line)
+    except Exception as e:  # 备份失败绝不能拖垮提醒本身
+        print(f"backup: 备份异常 {type(e).__name__}: {e}")
+
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
-    for line in self_check(state, now, first_run=(old is None)):
+    for line in take_notices() + hand_edit + self_check(state, now, first_run=(old is None)):
         print(line)
 
     # 行程推到会话入口：模型不跑命令也知道今天排了什么
@@ -783,11 +865,351 @@ def cmd_plan(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 多盘本地备份
+# 每日快照是永久档案，但只存在一块盘上——那块盘坏了，一年后什么都查不到。
+# 这里每天把它们压成一个 zip 写到另外的本地盘（不写源盘，同盘不算备份），
+# 按天数滚动删除；成功时完全静默，失败才说话。
+
+BACKUP_CFG = "rules/backup.json"
+BACKUP_MARK = "state/.backup-last.json"
+BACKUP_GLOB = "RTC-*.zip"
+BACKUP_KEEP = 30
+BACKUP_FILES = (
+    "rules/routines.json",
+    "rules/backup.json",
+    "state/alarms.json",
+    "state/routine-seal.json",
+    "state/metrics.sql",
+    "state/metrics.db",
+    "AGENTS.md",
+    "tasks.md",
+)
+# state/backups 只认程序自己写的三类；模型/人随手 cp 的 routines.<时间>.json 不进归档
+BACKUP_ROUTINE_PATTERNS = (
+    "routines.program-last.json",
+    "routines.handedit-*.json",
+    "routines.corrupt-*.json",
+)
+
+
+def backup_config() -> tuple[list[Path], int]:
+    """只认 rules/backup.json —— 不自己扫盘。
+
+
+    自动扫盘会在别人的机器上悄悄往不认识的盘写文件；测试也会因此污染真实磁盘。
+    目标盘由安装器（install.py）一次性写好，用户随时可改。
+    """
+    cfg = WORKSPACE / BACKUP_CFG
+    targets: list[Path] = []
+    keep = BACKUP_KEEP
+    if cfg.exists():
+        try:
+            data = load_json(cfg)
+            if isinstance(data, dict):
+                raw = data.get("targets") or []
+                if isinstance(raw, list):
+                    targets = [Path(str(t)) for t in raw if str(t).strip()]
+                if isinstance(data.get("keep"), int) and data["keep"] > 0:
+                    keep = int(data["keep"])
+        except (Validation, ValueError, TypeError, OSError):
+            pass
+    return targets, keep
+
+
+def archive_members() -> list[tuple[Path, str]]:
+    """归档要带哪些文件。
+
+    `state/backups` 只认程序自己写的那三类（底稿 / 手改证据 / 坏件），
+    模型或人随手 `cp` 出来的 `routines.<时间>.json` 不进归档——否则翻历史时
+    会看到两份 routines，一份 10 个窗口一份 7 个，没人分得清哪份是真的。
+    """
+    members: list[tuple[Path, str]] = []
+    for rel in BACKUP_FILES:
+        p = WORKSPACE / rel
+        if p.is_file():
+            members.append((p, rel))
+    schedule = WORKSPACE / "state" / "schedule"
+    if schedule.is_dir():
+        for f in sorted(schedule.glob("*.json")):
+            members.append((f, f"state/schedule/{f.name}"))
+    backups = WORKSPACE / "state" / "backups"
+    if backups.is_dir():
+        seen: set[Path] = set()
+        for pat in BACKUP_ROUTINE_PATTERNS:
+            for f in sorted(backups.glob(pat)):
+                if f in seen:
+                    continue
+                seen.add(f)
+                members.append((f, f"state/backups/{f.name}"))
+    return members
+
+
+def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], list[str]]:
+    """把工作区档案压成一份 zip 写到每个目标盘；返回（写成功的路径, 错误列表）。"""
+    members = archive_members()
+    if not members:
+        return [], ["工作区里没有可备份的档案（还没生成过数据？）"]
+
+    written: list[Path] = []
+    errors: list[str] = []
+    for t in targets:
+        dst = t / f"RTC-{day.replace('-', '')}.zip"
+        if dst.exists():
+            written.append(dst)
+            continue
+        tmp = dst.with_name(dst.name + ".tmp")
+        try:
+            t.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                for src, arc in members:
+                    z.write(src, arc)
+            with zipfile.ZipFile(tmp) as z:  # 回读，让 zip 自己验 CRC
+                if z.testzip() is not None:
+                    raise OSError(f"回读校验失败：{dst}")
+                if len(z.namelist()) != len(members):
+                    raise OSError(f"条目数不符：{len(z.namelist())}/{len(members)}")
+            os.replace(tmp, dst)
+            written.append(dst)
+        except (OSError, ValueError) as e:
+            errors.append(f"{t} 写入失败：{e}")
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            continue
+
+    # 每个目标盘只留最近 keep 份
+    for t in targets:
+        try:
+            files = sorted(t.glob(BACKUP_GLOB))
+            for old in (files[:-keep] if keep > 0 else []):
+                old.unlink()
+        except OSError:
+            pass
+    return written, errors
+
+
+def daily_backup(now: datetime) -> list[str]:
+    """每天跑一次（由 plan 调）：本地多盘 zip + git 私人仓库，两种都配了就都做。
+
+    成功静默，失败给一行话。
+    """
+    today = now.date().isoformat()
+    mark = WORKSPACE / BACKUP_MARK
+    try:
+        if mark.exists() and (load_json(mark) or {}).get("date") == today:
+            return []
+    except (Validation, ValueError, TypeError, OSError):
+        pass
+
+    targets, keep = backup_config()
+    has_git = bool(git_archive_config())
+    if not targets and not has_git:
+        return []  # 一样都没配，静默；手动 backup / gitarchive 会明确告诉你
+
+    written, errors = ([], [])
+    if targets:
+        written, errors = backup_now(targets, keep, today)
+    did_git = False
+    if has_git:
+        did_git, git_errors = git_archive(now)
+        errors = list(errors) + [f"git: {e}" for e in git_errors]
+
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(
+            json.dumps(
+                {
+                    "date": today,
+                    "at": now.isoformat(timespec="seconds"),
+                    "written": len(written),
+                    "git": did_git,
+                    "errors": errors,
+                },
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    if errors:
+        return [f"⚠️ 备份部分失败：{'；'.join(errors[:3])}"]
+    return []
+
+
+def cmd_backup(args) -> int:
+    today = date.today().isoformat()
+    targets, keep = backup_config()
+    if args.to:
+        targets = [Path(p) for p in args.to]
+    if args.keep:
+        keep = args.keep
+    if not targets:
+        print("backup: 没找到可写的第二块盘；用 --to 指定一个目录", file=sys.stderr)
+        return 3
+    written, errors = backup_now(targets, keep, today)
+    for w in written:
+        size = w.stat().st_size / 1024
+        print(f"backup: {w}  {size:.1f} KB")
+    for e in errors:
+        print(f"backup: {e}", file=sys.stderr)
+    if not written:
+        return 3
+    return 0
+
+
+# ---------------------------------------------------------------- git 存档
+# 压缩包只防「盘坏」，不防「机器没了」。这条路把档案按天提交进一个私人 git 仓库，
+# 远端随便写：GitHub / Gitee / GitLab / 自建 / 本地裸库都行（URL 或路径原样交给 git）。
+
+def git_archive_config() -> dict:
+    """读 rules/backup.json 里的 git 段。没有就返回空 dict（=不启用）。"""
+    cfg = WORKSPACE / BACKUP_CFG
+    if not cfg.exists():
+        return {}
+    try:
+        data = load_json(cfg)
+    except (Validation, ValueError, TypeError, OSError):
+        return {}
+    g = (data or {}).get("git")
+    return g if isinstance(g, dict) else {}
+
+
+def _git(args: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str]:
+    try:
+        p = subprocess.run(
+            ["git", "-c", "user.name=RTC", "-c", "user.email=rtc@localhost",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
+        )
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, f"git 调用失败：{e}"
+
+
+def git_archive(now: datetime) -> tuple[bool, list[str]]:
+    """把今天的档案复制进本地镜像仓库并推送到远端。
+
+    返回 (有没有做事, 错误行)。没有配置 / 没有变化 都算「没做事」，静默。
+    """
+    g = git_archive_config()
+    if not g:
+        return False, []
+
+    repo = Path(g.get("dir") or (Path.home() / "RTC-archive"))
+    branch = str(g.get("branch") or "main")
+    remotes: list[str] = []
+    if isinstance(g.get("remotes"), list):
+        remotes = [str(x) for x in g["remotes"] if str(x).strip()]
+    elif str(g.get("remote") or "").strip():
+        remotes = [str(g["remote"]).strip()]
+    remotes = remotes or ["origin"]
+
+    if _git(["--version"], Path.cwd())[0] != 0:
+        return True, ["git 不可用：先装 git 再来（装好后重跑一次即自动补推）"]
+
+    errors: list[str] = []
+    try:
+        repo.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return True, [f"git 存档目录建不出来（{repo}）：{e}"]
+
+    if not (repo / ".git").exists():
+        rc, out = _git(["init"], repo)
+        if rc != 0:
+            return True, [f"git init 失败：{out}"]
+        _git(["branch", "-M", branch], repo)
+
+    today = now.date().isoformat()
+    day_dir = repo / "archive" / today
+    members = archive_members()
+    if not members:
+        return False, []
+
+    try:
+        for src, rel in members:
+            dst = day_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+    except OSError as e:
+        return True, [f"复制档案进 git 目录失败：{e}"]
+
+    rc, out = _git(["add", "-A"], repo)
+    if rc != 0:
+        return True, [f"git add 失败：{out}"]
+    rc, out = _git(["status", "--porcelain"], repo)
+    if rc != 0:
+        return True, [f"git status 失败：{out}"]
+    if not out.strip():
+        return False, []  # 今天已经存过，且内容没变
+
+    rc, out = _git(["commit", "-m", f"archive {today}"], repo)
+    if rc != 0:
+        return True, [f"git commit 失败：{out}"]
+
+    for remote in remotes:
+        target = remote
+        if remote not in ("origin",) and ("://" in remote or remote.startswith("git@")
+                                          or remote.startswith("ssh:") or remote.endswith(".git")):
+            rc, out = _git(["remote", "add", "origin", remote], repo)
+            if rc != 0:  # 已经有 origin 了，改掉
+                _git(["remote", "set-url", "origin", remote], repo)
+            target = "origin"
+        rc, out = _git(["push", target, f"HEAD:{branch}"], repo)
+        if rc != 0:
+            # 远端被别的机器推过（或 force-push 过）：先 rebase 再试一次
+            _git(["pull", "--rebase", target, branch], repo)
+            rc2, out2 = _git(["push", target, f"HEAD:{branch}"], repo)
+            if rc2 != 0:
+                errors.append(f"推送到 {remote} 失败：{out2[-300:] or out[-300:]}")
+    return True, errors
+
+
+def cmd_gitarchive(args) -> int:
+    g = git_archive_config()
+    if args.dir or args.remote:
+        g = dict(g)
+        if args.dir:
+            g["dir"] = args.dir
+        if args.remote:
+            g["remotes"] = [args.remote]
+    if not g:
+        print("gitarchive: 还没配置。在 rules/backup.json 里写 \"git\": "
+              "{\"dir\": \"...\", \"remotes\": [\"git@github.com:you/rtc-data.git\"]}", file=sys.stderr)
+        return 3
+    cfg = WORKSPACE / BACKUP_CFG
+    data = {}
+    if cfg.exists():
+        try:
+            data = load_json(cfg) or {}
+        except (Validation, ValueError, TypeError, OSError):
+            data = {}
+    data["git"] = g
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"gitarchive: 配置写不进去：{e}", file=sys.stderr)
+        return 3
+
+    did, errors = git_archive(datetime.now().astimezone())
+    for e in errors:
+        print(f"gitarchive: {e}", file=sys.stderr)
+    if errors:
+        return 3
+    print(f"gitarchive: {'已提交并推送' if did else '内容没变化，跳过'}")
+    return 0
+
+
 # ---------------------------------------------------------------- 到点判断
 
 
 def cmd_due(args) -> int:
     routine = load_routine()
+    for line in take_notices():
+        print(line)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
     touch_heartbeat(now)
@@ -893,8 +1315,12 @@ def cmd_due(args) -> int:
             row.append(f"{mark} {it['label']}")
         for i in range(0, len(row), 6):
             lines.append(" ".join(row[i:i + 6]))
-        lines.append(f"逐项打勾说「{items[0]['label']}拿到了」；全部拿到说「{hit['ackHint']}」")
-    elif n == 1 or n % 2 == 1:
+        # 清单只在第一次响时教一遍怎么勾，之后靠「还剩 N 项」自己看
+        if n == 1:
+            lines.append(f"逐项说「{items[0]['label']}拿到了」；全部打完说「{hit['ackHint']}」")
+    elif hit.get("expectFires", 1) > 1 and (n == 1 or n == hit["expectFires"]):
+        # 只响一次的提醒：送达即完成，说「回复就不响了」纯属添乱。
+        # 会反复响的：第一次教一遍，最后一次再提醒一遍怎么停，中间靠「第 N 次」自己看。
         lines.append(f"回复「{hit['ackHint']}」就不响了。")
     print("\n".join(lines))
     return 0
@@ -1228,7 +1654,81 @@ CANCELLED_REASON = "cancelled"
 
 def _write_routine(routine: dict, digest: str | None) -> None:
     """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。"""
-    atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+    new_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+    seal_routine(new_digest)
+
+
+# ---------------------------------------------------------------- 手改探测
+# 为什么要这个：技能里写着「绝不手改 routines.json」，但那是**文字约束**。
+# 弱模型会照着技能里给的 JSON 模板直接写文件（实机就这样把 4 个默认窗口
+# 换成了 1 个自己编的），而文字约束拦不住它。这里给一条**可验证**的约束：
+# 程序每次写完都记一份摘要，下次 plan 发现摘要对不上，就说明这文件被
+# RTC 之外的东西改过——备份原件 + 当场说出来。不阻断提醒，但不再沉默。
+
+ROUTINE_SEAL = "routine-seal.json"
+BACKUP_DIR = "backups"
+
+
+def seal_path() -> Path:
+    return WORKSPACE / "state" / ROUTINE_SEAL
+
+
+def seal_routine(digest: str | None = None) -> None:
+    """记下「程序最后一次写出的 routines.json 长什么样」。
+
+    除了摘要，还留一份内容副本：手改把文件写坏时，至少还有一份能照着修的底稿。
+    """
+    try:
+        data = {
+            "digest": digest or file_digest(ROUTINE),
+            "windows": len((load_json(ROUTINE) or {}).get("alarmWindows") or []),
+            "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        p = seal_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+        last = WORKSPACE / "state" / BACKUP_DIR / "routines.program-last.json"
+        last.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROUTINE, last)
+    except (OSError, ValueError, TypeError):
+        pass  # 印章写不进去不影响提醒本身
+
+
+def audit_routine(routine: dict) -> list[str]:
+    """时刻表被程序之外的东西改过吗？返回要报告给人的行（正常时为空）。"""
+    try:
+        if not seal_path().exists():
+            seal_routine()
+            return []
+        seal = load_json(seal_path())
+        want = seal.get("digest")
+        was = seal.get("windows")
+    except (Validation, ValueError, TypeError, OSError, AttributeError):
+        seal_routine()
+        return []
+
+    got = file_digest(ROUTINE)
+    if want and got == want:
+        return []
+
+    now_windows = len((routine.get("alarmWindows") or []))
+    backup = None
+    try:
+        bdir = WORKSPACE / "state" / BACKUP_DIR
+        bdir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        backup = bdir / f"routines.handedit-{stamp}.json"
+        shutil.copyfile(ROUTINE, backup)
+    except OSError:
+        backup = None
+
+    msg = (f"⚠️ {ROUTINE.name} 被 RTC 之外的东西改过"
+           f"（上次程序写出 {was if was is not None else '?'} 个窗口，现在是 {now_windows} 个）")
+    if backup:
+        msg += f"；原件已备份到 {backup}"
+    msg += "。改时刻表请用 set-time / postpone / disable 命令，别手写 JSON。"
+    return [msg]
+
 
 
 def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:
@@ -1781,12 +2281,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-def cmd_metrics(args) -> int:
-    state = load_state()
-    if not state:
-        print("metrics: 没有状态文件", file=sys.stderr)
-        return 3
-    con = sqlite3.connect(DB)
+def _metrics_tables(con) -> None:
     con.execute(
         """CREATE TABLE IF NOT EXISTS daily (
              date TEXT NOT NULL, window TEXT NOT NULL, label TEXT,
@@ -1803,7 +2298,16 @@ def cmd_metrics(args) -> int:
              valid_from TEXT, valid_until TEXT,
              PRIMARY KEY (date, window))"""
     )
-    if args.action == "sync":
+
+
+def metrics_sync(state: dict) -> int:
+    """把当天状态 + 历史 + 每日快照灌进 metrics.db，返回快照索引行数。
+
+    这是**派生索引**，不是真相；真丢了下次 sync 能重建。
+    """
+    con = sqlite3.connect(DB)
+    try:
+        _metrics_tables(con)
         for w in state["windows"]:
             con.execute(
                 """INSERT INTO daily (date, window, label, expect, fired, acked_at, missed)
@@ -1838,7 +2342,6 @@ def cmd_metrics(args) -> int:
                     h.get("missedReason"),
                 ),
             )
-        # schedule 表：从每日快照目录补齐。快照文件是权威存档，这里只做索引。
         snap_count = 0
         if SCHEDULE_DIR.exists():
             for f in sorted(SCHEDULE_DIR.glob("*.json")):
@@ -1870,16 +2373,46 @@ def cmd_metrics(args) -> int:
                         """INSERT INTO schedule (date, window, label, start, end, expect,
                                                 one_off, valid_from, valid_until)
                            VALUES (?,?,?,?,?,?,?,?,?)
-                           ON CONFLICT(date, window) DO UPDATE SET label=excluded.label""",
+                           ON CONFLICT(date, window) DO UPDATE SET
+                             label=excluded.label, start=NULL, end=NULL""",
                         (s.get("date"), wid, r.get("label") or wid, None, None,
                          int(r.get("expect") or 0), 0, None, None),
                     )
                     snap_count += 1
         con.commit()
-        print(f"metrics: 已同步（schedule 索引 {snap_count} 行）", file=sys.stderr)
+        return snap_count
+    finally:
         con.close()
+
+
+def metrics_dump() -> Path | None:
+    """把库导成纯文本 SQL：git 里能看出「今天多了哪几行」，二进制 .db 看不出。"""
+    if not DB.exists():
+        return None
+    out = WORKSPACE / "state" / "metrics.sql"
+    con = sqlite3.connect(DB)
+    try:
+        with out.open("w", encoding="utf-8", newline="\n") as fh:
+            for line in con.iterdump():
+                fh.write(line + "\n")
+    finally:
+        con.close()
+    return out
+
+
+def cmd_metrics(args) -> int:
+    state = load_state()
+    if not state:
+        print("metrics: 没有状态文件", file=sys.stderr)
+        return 3
+
+    if args.action == "sync":
+        snap_count = metrics_sync(state)
+        print(f"metrics: 已同步（schedule 索引 {snap_count} 行）", file=sys.stderr)
         return 0
 
+    con = sqlite3.connect(DB)
+    _metrics_tables(con)
     if args.action == "schedule":
         if args.date:
             rows = con.execute(
@@ -2159,6 +2692,16 @@ def main(argv=None) -> int:
     sm.add_argument("--days", type=int, default=30)
     sm.add_argument("--date", help="YYYY-MM-DD（用于 metrics schedule）")
     sm.set_defaults(func=cmd_metrics)
+
+    sb = sub.add_parser("backup", help="把档案压成 zip 写到其他本地盘（每日 plan 会自动跑一次）")
+    sb.add_argument("--to", action="append", help="目标目录，可重复；不写则自动挑非源盘")
+    sb.add_argument("--keep", type=int, default=0, help="每个盘保留几份（默认取配置，30）")
+    sb.set_defaults(func=cmd_backup)
+
+    sg = sub.add_parser("gitarchive", help="把档案按天提交进私人 git 仓库并推送（GitHub/Gitee/自建都行）")
+    sg.add_argument("--dir", help="本地镜像仓库目录，默认 ~/RTC-archive")
+    sg.add_argument("--remote", help="远端地址：https / ssh / 本地裸库路径都可以")
+    sg.set_defaults(func=cmd_gitarchive)
 
     args = p.parse_args(argv)
     if args.workspace:
