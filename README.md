@@ -112,7 +112,7 @@ python -m unittest discover -s code/tests -p "test_*.py"
 python install.py --workspace ./_smoke-ws --dry-run
 ```
 
-`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 文档链接 → 版本号 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。`-Fast` 只跑前七项（pre-commit 用），`-SkipStatic` 只跑后两项（CI 的 test 层用）。
+`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。`-Fast` 只跑前八项（pre-commit 用），`-SkipStatic` 只跑后两项（CI 的 test 层用）。
 
 ### 校验要用哪个 python
 
@@ -132,6 +132,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 ```
 
 `git commit` 时 pre-commit 钩子跑的是同一个脚本，所以钩子拦下「No module named ruff」也是这个原因，不是钩子装错了。
+>>>>>>> origin/main
 
 ## 目录一览
 

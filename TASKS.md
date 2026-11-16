@@ -15,8 +15,9 @@
 | T-003 | todo | 覆盖率未达语句 80% / 分支 70% 的目标 | 补 `plan` 边界、`gitarchive` 失败路径、并发写冲突用例 | `python -m coverage report --fail-under=80` → 0 | 2026-11-16 | — |
 | T-004 | todo | `mypy` 尚未收紧到 `--strict` | 分批补注解、消 `Any`，每批一个独立提交 | `python -m mypy --strict code install.py` → 0 | 2026-11-16 | — |
 | T-005 | todo | 仓库内没有死代码与重复代码检查 | 接入 `vulture`（未使用符号）并接入 CI | `python -m vulture code install.py --min-confidence 80` → 0 | 2026-11-16 | — |
-| T-006 | todo | 文档里的命令片段没有被实际执行过，写错了没人发现 | 用 CI 抽取 Markdown 代码块执行（`codedown` 或等价脚本） | `pwsh -File scripts/verify-docs.ps1` → 0 | 2026-11-16 | — |
-| T-007 | todo | 文档断链无门禁 | 接入链接与锚点检查，覆盖全部 `.md` | `pwsh -File scripts/check-doc-links.ps1` → 0 | 2026-11-16 | — |
+| T-006 | done | 文档里的命令片段没有被实际执行过，写错了没人发现 | 人工抽取 30 份 Markdown 的 79 条命令，在隔离工作区逐条实跑并记录退出码（`docs/verification-2026-11-16.md`） | 每条命令退出码符合预期，0 条失败 | 2026-11-16 | 2026-11-16 |
+| T-006b | done | 上面是人工一次性验证，没有机器判据——下次文档改错不会有人跑 | 写 `scripts/verify-docs.ps1`：抽代码块里的 `rtc.py` 命令比对真实子命令/参数，再在临时工作区跑一条链路；已接入 `verify.ps1` | `pwsh -File scripts/verify-docs.ps1` → 0（故意写错子命令/参数 → 1） | 2026-11-16 | 2026-11-16 |
+| T-007 | done | 文档断链无门禁 | 接入 `scripts/check-doc-links.ps1`，覆盖全部 `.md` 的相对链接（不校验锚点） | `pwsh -File scripts/check-doc-links.ps1` → 0 | 2026-11-16 | 2026-11-16 |
 
 ## 功能与修复
 
