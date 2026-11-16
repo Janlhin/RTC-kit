@@ -839,6 +839,14 @@ def cmd_plan(args) -> int:
         if prev_results:
             fill_snapshot_results(old["planDate"], prev_results)
 
+    # SQL 索引：每天顺手同步一次，让「跨月统计」真的有数据可查。
+    # 失败不阻断提醒——metrics.db 只是派生索引，丢了下次还能重建。
+    try:
+        metrics_sync(state)
+        metrics_dump()
+    except (OSError, ValueError, TypeError) as e:
+        print(f"metrics: 自动同步失败 {type(e).__name__}: {e}", file=sys.stderr)
+
     # 每天跑一次本地多盘备份：真档案在 state/schedule/*.json，丢了就是永久丢失
     try:
         for line in daily_backup(now):
@@ -871,6 +879,8 @@ BACKUP_FILES = (
     "rules/backup.json",
     "state/alarms.json",
     "state/routine-seal.json",
+    "state/metrics.sql",
+    "state/metrics.db",
     "AGENTS.md",
     "tasks.md",
 )
@@ -2251,12 +2261,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-def cmd_metrics(args) -> int:
-    state = load_state()
-    if not state:
-        print("metrics: 没有状态文件", file=sys.stderr)
-        return 3
-    con = sqlite3.connect(DB)
+def _metrics_tables(con) -> None:
     con.execute(
         """CREATE TABLE IF NOT EXISTS daily (
              date TEXT NOT NULL, window TEXT NOT NULL, label TEXT,
@@ -2273,7 +2278,16 @@ def cmd_metrics(args) -> int:
              valid_from TEXT, valid_until TEXT,
              PRIMARY KEY (date, window))"""
     )
-    if args.action == "sync":
+
+
+def metrics_sync(state: dict) -> int:
+    """把当天状态 + 历史 + 每日快照灌进 metrics.db，返回快照索引行数。
+
+    这是**派生索引**，不是真相；真丢了下次 sync 能重建。
+    """
+    con = sqlite3.connect(DB)
+    try:
+        _metrics_tables(con)
         for w in state["windows"]:
             con.execute(
                 """INSERT INTO daily (date, window, label, expect, fired, acked_at, missed)
@@ -2308,7 +2322,6 @@ def cmd_metrics(args) -> int:
                     h.get("missedReason"),
                 ),
             )
-        # schedule 表：从每日快照目录补齐。快照文件是权威存档，这里只做索引。
         snap_count = 0
         if SCHEDULE_DIR.exists():
             for f in sorted(SCHEDULE_DIR.glob("*.json")):
@@ -2340,16 +2353,46 @@ def cmd_metrics(args) -> int:
                         """INSERT INTO schedule (date, window, label, start, end, expect,
                                                 one_off, valid_from, valid_until)
                            VALUES (?,?,?,?,?,?,?,?,?)
-                           ON CONFLICT(date, window) DO UPDATE SET label=excluded.label""",
+                           ON CONFLICT(date, window) DO UPDATE SET
+                             label=excluded.label, start=NULL, end=NULL""",
                         (s.get("date"), wid, r.get("label") or wid, None, None,
                          int(r.get("expect") or 0), 0, None, None),
                     )
                     snap_count += 1
         con.commit()
-        print(f"metrics: 已同步（schedule 索引 {snap_count} 行）", file=sys.stderr)
+        return snap_count
+    finally:
         con.close()
+
+
+def metrics_dump() -> Path | None:
+    """把库导成纯文本 SQL：git 里能看出「今天多了哪几行」，二进制 .db 看不出。"""
+    if not DB.exists():
+        return None
+    out = WORKSPACE / "state" / "metrics.sql"
+    con = sqlite3.connect(DB)
+    try:
+        with out.open("w", encoding="utf-8", newline="\n") as fh:
+            for line in con.iterdump():
+                fh.write(line + "\n")
+    finally:
+        con.close()
+    return out
+
+
+def cmd_metrics(args) -> int:
+    state = load_state()
+    if not state:
+        print("metrics: 没有状态文件", file=sys.stderr)
+        return 3
+
+    if args.action == "sync":
+        snap_count = metrics_sync(state)
+        print(f"metrics: 已同步（schedule 索引 {snap_count} 行）", file=sys.stderr)
         return 0
 
+    con = sqlite3.connect(DB)
+    _metrics_tables(con)
     if args.action == "schedule":
         if args.date:
             rows = con.execute(

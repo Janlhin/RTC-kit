@@ -230,7 +230,12 @@ E:\RTC-Backup\RTC-20261116.zip
 ```
 
 **里面装了什么**：`rules/routines.json`、`state/alarms.json`、`state/routine-seal.json`、
-全部 `state/schedule/*.json`、`state/backups/*.json`、`AGENTS.md`、`tasks.md`。
+全部 `state/schedule/*.json`、`state/backups/*.json`、**`state/metrics.db` 与它的文本导出
+`state/metrics.sql`**、`AGENTS.md`、`tasks.md`。
+
+> metrics 以前要手动跑 `rtc.py metrics sync`，现在 `plan` 每天顺手同步一次，
+> 所以「这周漏了几次」这类统计从第一天起就有数据。`.db` 是射频库，`.sql` 是它的文本版
+> ——git 里看 `.sql` 才知道今天多了哪几行。
 
 **多久一次、留几份**：每天一次（同一天重复跑不会重写），每个盘留最近 30 份（约 30 KB/天）。
 
@@ -289,6 +294,10 @@ zip 只防「盘坏」，不防「机器没了 / 换电脑」。想再稳一层�
 
 `dir` 是本地镜像仓库（每天往 `archive/<日期>/` 里放一份档案，提交后推送）。
 `remotes` 可以写多个，一次推多处。
+
+里面除了 `rules/`、`state/schedule/`，还包括 `state/metrics.db` 和它的文本导出
+`state/metrics.sql`——**你要的「SQL 与 DB 日志」就在这两份里**：`.db` 可以直接
+`sqlite3` 打开，`.sql` 在 git 里能看出每天多了哪几行。
 
 ### 8.2 各种仓库怎么写地址
 

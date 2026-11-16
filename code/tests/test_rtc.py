@@ -1842,6 +1842,42 @@ class TestBackup(RtcCase):
             shutil.rmtree(target, ignore_errors=True)
 
 
+class TestMetricsAutoSync(RtcCase):
+    """metrics.db 以前是个摆设：命令在，但没有任何东西去调它。
+    结果「一年后想统计」时库里一行都没有。现在 plan 每天顺手同步一次。"""
+
+    def test_plan_builds_and_dumps_metrics(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+
+        db = self.ws / "state" / "metrics.db"
+        self.assertTrue(db.is_file(), "plan 没生成 metrics.db")
+        import sqlite3
+        con = sqlite3.connect(db)
+        try:
+            daily = con.execute("SELECT COUNT(*) FROM daily").fetchone()[0]
+            schedule = con.execute("SELECT COUNT(*) FROM schedule").fetchone()[0]
+        finally:
+            con.close()
+        self.assertGreater(daily, 0, "daily 表是空的")
+        self.assertGreater(schedule, 0, "schedule 表是空的")
+
+        dump = self.ws / "state" / "metrics.sql"
+        self.assertTrue(dump.is_file(), "没有文本导出，git 里没法看出每天多了什么")
+        text = dump.read_text(encoding="utf-8")
+        self.assertIn("INSERT INTO", text, "导出里没有数据行")
+        self.assertIn("daily", text)
+
+    def test_dump_is_stable_when_nothing_changed(self):
+        """没有新数据时导出内容要一致，否则 git 里天天一堆噪声提交。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        first = (self.ws / "state" / "metrics.sql").read_text(encoding="utf-8")
+        self.cli("plan", "--force", now="2026-11-16T08:01:00+08:00")
+        second = (self.ws / "state" / "metrics.sql").read_text(encoding="utf-8")
+        self.assertEqual(first, second, "数据没变，导出却变了")
+
+
 class TestGitArchive(RtcCase):
     """压缩包只防「盘坏」，不防「机器没了」：档案要能进私人 git 仓库。"""
 
