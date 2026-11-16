@@ -59,6 +59,8 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 
 1. 改**时刻**用 `set-time` 命令（不要手改 JSON）：
    `python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} set-time --window <id> --start HH:MM [--end HH:MM]`
+   注意：新 `--start` 若晚于**原有** `--end`，命令会以退出码 `3` 拒绝（提示 `end 必须晚于 start`）——
+   这种情况必须同时给 `--end`，例如 `--start 07:30 --end 07:55`。
 2. 回一句：`改成 13:00 了，明天生效。`
    `set-time` 只写时刻表，下次 `plan` 生效；今天已生成的窗口不变。
 
