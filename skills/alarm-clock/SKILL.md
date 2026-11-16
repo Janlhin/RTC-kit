@@ -9,7 +9,7 @@ description: 闹钟门控。判断「该不该响」由 code/rtc.py 完成，本
 
 如果你的宿主没有 `rtc.py` 的运行环境，见文末「无代码回退」。
 
-## §0.1 你不是调度器，系统已经就位
+## §0 系统已经装好，你不是调度器
 
 RTC 是「判断 + 写入」与「定时触发」分离的两层：
 
@@ -20,19 +20,10 @@ RTC 是「判断 + 写入」与「定时触发」分离的两层：
 
 - ❌ 不要告诉用户「RTC 不存在 / 需要搭建 / 需要设置 cron / 需要部署 rtc.py」——部署是安装器（`install.py`）做的事，运行时系统已经跑着了。
 - ❌ 不要自己动手建 / 删 / 暂停 cron 任务（条数恒定：只有 `rtc-plan` 和 `rtc-due` 两条）。
-- ❌ 不要手改 `{{WORKSPACE_DIR}}/rules/routines.json` 或任何 `.example` / `.md` 模板。
+- ❌ 不要手改 `{{WORKSPACE_DIR}}/rules/routines.json` 或任何 `.example` / `.md` 模板——那些是模板与文档，改了不会生效，还会让你误以为改好了。
+- ✅ 唯一可改的运行文件是 `{{WORKSPACE_DIR}}/rules/routines.json`，而且只通过 `rtc.py` 的子命令改。本技能是它的**唯一权威**：其他日常类技能（`daily-routine` 等）不修改时刻表，遇到改时间 / 改期请回到本技能走命令。
+- ✅ 需要看状态时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。不要读 `tasks.md`、`AGENTS.md`、`MEMORY.md`、`HEARTBEAT.md`——多读一个文件就多一份延迟，也多一次判断错误的可能。
 - 用户收到的每一条提醒都是上面这套系统的输出——你看到的定时投递消息就是它的产物，不是外部事件。
-
-
-## §0 只读一个文件
-
-需要看状态时，只读 `{{STATE_DIR}}/alarms.json`，或直接用 `rtc.py status --json`。
-
-不要读 `tasks.md`、`AGENTS.md`、`MEMORY.md`、`HEARTBEAT.md`。多读一个文件就多一份延迟，也多一次判断错误的可能。
-
-## §0.5 唯一可改的文件
-
-只有 `<workspace>/rules/routines.json` 是运行时配置。**绝不**打开或手改任何带 `.example`、`.md` 后缀的文件（如 `rules/routines.example.md`、`rules/routines.md`）——那些是模板与文档，改了不会生效，还会让你误以为改好了。本技能是 `rules/routines.json` 的**唯一权威**：其他日常类技能（daily-routine 等）不修改时刻表，遇到改时间 / 改期请回到本技能走命令。所有改动只通过 `rtc.py` 的子命令完成。
 
 ## §1 用户说「起了 / 好了 / 别响了」—— 你是唯一的 ack 桥
 
@@ -218,6 +209,16 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} check --window pack --i
 | `planDate` / `planKind` / `windows` / `history` / `rev` | `rtc.py plan` |
 
 写之前读 `rev`、写入后 `rev + 1`；发现 `rev` 已变则放弃写入、记一条 `concurrent_write`、不重试不合并。
+
+## §6.1 查状态
+
+```
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status --json
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} metrics report
+```
+
+回答说人话：`今天 4 个窗口，响了 6 次，确认 2 个，漏 1 个。` 不要贴 JSON。
 
 ## §7 禁止
 
