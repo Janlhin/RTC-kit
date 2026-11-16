@@ -648,7 +648,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime,
     return out
 
 
-TERMINAL = {"acked", "missed", "skipped", "cancelled"}
+TERMINAL = {"acked", "missed", "skipped", "cancelled", "delivered"}
 
 
 def _migrate_checklist(prev: dict, w: dict) -> None:

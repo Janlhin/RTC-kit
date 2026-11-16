@@ -114,6 +114,24 @@ class TestOneOff(RtcCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, "", "一次性提醒不能响第二次")
 
+    def test_force_after_delivery_keeps_delivered(self):
+        """实机事故：16:35 那条已投递（日志有 delivered to weixin），
+        之后任何一次 plan --force 重建时窗口已过期 → 被写成 skipped 0/1，
+        「一年后查」看到的是「没响过」。
+
+        delivered 是终态，重建不许覆盖它。
+        """
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T09:00:00+08:00")
+        self.assertEqual(self.window("travel")["state"], "delivered")
+
+        rc, _, _ = self.cli("plan", "--force", now="2026-11-10T21:00:00+08:00")
+        self.assertEqual(rc, 0)
+        w = self.window("travel")
+        self.assertEqual(w["state"], "delivered", "已送达的记录被重建冲成 skipped")
+        self.assertEqual(w["fireCount"], 1, "fireCount 被清零")
+        self.assertIsNone(w.get("missedReason"), "已送达的窗口不该带 missedReason")
+
     def test_tolerates_missing_start_minute(self):
         """cron 恰好错过 start 那一分钟时，在 end 之前仍应送达。"""
         self.cli("plan", now="2026-11-10T06:00:00+08:00")
