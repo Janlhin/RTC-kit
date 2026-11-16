@@ -452,6 +452,7 @@ def run(args: argparse.Namespace) -> int:
         "rtc_plan.py",
         "rtc_due.py",
         "rtc_once.py",
+        "metrics.mjs",  # 可选旁路统计；不拷会让技能里的 node metrics.mjs 调用摸空
     ]
     for fname in to_copy:
         src = code_src / fname
