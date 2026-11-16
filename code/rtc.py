@@ -264,8 +264,28 @@ def atomic_write(path: Path, data: dict, expected_rev: int | None,
 
 _ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
 
+# 运行中攒下的「要跟人说一句」的话（自愈、手改），由 plan/due 播一次就清空
+NOTICES: list[str] = []
+
 
 def load_routine() -> dict:
+    """读时刻表并做最小形状校验；坏了就先想办法自愈。
+
+    实机教训：模型把 routines.json 写成了 0 字节，plan/due 双双失败，
+    用户一整天收不到任何提醒——而程序手里明明还留着上一份好文件。
+    所以校验失败时先尝试从程序底稿恢复，恢复了就在输出里说明一句。
+    """
+    try:
+        return _validate_routine()
+    except Validation:
+        notice = _restore_from_last_backup()
+        if not notice:
+            raise
+        NOTICES.append(notice)
+        return _validate_routine()
+
+
+def _validate_routine() -> dict:
     """读时刻表并做最小形状校验。
 
     「JSON 合法但结构不对」（整个文件被写成 `[]`、少了 tzOffset）同样会让
@@ -286,6 +306,49 @@ def load_routine() -> dict:
     if not isinstance(routine.get("alarmWindows"), list):
         raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
     return routine
+
+
+def _restore_from_last_backup() -> str | None:
+    """从程序最后写出的那份底稿恢复时刻表。成功返回要说的话，否则 None。"""
+    last = WORKSPACE / "state" / BACKUP_DIR / "routines.program-last.json"
+    if not last.exists():
+        return None
+    try:
+        data = load_json(last)
+    except (Validation, ValueError, TypeError, OSError):
+        return None
+    if not isinstance(data, dict) or any(k not in data for k in _ROUTINE_KEYS):
+        return None
+
+    bdir = WORKSPACE / "state" / BACKUP_DIR
+    bad = None
+    try:
+        bdir.mkdir(parents=True, exist_ok=True)
+        if ROUTINE.exists():
+            stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+            bad = bdir / f"routines.corrupt-{stamp}.json"
+            shutil.copyfile(ROUTINE, bad)
+    except OSError:
+        bad = None
+
+    try:
+        atomic_write(ROUTINE, data, expected_rev=None, expected_digest=None)
+    except (OSError, Validation, ValueError):
+        return None
+    seal_routine()
+
+    windows = len(data.get("alarmWindows") or [])
+    msg = (f"⚠️ {ROUTINE.name} 被写坏了，已从程序底稿自动恢复（{windows} 个窗口）"
+           f"，提醒继续正常")
+    if bad:
+        msg += f"；坏件留在 {bad}"
+    return msg
+
+
+def take_notices() -> list[str]:
+    """取走待播报的提示（自愈、手改等），只播一次。"""
+    got, _ = NOTICES[:], NOTICES.clear()
+    return got
 
 
 def load_state() -> dict | None:
@@ -775,7 +838,7 @@ def cmd_plan(args) -> int:
             fill_snapshot_results(old["planDate"], prev_results)
 
     # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
-    for line in hand_edit + self_check(state, now, first_run=(old is None)):
+    for line in take_notices() + hand_edit + self_check(state, now, first_run=(old is None)):
         print(line)
 
     # 行程推到会话入口：模型不跑命令也知道今天排了什么
@@ -790,6 +853,8 @@ def cmd_plan(args) -> int:
 
 def cmd_due(args) -> int:
     routine = load_routine()
+    for line in take_notices():
+        print(line)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
     touch_heartbeat(now)

@@ -1738,6 +1738,23 @@ class TestHandEditedRoutine(RtcCase):
         self.assertIn("dateTypes", err)
         self.assertNotIn("Traceback", err)
 
+    def test_truncated_routine_self_heals_from_last_good(self):
+        """实机事故：文件被写空 → 当天所有提醒全哑。程序手里有好文件就该自己长回来。"""
+        self.write_routine(base_routine())
+        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        last = self.ws / "state" / "backups" / "routines.program-last.json"
+        self.assertTrue(last.exists(), "程序写完必须留一份底稿")
+
+        (self.ws / "rules" / "routines.json").write_text("", encoding="utf-8")
+        rc, out, err = self.cli("plan", "--force", now="2026-11-16T08:05:00+08:00")
+        self.assertEqual(rc, 0, f"文件坏了不该让整天停摆：{err[-300:]}")
+        self.assertIn("自动恢复", out)
+        restored = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        self.assertGreater(len(restored["alarmWindows"]), 0)
+        self.assertTrue(list((self.ws / "state" / "backups").glob("routines.corrupt-*.json")),
+                        "坏件也要留一份，便于追是谁写坏的")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

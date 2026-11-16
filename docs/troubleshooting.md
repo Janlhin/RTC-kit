@@ -167,3 +167,51 @@ python install.py --workspace "<WORKSPACE_DIR>" --smoke
 ```
 
 它会在两分钟后给你一条测试提醒；收不到就按上面四步走。
+
+---
+
+## 6. 时刻表被"改过"或"写坏了"
+
+两种症状，同一层原因：**有东西绕过了 `rtc.py` 直接写 `rules/routines.json`**。
+实机上这就是模型干的——它不去跑命令，而是照着技能里的 JSON 模板直接改文件。
+现在技能里已经没有模板了，你还可以再加一道锁（见本节末）。
+
+### 6.1 文件被改过（内容还在，但窗口数不对）
+
+`plan` 会当场告诉你：
+
+```
+⚠️ routines.json 被 RTC 之外的东西改过（上次程序写出 4 个窗口，现在是 1 个）；
+原件已备份到 state/backups/routines.handedit-20261116-155512.json。
+```
+
+- 想知道现在到底有几个窗口：`rtc.py status`
+- 想回到程序上一份：`state/backups/routines.program-last.json`
+- 动手改之前先看清备份，别二次覆盖
+
+### 6.2 文件被写坏（0 字节 / 缺字段 / 不是 JSON）
+
+`plan` 和 `due` 都会失败，**但程序会自己恢复**：
+
+```
+⚠️ routines.json 被写坏了，已从程序底稿自动恢复（6 个窗口），提醒继续正常；
+坏件留在 state/backups/routines.corrupt-20261116-155801.json。
+```
+
+恢复不了（连底稿都没了）才是真故障，那时会出退出码 3 和一句诊断。
+
+### 6.3 从根上堵：把写文件的工具关掉
+
+模型手改文件靠的是宿主的文件工具。某平台可以单独关掉这一组：
+
+```bash
+hermes tools disable --platform weixin file
+hermes tools list        # 确认 file 不在启用列表里
+hermes gateway restart   # 配置生效
+```
+
+关掉之后它只剩命令可用——要么跑 `rtc.py` / `rtc_once.py`（对），
+要么说"做不到"（也是对的）；两种情况都比"说已创建、其实没写"强。
+
+> 什么时候不该关：你需要它在对话里替你改 `tasks.md`、读 `AGENTS.md` 做摘要时。
+> 那时保留 `file`，靠 6.1 / 6.2 的印章和自愈兜底。
