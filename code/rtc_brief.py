@@ -273,6 +273,7 @@ def cmd_status(args) -> int:
     timetable = _timetable_summary(routine)
     backup = _backup_status()
     paused = core.load_pause()
+    delivery = core.delivery_summary(state["planDate"])
     if args.json:
         print(
             json.dumps(
@@ -282,6 +283,7 @@ def cmd_status(args) -> int:
                     "timetable": timetable,
                     "backup": backup,
                     "paused": paused,
+                    "delivery": delivery,
                     "windows": rows,
                 },
                 ensure_ascii=False,
@@ -304,6 +306,12 @@ def cmd_status(args) -> int:
         gap = (core.now_tz(routine["tzOffset"]) - hb).total_seconds() / 60
         print(f"  调度器心跳：{gap:.0f} 分钟前")
     print(_backup_line(backup))
+    if delivery["total"]:
+        line = f"  投递  {delivery['total']} 条 · 成功 {delivery['ok']} · 失败 {delivery['failed']}"
+        if delivery["failed"]:
+            first = delivery["failures"][0]
+            line += f"（{str(first['at'])[11:16]} {first['window']}：{first['error'] or '没说原因'}）"
+        print(line)
     for r in rows:
         print(f"  {r['label']:<8} {r['window']}  {r['state']:<8} {r['fireCount']}/{r['expectFires']}")
     return 0

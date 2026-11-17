@@ -2712,6 +2712,83 @@ class TestTasksSnapshot(RtcCase):
             shutil.rmtree(target, ignore_errors=True)
 
 
+class TestDeliveryReceipt(RtcCase):
+    """投递回执：脚本看不见「你收到没有」，只能靠这一行账。"""
+
+    def record(self, *args):
+        return self.cli("delivery-record", *args)
+
+    def test_records_and_summarises_a_day(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.record(
+            "--window",
+            "wake",
+            "--target",
+            "weixin",
+            "--result",
+            "ok",
+            "--at",
+            "2026-11-17T07:00:00+08:00",
+        )
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.record(
+            "--window",
+            "wake",
+            "--target",
+            "weixin",
+            "--result",
+            "fail",
+            "--error",
+            "iLink session not ready ret=-2",
+            "--at",
+            "2026-11-17T07:05:00+08:00",
+        )
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.cli("delivery", "--date", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("投递 2 条：成功 1 · 失败 1", out)
+        self.assertIn("iLink session not ready", out)
+        rc, out, err = self.cli("delivery", "--date", "2026-11-17", "--json")
+        data = json.loads(out)
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(data["failed"], 1)
+        self.assertEqual(data["failures"][0]["window"], "wake")
+
+    def test_no_log_says_so_instead_of_zero(self):
+        rc, out, err = self.cli("delivery")
+        self.assertEqual(rc, 4, "没回执要明确退出码，不能假装 0 条都成功")
+        self.assertIn("还没有投递回执", err)
+
+    def test_status_shows_failure(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.record(
+            "--target", "weixin", "--result", "fail", "--error", "boom", "--at", "2026-11-17T09:00:00+08:00"
+        )
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("投递  1 条 · 成功 0 · 失败 1", out)
+        self.assertIn("boom", out)
+
+    def test_bad_result_rejected(self):
+        rc, out, err = self.cli("delivery-record", "--target", "weixin", "--result", "maybe")
+        self.assertEqual(rc, 3, out + err)
+        self.assertIn("ok / fail", err)
+
+    def test_broken_line_does_not_break_the_rest(self):
+        path = self.ws / "state" / "delivery.log"
+        path.write_text(
+            '{"at":"2026-11-17T07:00:00+08:00","window":"wake","target":"x","result":"ok"}\n'
+            "不是 json 的一行\n"
+            '{"at":"2026-11-17T08:00:00+08:00","window":"wake","target":"x","result":"fail"}\n',
+            encoding="utf-8",
+        )
+        rc, out, err = self.cli("delivery", "--date", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("投递 2 条", out)
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 

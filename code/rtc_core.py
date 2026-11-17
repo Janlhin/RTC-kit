@@ -961,6 +961,108 @@ def cmd_resume(args) -> int:
     return 0
 
 
+def delivery_log() -> Path:
+    return WORKSPACE / "state" / "delivery.log"
+
+
+def record_delivery(window: str, target: str, result: str, error: str | None, at: datetime) -> None:
+    """宿主（或包装脚本）投完一条就在日志里补一行。
+
+    RTC 脚本只能把话交给 stdout，投递发生在退出之后——「说出去了」和「收到了」
+    之间有一段脚本看不见的路。这一行就是那段路的回执：没有它，昨天的提醒到底
+    发出去没有，谁都答不上来。
+    """
+    path = delivery_log()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "at": at.isoformat(),
+                    "window": window,
+                    "target": target,
+                    "result": result,
+                    "error": error,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+def read_delivery(day: str | None = None) -> list[dict]:
+    """读回执；坏行跳过，不让一行坏 JSON 毁掉整天的账。"""
+    path = delivery_log()
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or "result" not in row:
+            continue
+        if day and str(row.get("at", ""))[:10] != day:
+            continue
+        rows.append(row)
+    return rows
+
+
+def delivery_summary(day: str) -> dict:
+    rows = read_delivery(day)
+    fails = [r for r in rows if r.get("result") != "ok"]
+    return {
+        "date": day,
+        "total": len(rows),
+        "ok": len(rows) - len(fails),
+        "failed": len(fails),
+        "failures": [
+            {
+                "at": r.get("at"),
+                "window": r.get("window"),
+                "target": r.get("target"),
+                "error": r.get("error"),
+            }
+            for r in fails
+        ],
+    }
+
+
+def cmd_delivery(args) -> int:
+    day = args.date or now_tz("+08:00").date().isoformat()
+    if not delivery_log().exists():
+        print(
+            "delivery: 还没有投递回执（state/delivery.log 不存在）——"
+            "宿主投完一条要调 delivery-record 写一行，见 docs/troubleshooting.md §2.2",
+            file=sys.stderr,
+        )
+        return 4
+    data = delivery_summary(day)
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    print(f"{day}  投递 {data['total']} 条：成功 {data['ok']} · 失败 {data['failed']}")
+    for f in data["failures"]:
+        when = str(f["at"] or "")[11:16]
+        print(f"  {when}  {f['window']} → {f['target']}  {f['error'] or '（没说原因）'}")
+    return 0
+
+
+def cmd_delivery_record(args) -> int:
+    if args.result not in ("ok", "fail"):
+        print(f"delivery-record: --result 只能是 ok / fail，收到 {args.result}", file=sys.stderr)
+        return 3
+    tz = tz_of("+08:00")
+    at = parse_iso(args.at, tz) if args.at else now_tz("+08:00")
+    record_delivery(args.window or "-", args.target, args.result, args.error, at)
+    print(f"delivery-record: 已记 {at.isoformat()} {args.result}")
+    return 0
+
+
 def cmd_plan(args) -> int:
     routine = load_routine()
     hand_edit = audit_routine(routine)
@@ -1996,6 +2098,19 @@ def main(argv=None) -> int:
 
     stt = sub.add_parser("touch-tasks", help="改 tasks.md 之前先留底稿（内容没变就不写）")
     stt.set_defaults(func=archive.cmd_touch_tasks)
+
+    sdl = sub.add_parser("delivery", help="查投递回执：某天到底发出去没有")
+    sdl.add_argument("--date", help="YYYY-MM-DD（默认今天）")
+    sdl.add_argument("--json", action="store_true")
+    sdl.set_defaults(func=cmd_delivery)
+
+    sdr = sub.add_parser("delivery-record", help="宿主投完一条后写一行回执（给包装脚本用）")
+    sdr.add_argument("--window", help="窗口 id（不知写 -）")
+    sdr.add_argument("--target", required=True, help="投到哪个渠道 / 设备")
+    sdr.add_argument("--result", required=True, help="ok / fail")
+    sdr.add_argument("--error", help="失败原因，一行话")
+    sdr.add_argument("--at", help="投递时刻 ISO（默认现在）")
+    sdr.set_defaults(func=cmd_delivery_record)
 
     sa = sub.add_parser("ack")
     sa.add_argument("--window")
