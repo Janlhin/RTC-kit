@@ -286,6 +286,19 @@ python code/rtc.py --workspace <工作区> backup --to D:\RTC-Backup --keep 60
 
 最后跑过哪天、写到哪、有没有失败，都在 `state/.backup-last.json` 里。
 
+不用去翻文件，`status` 最后一行就是这件事的答案：
+
+```bash
+python code/rtc.py --workspace <工作区> status
+```
+
+```
+  备份  11-17 00:00  本地 2 处 · git 已推送 · 最近无错误
+```
+
+没备份过显示「尚未备份」，部分失败会写「错误 1：E: 盘不可写」。
+备份状态不影响 `status` 的退出码——提醒是主链路，备份是附属品。
+
 ### 7.2 丢了盘怎么恢复
 
 翻出最近一份 zip，解开，把里面的目录按原样盖回工作区即可：

@@ -2240,6 +2240,53 @@ class TestBrief(RtcCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("没有日常窗口", out, out)
 
+    def _write_backup_mark(self, **fields):
+        mark = self.ws / "state" / ".backup-last.json"
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
+
+    def test_status_says_never_backed_up(self):
+        """没备份过也要明说，不能留白让用户猜。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("尚未备份", out, out)
+        rc, out, err = self.cli("status", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(json.loads(out)["backup"], out)
+
+    def test_status_shows_last_backup(self):
+        """备份成功一行读完：什么时候、几处、git 推没推、有没有错。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self._write_backup_mark(
+            date="2026-11-10", at="2026-11-10T17:51:38+08:00", written=2, git=True, errors=[]
+        )
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("本地 2 处 · git 已推送 · 最近无错误", out, out)
+        self.assertIn("11-10 17:51", out, out)
+        rc, out, err = self.cli("status", "--json")
+        data = json.loads(out)["backup"]
+        self.assertEqual(data["written"], 2, out)
+        self.assertTrue(data["git"], out)
+
+    def test_status_shows_backup_errors(self):
+        """部分失败要写清哪一处、为什么，别只说「备份」两个字。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self._write_backup_mark(
+            date="2026-11-10",
+            at="2026-11-10T17:51:38+08:00",
+            written=1,
+            git=False,
+            errors=["E: 盘不可写"],
+        )
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("本地 1 处 · git 未推送 · 错误 1：E: 盘不可写", out, out)
+
 
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。

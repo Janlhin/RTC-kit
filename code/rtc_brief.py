@@ -220,6 +220,31 @@ def cmd_history(args) -> int:
 # ---------------------------------------------------------------- 状态与指标
 
 
+def _backup_status() -> dict | None:
+    """备份是附属品：读不到/读坏了都返回 None，绝不抛，也绝不影响退出码。"""
+    mark = core.WORKSPACE / "state" / ".backup-last.json"
+    if not mark.is_file():
+        return None
+    try:
+        data = json.loads(mark.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _backup_line(backup: dict | None) -> str:
+    """把「到底备了没」压成一行，用户不用去翻文件。"""
+    if not backup:
+        return "  备份  尚未备份（python rtc.py archive backup 可手动跑一次）"
+    at = str(backup.get("at") or "")[5:16].replace("T", " ")
+    written = backup.get("written", 0)
+    git = "git 已推送" if backup.get("git") else "git 未推送"
+    errors = backup.get("errors") or []
+    if errors:
+        return f"  备份  {at}  本地 {written} 处 · {git} · 错误 {len(errors)}：{str(errors[0])[:60]}"
+    return f"  备份  {at}  本地 {written} 处 · {git} · 最近无错误"
+
+
 def cmd_status(args) -> int:
     routine = core.load_routine()
     state = core.load_state()
@@ -240,6 +265,7 @@ def cmd_status(args) -> int:
             }
         )
     timetable = _timetable_summary(routine)
+    backup = _backup_status()
     if args.json:
         print(
             json.dumps(
@@ -247,6 +273,7 @@ def cmd_status(args) -> int:
                     "planDate": state["planDate"],
                     "rev": state["rev"],
                     "timetable": timetable,
+                    "backup": backup,
                     "windows": rows,
                 },
                 ensure_ascii=False,
@@ -266,6 +293,7 @@ def cmd_status(args) -> int:
     else:
         gap = (core.now_tz(routine["tzOffset"]) - hb).total_seconds() / 60
         print(f"  调度器心跳：{gap:.0f} 分钟前")
+    print(_backup_line(backup))
     for r in rows:
         print(f"  {r['label']:<8} {r['window']}  {r['state']:<8} {r['fireCount']}/{r['expectFires']}")
     return 0
