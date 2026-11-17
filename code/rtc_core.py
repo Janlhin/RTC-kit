@@ -471,6 +471,7 @@ def schedule_snapshot(
                 "oneOff": bool(w.get("oneOff")),
                 "dueDate": w.get("dueDate"),
                 "ackHint": w.get("ackHint"),
+                "format": w.get("format"),
                 "validFrom": defs.get(w["id"], {}).get("validFrom"),
                 "validUntil": defs.get(w["id"], {}).get("validUntil"),
             }
@@ -621,6 +622,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
                 "missedAt": None,
                 "missedReason": "late_plan" if expired else None,
                 "ackHint": (w.get("ackHints") or ["知道了"])[0],
+                "format": w.get("format"),
                 "oneOff": one_off,
                 "dueDate": due,
                 "disabled": False,
@@ -1305,6 +1307,17 @@ def cmd_due(args) -> int:
         print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
 
     n = hit["fireCount"]
+    if hit.get("format"):
+        # 摘要窗口：文案现算（今天完成什么、还欠什么、响了几次），不靠模型在线。
+        # 算不出来就退回普通提醒——宁可少一段内容，不能因此不响。
+        try:
+            print("\n".join(brief.build_digest(routine, state, hit, now)))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+            print(f"digest: 摘要生成失败（{type(e).__name__}: {e}），本次用普通提醒", file=sys.stderr)
+        else:
+            if hit.get("expectFires", 1) > 1 and n < hit["expectFires"]:
+                print(f"回复「{hit['ackHint']}」就不响了。")
+            return 0
     head = f"{hit['label']} —— {now.strftime('%H:%M')}"
     if hit.get("dueDate"):
         days = (date.fromisoformat(hit["dueDate"]) - now.date()).days

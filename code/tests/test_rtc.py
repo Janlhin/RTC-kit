@@ -2789,6 +2789,123 @@ class TestDeliveryReceipt(RtcCase):
         self.assertIn("投递 2 条", out)
 
 
+class TestDigestWindow(RtcCase):
+    """摘要窗口：文案由代码在到点那一刻用本地数据算，模型零参与。"""
+
+    def digest_routine(self):
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "morning",
+                "label": "早报",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+            },
+            {
+                "id": "noon",
+                "label": "午间提醒",
+                "start": "12:00",
+                "end": "12:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+            },
+            {
+                "id": "follow",
+                "label": "助理跟进",
+                "start": "15:00",
+                "end": "15:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "follow",
+            },
+            {
+                "id": "evening",
+                "label": "助理总结",
+                "start": "19:00",
+                "end": "19:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "summary",
+            },
+        ]
+        return r
+
+    def seed_day(self):
+        """一天 5 个窗口：3 确认 / 1 漏响 / 1 未到（未到的是正在响的这一条）。
+
+        15:00 的跟进在这里就响一次并确认——同一天再跑一次 due 不会再命中。
+        """
+        self.write_routine(self.digest_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T07:00:00+08:00")
+        self.cli("ack", "--window", "wake", now="2026-11-17T07:01:00+08:00")
+        self.cli("due", now="2026-11-17T09:00:00+08:00")
+        self.cli("ack", "--window", "morning", now="2026-11-17T09:01:00+08:00")
+        # 12:10 才跑：午间那条已过期未确认 → 判 missed
+        self.cli("due", now="2026-11-17T12:10:00+08:00")
+        follow = self.cli("due", now="2026-11-17T15:00:00+08:00")
+        self.cli("ack", "--window", "follow", now="2026-11-17T15:01:00+08:00")
+        return follow
+
+    def test_follow_format_first_line(self):
+        rc, out, err = self.seed_day()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[0], "🔔 助理跟进 — 2026-11-17 15:00")
+        self.assertIn("📋 今日待办：", out)
+        self.assertIn("💬 进展：", out)
+
+    def test_summary_selfcheck_numbers(self):
+        self.seed_day()
+        rc, out, err = self.cli("due", now="2026-11-17T19:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[0], "📋 助理总结 — 2026-11-17")
+        self.assertIn("今日闹钟：5 个窗口，响 4 次，确认 3 / 漏 1 / 未到 1", out)
+        self.assertIn("📅 明日预告：", out)
+        self.assertIn("12:00 午间提醒", out)  # 漏的那条要出现在「未完成」
+
+    def test_tasks_today_feeds_the_digest(self):
+        (self.ws / "tasks.md").write_text(
+            "# 任务\n\n## Today\n\n- [ ] 交周报\n- [x] 买咖啡\n\n## 待安排（没日期）\n- [ ] 换灯泡\n",
+            encoding="utf-8",
+        )
+        rc, out, err = self.seed_day()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("- 交周报", out)
+        self.assertNotIn("换灯泡", out, "只列 Today，不该把待安排混进来")
+
+    def test_digest_failure_degrades_to_plain_reminder(self):
+        (self.ws / "tasks.md").mkdir()  # 读不动 → 摘要算不出来
+        self.write_routine(self.digest_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-17T19:00:00+08:00")
+        self.assertEqual(rc, 0, "算不出摘要也必须照常响")
+        self.assertIn("助理总结 —— 19:00", out)
+        self.assertIn("digest: 摘要生成失败", err)
+
+    def test_same_data_same_text(self):
+        self.seed_day()
+        first = self.cli("due", now="2026-11-17T19:00:00+08:00")[1]
+        self.setUp()
+        self.seed_day()
+        second = self.cli("due", now="2026-11-17T19:00:00+08:00")[1]
+        self.assertEqual(first, second, "同一份数据必须算出同一段文字")
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 
