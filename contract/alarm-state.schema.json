@@ -8,7 +8,11 @@
   "required": ["version", "rev", "timezone", "planDate", "planKind", "windows"],
   "properties": {
     "version": { "type": "integer", "minimum": 1, "default": 1 },
-    "rev": { "type": "integer", "minimum": 0, "description": "乐观锁。写入前读取，写入后 rev+1；不符则放弃写入并记错误，不重试不合并。" },
+    "rev": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "乐观锁。写入前读取，写入后 rev+1；不符则放弃写入。策略按命令区分：plan / due 不重试（due 静默、退出 0），ack 允许有界重读重试最多 3 次（幂等：目标已是 acked 视为成功）。见 docs/behavior-contract.md §4"
+    },
     "timezone": { "type": "string" },
     "planDate": { "type": "string", "format": "date", "description": "本账本属于哪一天。不等于今天时由日切或首次唤醒补建。" },
     "planKind": { "enum": ["workday", "weekend", "holiday"] },
