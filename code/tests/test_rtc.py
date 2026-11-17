@@ -621,7 +621,11 @@ class TestChecklist(RtcCase):
         self.assertEqual(out, "", "check 的 stdout 必须为空——它由用户交互触发，不该被投递")
         rc, _, _ = self.cli("check", "--window", "pack", "--item", "2", now="2026-05-12T20:06:00+08:00")
         self.assertEqual(rc, 0)
-        self.assertEqual(self.state()["windows"][0]["checked"], ["1", "2"])
+        self.assertEqual(
+            self.state()["windows"][0]["checked"],
+            sorted([rtc._item_id("电饭煲"), rtc._item_id("电脑")]),
+            "勾选存稳定 id，不存序号",
+        )
 
     def test_checked_survives_next_day(self):
         self.cli("plan", now="2026-05-12T06:00:00+08:00")
@@ -629,7 +633,7 @@ class TestChecklist(RtcCase):
         self.cli("check", "--window", "pack", "--item", "电饭煲", now="2026-05-12T20:05:00+08:00")
         self.cli("plan", now="2026-05-13T06:00:00+08:00")
         w = self.state()["windows"][0]
-        self.assertEqual(w["checked"], ["1"], "清单不因日切重置")
+        self.assertEqual(w["checked"], [rtc._item_id("电饭煲")], "清单不因日切重置")
         rc, out, _ = self.cli("due", now="2026-05-13T20:00:00+08:00")
         self.assertIn("还剩 3 项", out)
         self.assertIn("☑ 电饭煲", out, "已勾的项要显示 ☑")
@@ -3058,6 +3062,78 @@ class TestHistoryDB(RtcCase):
         rc, out, _ = self.cli("history", "2026-11-16")
         self.assertEqual(rc, 0, out)
         self.assertIn("已确认", out)
+
+
+class TestStableIds(RtcCase):
+    """#12 Phase 2：清单项有跨日不变的稳定 id，序号只用于显示。"""
+
+    def pack_routine(self, items) -> dict:
+        r = base_routine()
+        r["id"] = "main"
+        r["alarmWindows"] = [
+            {
+                "id": "pack",
+                "label": "清点并带走",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "checklist": items,
+            }
+        ]
+        return r
+
+    def ids(self) -> list[str]:
+        return [it["id"] for it in self.state()["windows"][0]["checklist"]]
+
+    def test_items_get_stable_ids(self):
+        self.write_routine(self.pack_routine(["电饭煲", "电脑"]))
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        day1 = self.ids()
+        self.assertEqual(day1, [rtc._item_id("电饭煲"), rtc._item_id("电脑")])
+        self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(self.ids(), day1, "同一份清单第二天必须还是同一批 id")
+
+    def test_explicit_id_survives_relabel(self):
+        self.write_routine(self.pack_routine([{"id": "rice-cooker", "label": "电饭煲"}]))
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(self.ids(), ["rice-cooker"])
+        self.write_routine(self.pack_routine([{"id": "rice-cooker", "label": "电饭锅（新的）"}]))
+        self.cli("plan", "--force", now="2026-11-17T06:05:00+08:00")
+        self.assertEqual(self.ids(), ["rice-cooker"], "改了文案，id 不能变")
+
+    def test_check_by_index_maps_to_stable_id(self):
+        self.write_routine(self.pack_routine(["电饭煲", "电脑", "被子枕头"]))
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, _, err = self.cli("check", "--window", "pack", "--item", "2", now="2026-11-17T20:05:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.state()["windows"][0]["checked"], [rtc._item_id("电脑")])
+
+    def test_removed_item_is_orphaned_not_silently_dropped(self):
+        self.write_routine(self.pack_routine(["电饭煲", "电脑"]))
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("check", "--window", "pack", "--item", "电饭煲", now="2026-11-17T20:05:00+08:00")
+        self.write_routine(self.pack_routine(["电脑"]))
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.state()["windows"][0]["checked"], [])
+        con = sqlite3.connect(self.ws / "state" / "history.db")
+        try:
+            rows = con.execute("SELECT kind, item_id FROM events WHERE kind='orphaned'").fetchall()
+        finally:
+            con.close()
+        self.assertEqual(rows, [("orphaned", rtc._item_id("电饭煲"))])
+
+    def test_routine_id_is_recorded(self):
+        self.write_routine(self.pack_routine(["电饭煲"]))
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        con = sqlite3.connect(self.ws / "state" / "history.db")
+        try:
+            rows = con.execute("SELECT DISTINCT routine_id FROM windows").fetchall()
+        finally:
+            con.close()
+        self.assertEqual(rows, [("main",)])
 
 
 class TestHandEditedRoutine(RtcCase):

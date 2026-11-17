@@ -7,6 +7,11 @@
   "additionalProperties": false,
   "required": ["version", "timezone", "dateTypes", "alarmWindows", "rollcalls", "phases"],
   "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "这份时刻表的稳定身份。执行历史按它归档（history.db 的 routine_id）；省略时按 default 处理，建议填上——换文件、改名都不影响历史对齐"
+    },
     "version": { "type": "integer", "minimum": 1, "default": 1 },
     "timezone": {
       "type": "string",
@@ -115,8 +120,25 @@
         },
         "checklist": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "该窗口要逐项打勾的清单。给了就按清单提醒：文案带进度，未完成项逐条列出；每项的 id 按序号自动生成（1、2、3…）"
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["label"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]*$",
+                    "description": "稳定身份：改标签、调整顺序都不影响已勾记录。省略时按标签内容哈希生成"
+                  },
+                  "label": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          },
+          "description": "该窗口要逐项打勾的清单。写字符串也行（等价于只要 label），但推荐写成 {id, label}：id 是跨日对齐用的稳定身份，改文案不会让「已经打过勾的那一项」重新变成没打"
         },
         "skipDates": {
           "type": "array",
