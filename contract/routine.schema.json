@@ -152,7 +152,11 @@
         "dueDate": {
           "type": "string",
           "format": "date",
-          "description": "截止日。给了就按倒计时提醒：文案自动带「距截止还有 N 天」，每天只提醒一次（expectFires 固定为 1），并从 validFrom 起每天重新提醒直到 dueDate 当天。剩余天数由代码算，不由模型判断"
+          "description": "截止日。给了就按倒计时提醒：文案自动带「距截止还有 N 天」，每天只提醒一次（expectFires 固定为 1），并从 validFrom 起每天重新提醒直到 dueDate 当天；次日（dueDate+1）再响一次复盘，之后永停。剩余天数由代码算，不由模型判断"
+        },
+        "canceled": {
+          "type": "boolean",
+          "description": "该倒计时已被取消。取消=整段停（含复盘日），代码写入；手工改它等于伪造取消，别这么干"
         },
         "format": {
           "enum": ["follow", "summary"],

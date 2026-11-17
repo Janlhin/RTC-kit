@@ -497,6 +497,8 @@ def schedule_snapshot(
             {
                 "id": w["id"],
                 "label": w["label"],
+                "type": w.get("type"),
+                "review": bool(w.get("review")),
                 "start": w["start"],
                 "end": w["end"],
                 "intervalMin": w["intervalMin"],
@@ -605,6 +607,32 @@ def day_disabled(routine: dict, kind: str) -> bool:
     )
 
 
+def window_type(defn: dict) -> str:
+    """四类日程的身份：预约 = 一次性 + 倒计时；倒计时不是独立类型，是 fixed 的一种活法。
+
+    `cancelled` 不是第四种类型，是覆盖在任意类型之上的粘性状态（见 issue #9 §10.2）。
+    """
+    if defn.get("oneOff"):
+        return "appointment" if defn.get("dueDate") else "oneoff"
+    return "fixed"
+
+
+def countdown_review_day(defn: dict) -> str | None:
+    """倒计时（fixed + dueDate）的复盘日 = 截止日次日。
+
+    截止日之后再无提醒（复盘日只响一次，响完永停）。显式给了 `validUntil` 且
+    正好等于截止日的老配置保持旧行为——它们本来就不该多活一天。
+    """
+    due = defn.get("dueDate")
+    if not due or defn.get("oneOff") or defn.get("canceled"):
+        return None
+    review = (date.fromisoformat(due) + timedelta(days=1)).isoformat()
+    vu = defn.get("validUntil")
+    if vu and vu < review:
+        return None
+    return review
+
+
 def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool = True) -> list[dict]:
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
@@ -612,6 +640,18 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
     # 永久停用的窗口：任何日期都不生成（「以后别提醒我了」/「这件事完成了」）
     enabled = [w for w in routine["alarmWindows"] if not w.get("disabled")]
     ranged = [w for w in enabled if in_valid_range(w, day_iso)]
+    # 倒计时活到「截止日 + 1（复盘日）」为止：再往后就是已经收尾的过去，永不重生
+    ranged = [
+        w
+        for w in ranged
+        if not (
+            w.get("dueDate")
+            and not w.get("oneOff")
+            and str(w["dueDate"]) < day_iso
+            and countdown_review_day(w) != day_iso
+        )
+    ]
+
     # 显式跳过的日期（推迟产生的）——这一天不响
     skipped = [w for w in ranged if day_iso in (w.get("skipDates") or [])]
     dated = [w for w in ranged if day_iso not in (w.get("skipDates") or [])]
@@ -627,8 +667,13 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
         one_off = bool(w.get("oneOff"))
         due = w.get("dueDate")
         items_def = w.get("checklist") or []
-        if due or items_def:
-            # 倒计时 / 清单窗口：每天只提醒一次。
+        review_day = countdown_review_day(w)
+        is_review = bool(review_day) and day_iso == review_day
+        label = w.get("label", w["id"])
+        if is_review:
+            label = f"{label}（复盘）"
+        if due or items_def or is_review:
+            # 倒计时 / 清单 / 复盘：每天只提醒一次。
             # 倒计时的剩余天数由代码算；清单要逐项打勾，都不该每 5 分钟响。
             exp = 1
         elif one_off:
@@ -642,7 +687,9 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
         out.append(
             {
                 "id": w["id"],
-                "label": w.get("label", w["id"]),
+                "label": label,
+                "type": window_type(w),
+                "review": is_review,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "intervalMin": int(w["intervalMin"]),
@@ -656,7 +703,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
                 "missedReason": "late_plan" if expired else None,
                 "ackHint": (w.get("ackHints") or ["知道了"])[0],
                 "format": w.get("format"),
-                "oneOff": one_off,
+                "oneOff": one_off or is_review,
                 "dueDate": due,
                 "disabled": False,
                 "cancelledAt": None,
@@ -1429,6 +1476,8 @@ def cmd_due(args) -> int:
                 print(f"回复「{hit['ackHint']}」就不响了。")
             return 0
     head = f"{hit['label']} —— {now.strftime('%H:%M')}"
+    if hit.get("review"):
+        head += "（复盘：昨天已结束）"
     if hit.get("dueDate"):
         days = (date.fromisoformat(hit["dueDate"]) - now.date()).days
         if days == 0:
@@ -2082,7 +2131,9 @@ def cmd_cancel(args) -> int:
         w["disabled"] = True
         truncated = True
     elif w.get("dueDate"):
+        # 倒计时：取消 = 整段停（含复盘日）——标记 canceled，次日不再生成复盘
         w["dueDate"] = today
+        w["canceled"] = True
         if w.get("validUntil") and w["validUntil"] > today:
             w["validUntil"] = today
         truncated = True

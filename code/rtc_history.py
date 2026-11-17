@@ -72,6 +72,7 @@ def _tables(con: sqlite3.Connection) -> None:
              date TEXT NOT NULL,
              window_id TEXT NOT NULL,
              label TEXT NOT NULL,
+             type TEXT,
              expect INTEGER NOT NULL,
              fired INTEGER NOT NULL DEFAULT 0,
              acked_at TEXT,
@@ -79,6 +80,10 @@ def _tables(con: sqlite3.Connection) -> None:
              state TEXT NOT NULL,
              PRIMARY KEY (date, window_id))"""
     )
+    # 老库没有 type 列：补上，历史照样读（issue #9 §10 让类型显式化）
+    cols = {r[1] for r in con.execute("PRAGMA table_info(daily)").fetchall()}
+    if "type" not in cols:
+        con.execute("ALTER TABLE daily ADD COLUMN type TEXT")
     con.execute(
         """CREATE TABLE IF NOT EXISTS checklist (
              date TEXT NOT NULL,
@@ -151,15 +156,17 @@ def sync_state(state: dict, routine: dict | None = None) -> None:
                 ),
             )
             con.execute(
-                """INSERT INTO daily (date, window_id, label, expect, fired, acked_at, missed, state)
-                   VALUES (?,?,?,?,?,?,?,?)
+                """INSERT INTO daily (date, window_id, label, type, expect, fired, acked_at, missed, state)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(date, window_id) DO UPDATE SET
-                     label=excluded.label, expect=excluded.expect, fired=excluded.fired,
-                     acked_at=excluded.acked_at, missed=excluded.missed, state=excluded.state""",
+                     label=excluded.label, type=excluded.type, expect=excluded.expect,
+                     fired=excluded.fired, acked_at=excluded.acked_at, missed=excluded.missed,
+                     state=excluded.state""",
                 (
                     day,
                     w["id"],
                     w.get("label") or w["id"],
+                    w.get("type"),
                     int(w.get("expectFires") or 0),
                     int(w.get("fireCount") or 0),
                     w.get("ackedAt"),
