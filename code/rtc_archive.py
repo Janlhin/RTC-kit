@@ -6,13 +6,14 @@ git 仓库并推送（GitHub / Gitee / 自建都行）。被 core 的 plan / mai
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ BACKUP_ROUTINE_PATTERNS = (
     "routines.handedit-*.json",
     "routines.corrupt-*.json",
 )
+# tasks.md 的底稿：同样只认程序写的（tasks.<时间戳>.md）
+TASKS_BACKUP_PATTERN = "tasks.*.md"
 
 
 def backup_config() -> tuple[list[Path], int]:
@@ -74,6 +77,45 @@ def backup_config() -> tuple[list[Path], int]:
     return targets, keep
 
 
+def snapshot_tasks(keep: int | None = None) -> Path | None:
+    """给 tasks.md 留一份底稿；内容没变就什么都不做。
+
+    tasks.md 是唯一没有程序守护的活文件：routines 有印章和底稿、alarms 有 rev
+    校验和原子写、schedule 有每日快照，只有它靠编辑器直接改。写坏了就是真丢。
+    """
+    src = core.WORKSPACE / "tasks.md"
+    if not src.is_file():
+        return None
+    content = src.read_bytes()
+    backups = core.WORKSPACE / "state" / "backups"
+    existing = sorted(backups.glob("tasks.*.md"))
+    if existing and existing[-1].read_bytes() == content:
+        return None
+    backups.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
+    path = backups / f"tasks.{stamp}.md"
+    n = 2
+    while path.exists():  # 同一秒里改两次：加序号，别覆盖上一份
+        path = backups / f"tasks.{stamp}-{n}.md"
+        n += 1
+    path.write_bytes(content)
+    if keep is None:
+        _, keep = backup_config()
+    for old in sorted(backups.glob("tasks.*.md"))[:-keep] if keep > 0 else []:
+        with contextlib.suppress(OSError):
+            old.unlink()
+    return path
+
+
+def cmd_touch_tasks(args) -> int:
+    path = snapshot_tasks()
+    if path is None:
+        print("tasks: 没有 tasks.md，或内容和上一份底稿一样——不留新底稿")
+        return 0
+    print(f"tasks: 已留底稿 state/backups/{path.name}")
+    return 0
+
+
 def archive_members() -> list[tuple[Path, str]]:
     """归档要带哪些文件。
 
@@ -93,7 +135,7 @@ def archive_members() -> list[tuple[Path, str]]:
     backups = core.WORKSPACE / "state" / "backups"
     if backups.is_dir():
         seen: set[Path] = set()
-        for pat in BACKUP_ROUTINE_PATTERNS:
+        for pat in BACKUP_ROUTINE_PATTERNS + (TASKS_BACKUP_PATTERN,):
             for f in sorted(backups.glob(pat)):
                 if f in seen:
                     continue
