@@ -672,6 +672,22 @@ class TestChecklist(RtcCase):
         self.assertEqual(rc, 0)
         self.assertEqual(self.state()["windows"][0]["checked"], [])
 
+    def test_undo_after_all_checked_restores_reminder(self):
+        """撤销打勾不能留下「窗口已确认、清单没勾完」的矛盾状态（审计 #8）。"""
+        self.cli("plan", now="2026-05-12T06:00:00+08:00")
+        for i in range(1, 5):
+            self.cli("check", "--window", "pack", "--item", str(i), now="2026-05-12T20:05:00+08:00")
+        self.assertEqual(self.state()["windows"][0]["state"], "acked")
+        rc, _, _ = self.cli(
+            "check", "--window", "pack", "--item", "4", "--undo", now="2026-05-12T20:06:00+08:00"
+        )
+        self.assertEqual(rc, 0)
+        w = self.state()["windows"][0]
+        self.assertEqual(w["state"], "pending", "撤销后窗口要退回未完成")
+        self.assertIsNone(w["ackedAt"])
+        rc, out, _ = self.cli("due", now="2026-05-12T20:10:00+08:00")
+        self.assertIn("还剩 1 项", out, "没勾完的项应当继续提醒")
+
 
 class TestPostpone(RtcCase):
     """推迟：今天不响，明天同一时间自动重新创建并提醒"""
@@ -3223,6 +3239,62 @@ class TestScheduleTypes(RtcCase):
         self.assertEqual(rc, 0, err)
         self.cli("plan", now="2026-01-16T06:00:00+08:00")
         self.assertEqual(self.state().get("windows"), [], "取消了就整段停，复盘日也不响")
+
+
+class TestOneOffNoRegen(RtcCase):
+    """#12 Phase 4：一次性只活在指定那一天，跨天不重生（I1 / I3）。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "thermos",
+                "label": "洗保温杯",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-17",
+                "validUntil": "2026-11-17",
+            }
+        ]
+        self.write_routine(r)
+
+    def test_fires_on_its_day(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-17T20:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("洗保温杯", out)
+
+    def test_unacked_does_not_regenerate_next_day(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T20:00:00+08:00")  # 响了，但没确认
+        self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [], "没确认也不许次日重生")
+        rc, out, _ = self.cli("due", now="2026-11-18T20:00:00+08:00")
+        self.assertEqual(out, "")
+        routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        self.assertNotIn("thermos", [w["id"] for w in routine["alarmWindows"]], "过期的一次性条目要清理掉")
+
+    def test_acked_also_gone_next_day(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T20:00:00+08:00")
+        self.cli("ack", "--window", "thermos", "--text", "好了", now="2026-11-17T20:05:00+08:00")
+        self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [])
+
+    def test_history_keeps_the_record(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T20:00:00+08:00")
+        self.cli("ack", "--window", "thermos", "--text", "好了", now="2026-11-17T20:05:00+08:00")
+        rc, out, _ = self.cli("history", "--range", "2026-11-17..2026-11-17")
+        self.assertEqual(rc, 0, "响过的事要查得到，不随窗口清理消失")
+        self.assertIn("2026-11-17 1 项", out)
+        _, js, _ = self.cli("history", "--range", "2026-11-17..2026-11-17", "--json")
+        self.assertIn("洗保温杯", js)
 
 
 class TestHandEditedRoutine(RtcCase):
