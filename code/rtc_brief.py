@@ -272,6 +272,7 @@ def cmd_status(args) -> int:
         )
     timetable = _timetable_summary(routine)
     backup = _backup_status()
+    paused = core.load_pause()
     if args.json:
         print(
             json.dumps(
@@ -280,6 +281,7 @@ def cmd_status(args) -> int:
                     "rev": state["rev"],
                     "timetable": timetable,
                     "backup": backup,
+                    "paused": paused,
                     "windows": rows,
                 },
                 ensure_ascii=False,
@@ -288,6 +290,8 @@ def cmd_status(args) -> int:
         )
         return 0
     print(f"{state['planDate']}  {state['planKind']}  rev={state['rev']}")
+    if paused:
+        print(f"  ⏸ 已暂停至 {paused['until']}（期间不会响；恢复用 resume）")
     if timetable["recurring"] == 0:
         print(
             f"  ⚠ 时刻表里没有日常窗口（一次性 {timetable['oneOff']} 条）——"

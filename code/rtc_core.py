@@ -759,7 +759,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
     return [h for k, h in sorted(dedup.items()) if h.get("date", "") >= cutoff]
 
 
-def simulate_day(routine: dict, d: date) -> dict:
+def simulate_day(routine: dict, d: date, paused: dict | None = None) -> dict:
     """预演某一天会怎样：只读，绝不落盘。
 
     判定全部复用 plan 的那一套（有效期 / skipDates / disabled / dateTypes / 算术校验），
@@ -773,7 +773,10 @@ def simulate_day(routine: dict, d: date) -> dict:
     windows: list[dict] = []
     skipped: list[dict] = []
     day_off = day_disabled(routine, kind)
-    if day_off:
+    if pause_covers(paused, d):
+        until = (paused or {}).get("until", "?")
+        skipped.append({"id": "<paused>", "reason": f"这段时间已暂停（到 {until}）"})
+    elif day_off:
         skipped.append({"id": f"<{kind}>", "reason": f"{kind} 在契约里被禁用（整天空日）"})
     else:
         for w in build_windows(routine, d, kind, day_start):
@@ -846,7 +849,7 @@ def cmd_simulate(args) -> int:
     else:
         d = now.date() + timedelta(days=1)
     try:
-        data = simulate_day(routine, d)
+        data = simulate_day(routine, d, load_pause())
     except Validation as e:
         print(f"simulate: {e}", file=sys.stderr)
         return 3
@@ -855,6 +858,106 @@ def cmd_simulate(args) -> int:
         return 0
     for line in render_simulate(data):
         print(line)
+    return 0
+
+
+def pause_path() -> Path:
+    """暂停标记放在独立文件，不碰 routines.json。
+
+    时刻表是用户作息（有印章、有审计），临时静音是另一回事；混在一起，
+    印章会把「暂停」当成「有人手改了时刻表」。
+    """
+    return WORKSPACE / "state" / "paused.json"
+
+
+def load_pause() -> dict | None:
+    """读暂停标记。坏文件当作没暂停——宁可按原样响，不能因为标记坏了集体静默。"""
+    p = pause_path()
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        date.fromisoformat(data["until"])
+        return data
+    except (OSError, ValueError, TypeError, KeyError) as e:
+        print(f"pause: 暂停标记看不懂（{type(e).__name__}: {e}），当作没暂停", file=sys.stderr)
+        return None
+
+
+def _pause_range(p: dict) -> tuple[date, date]:
+    until = date.fromisoformat(p["until"])
+    start = date.fromisoformat(p.get("from") or p["until"])
+    return start, until
+
+
+def pause_covers(p: dict | None, d: date) -> bool:
+    """这一天是否落在暂停期（左闭右开：until 那天已经恢复）。"""
+    if not p:
+        return False
+    try:
+        f, t = _pause_range(p)
+    except (ValueError, TypeError):
+        return False
+    return f <= d < t
+
+
+def pause_summary(p: dict) -> str:
+    """恢复时说清「停了几天、跳过多少条」，数字从每日快照里数。"""
+    f, t = _pause_range(p)
+    days = (t - f).days
+    skipped = 0
+    d = f
+    while d < t:
+        path = SCHEDULE_DIR / f"{d.isoformat()}.json"
+        try:
+            snap = json.loads(path.read_text(encoding="utf-8"))
+            skipped += len(snap.get("windows") or [])
+        except (OSError, ValueError):
+            pass
+        d += timedelta(days=1)
+    return f"{f:%m-%d} ~ {t - timedelta(days=1):%m-%d} 暂停了 {days} 天，跳过 {skipped} 次提醒"
+
+
+def cmd_pause(args) -> int:
+    tz = tz_of(load_routine()["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(load_routine()["tzOffset"])
+    until = None
+    if args.until:
+        try:
+            until = date.fromisoformat(args.until)
+        except ValueError:
+            print(f"pause: 日期看不懂：{args.until}（要 YYYY-MM-DD）", file=sys.stderr)
+            return 3
+    elif args.days:
+        if args.days < 1:
+            print("pause: --days 至少 1 天", file=sys.stderr)
+            return 3
+        until = now.date() + timedelta(days=args.days)
+    if until is None:
+        print("pause: 要说停到哪天：--days N 或 --until YYYY-MM-DD", file=sys.stderr)
+        return 3
+    if until <= now.date():
+        print(f"pause: {until} 已经过去了（今天 {now.date()}）", file=sys.stderr)
+        return 3
+    data = {"from": now.date().isoformat(), "until": until.isoformat(), "since": now.isoformat()}
+    if args.reason:
+        data["reason"] = args.reason
+    pause_path().parent.mkdir(parents=True, exist_ok=True)
+    pause_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"pause: 已暂停到 {until.isoformat()}（{(until - now.date()).days} 天），期间不会响")
+    # 今天已经排好的窗口要立刻收掉，否则暂停之后当天还会响
+    cmd_plan(argparse.Namespace(now=now.isoformat(), force=True))
+    return 0
+
+
+def cmd_resume(args) -> int:
+    p = load_pause()
+    if not p:
+        print("resume: 本来就没暂停")
+        return 0
+    print(pause_summary(p))
+    pause_path().unlink(missing_ok=True)
+    print("resume: 已恢复，下一条 plan 会把窗口排回来")
     return 0
 
 
@@ -869,6 +972,17 @@ def cmd_plan(args) -> int:
     if old and old.get("planDate") == today and not args.force:
         print(f"plan: {today} 已存在，跳过（rev={old.get('rev')}）", file=sys.stderr)
         return 0
+
+    # 暂停到期（或当天已过 until）就自动恢复，并把「停了多少」补报一次
+    paused = load_pause()
+    if paused:
+        try:
+            if now.date() >= date.fromisoformat(paused["until"]):
+                print(pause_summary(paused))
+                pause_path().unlink(missing_ok=True)
+                paused = None
+        except (ValueError, TypeError):
+            paused = None
 
     kind = plan_kind(now.date(), routine)
     # 契约里显式禁用的日期类型 → 合法空日：静默，但照常落盘 state
@@ -885,9 +999,16 @@ def cmd_plan(args) -> int:
     history = (
         rollover(old, today) if not (old and old.get("planDate") == today) else list(old.get("history", []))
     )
-    total = sum(w["expectFires"] for w in windows)
     if len(windows) != len(fresh):
         raise Validation(f"窗口数 {len(windows)} 与时刻表 {len(fresh)} 不符")
+
+    # 暂停期：今天该响的都算出来（快照里留底，恢复时好数），但状态里一条也不排，
+    # 于是 due 自然静默——不写 routines.json、不删窗口、不碰印章。
+    paused_today = pause_covers(paused, now.date())
+    planned = windows
+    if paused_today:
+        windows = []
+    total = sum(w["expectFires"] for w in windows)
 
     state = {
         "version": 1,
@@ -902,7 +1023,8 @@ def cmd_plan(args) -> int:
     }
     atomic_write(STATE, state, expected_rev=int((old or {}).get("rev", 0)) if old else None)
     print(
-        f"plan: {today} {kind} {len(windows)} 窗口 / {total} 次，rev={state['rev']}",
+        f"plan: {today} {kind} {len(windows)} 窗口 / {total} 次，rev={state['rev']}"
+        + ("（已暂停）" if paused_today else ""),
         file=sys.stderr,
     )
 
@@ -932,8 +1054,11 @@ def cmd_plan(args) -> int:
         print(f"plan: 清理过期一次性提醒失败（{e}），不影响本次计划", file=sys.stderr)
 
     # 每日快照：主链路写，写一次留永久。失败不阻断提醒，但必须留下诊断。
+    # 暂停日写的是「本来会响的那些窗口」+ paused 标记——恢复时的「跳过 N 次」靠它数。
     try:
-        snap = schedule_snapshot(routine, kind, windows, today, now.isoformat())
+        snap = schedule_snapshot(routine, kind, planned, today, now.isoformat())
+        if paused_today:
+            snap["paused"] = True
         write_schedule_snapshot(snap)
     except OSError as e:
         print(f"schedule: 快照写入失败 {e}", file=sys.stderr)
@@ -1857,6 +1982,17 @@ def main(argv=None) -> int:
     ssim.add_argument("--json", action="store_true")
     ssim.add_argument("--now")
     ssim.set_defaults(func=cmd_simulate)
+
+    spa = sub.add_parser("pause", help="临时全静音（不改时刻表）")
+    spa.add_argument("--days", type=int, help="停几天")
+    spa.add_argument("--until", help="停到哪天（YYYY-MM-DD，不含当天）")
+    spa.add_argument("--reason", help="为什么停（可写「出差」这种词）")
+    spa.add_argument("--now")
+    spa.set_defaults(func=cmd_pause)
+
+    srs = sub.add_parser("resume", help="结束暂停，窗口立刻回来")
+    srs.add_argument("--now")
+    srs.set_defaults(func=cmd_resume)
 
     sa = sub.add_parser("ack")
     sa.add_argument("--window")

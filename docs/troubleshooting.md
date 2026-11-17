@@ -399,3 +399,28 @@ git clone <仓库地址> C:\Temp\rtc-restore
 > 隐私提醒：这个仓库里会有你的作息、提醒文案、确认原文（`alarms.json` 的 `ackText`）。
 > **务必用私有库**；公开库等于把这些发到互联网上。
 
+---
+
+## 9. 出差 / 生病 / 开会：整段静音
+
+逐条 `disable` 再逐条 `enable` 是最容易忘的方式。要停一片日子，用 `pause`：
+
+```bash
+python code/rtc.py --workspace <工作区> pause --days 3
+python code/rtc.py --workspace <工作区> pause --until 2026-11-20 --reason 出差
+python code/rtc.py --workspace <工作区> resume
+python code/rtc.py --workspace <工作区> status
+```
+
+| 行为 | 说明 |
+|---|---|
+| 停在哪 | `state/paused.json`（**不写 `routines.json`**，所以印章和审计不会把暂停当成手改时刻表） |
+| 暂停期间 | 当天窗口直接收掉，`due` 什么都不发；`plan` 每天照跑、照写快照 |
+| 到期 | `until` 那天自动恢复，不需要手动 `resume` |
+| 恢复时 | 补一句「11-17 ~ 11-19 暂停了 3 天，跳过 7 次提醒」，数字从每日快照里数 |
+| 标记坏了 | 当作没暂停，stderr 提示一句，照常响——宁可多响，不因坏文件集体静默 |
+| 想先看一眼 | `simulate --date 2026-11-18` 会显示 0 次，并在「跳过」里写「这段时间已暂停」 |
+
+**注意**：`pause` 只影响提醒，不影响 `tasks.md` 和档案备份。
+
+

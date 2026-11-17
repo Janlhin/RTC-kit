@@ -2551,6 +2551,88 @@ class TestWeeklyReport(RtcCase):
         self.assertNotIn("Traceback", out + err)
 
 
+class TestPause(RtcCase):
+    """休假模式：一句话停、一句话恢复，恢复时说清「跳过多少」。"""
+
+    def test_pause_empties_today_and_stays_quiet(self):
+        self.write_routine(base_routine())
+        # 先让心跳存在，否则 plan 会额外打一条「调度器可能没跑过」的提醒，
+        # 那行是真心跳告警，不是暂停造成的噪音
+        (self.ws / "state" / "heartbeat.json").write_text(
+            json.dumps({"at": "2026-11-17T08:55:00+08:00"}), encoding="utf-8"
+        )
+        rc, out, err = self.cli("pause", "--days", "3", now="2026-11-17T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.state()["windows"], [], "暂停当天就必须收掉窗口")
+        rc, out, err = self.cli("plan", "--force", now="2026-11-17T09:00:00+08:00")
+        self.assertEqual(rc, 0, "暂停期 plan 不能因为「没有窗口」报错")
+        self.assertEqual(out.strip(), "", "暂停期 plan 一个字都不该输出")
+        self.assertEqual(self.state()["windows"], [])
+
+    def test_due_silent_while_paused(self):
+        self.write_routine(base_routine())
+        self.cli("pause", "--days", "3", now="2026-11-17T08:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-18T07:05:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.strip(), "", out)
+
+    def test_auto_resume_on_until_day(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("pause", "--days", "2", now="2026-11-17T08:00:00+08:00")
+        rc, out, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.state()["windows"]), 1, "until 当天应自动恢复")
+        self.assertIn("暂停了 2 天", out, out)
+        self.assertFalse((self.ws / "state" / "paused.json").exists())
+
+    def test_resume_restores_windows_and_reports(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("pause", "--days", "2", now="2026-11-17T08:00:00+08:00")
+        rc, out, err = self.cli("resume", now="2026-11-18T20:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("暂停了 2 天", out, out)
+        self.assertIn("跳过 1 次提醒", out, out)
+        self.assertFalse((self.ws / "state" / "paused.json").exists())
+        rc, out, err = self.cli("plan", "--force", now="2026-11-18T21:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.state()["windows"]), 1)
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("已暂停", out)
+
+    def test_seal_untouched(self):
+        """暂停是临时静音，不是手改时刻表——印章摘要必须不变。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        seal = self.ws / "state" / "routine-seal.json"
+        before = seal.read_text(encoding="utf-8")
+        self.cli("pause", "--days", "2", now="2026-11-17T08:00:00+08:00")
+        self.cli("resume", now="2026-11-17T09:00:00+08:00")
+        self.assertEqual(before, seal.read_text(encoding="utf-8"), "暂停动了印章")
+
+    def test_corrupt_marker_treated_as_no_pause(self):
+        self.write_routine(base_routine())
+        (self.ws / "state" / "paused.json").write_text("{ 不是 json", encoding="utf-8")
+        rc, out, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.state()["windows"]), 1, "标记坏了也要照常响")
+        self.assertIn("当作没暂停", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_status_reports_pause(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("pause", "--days", "3", now="2026-11-17T08:00:00+08:00")
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("已暂停至 2026-11-20", out)
+        rc, out, err = self.cli("status", "--json")
+        data = json.loads(out)
+        self.assertEqual(data["paused"]["until"], "2026-11-20")
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 
