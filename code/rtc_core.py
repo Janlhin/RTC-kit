@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time as _time
@@ -978,6 +979,14 @@ def cmd_plan(args) -> int:
     res = brief.sync_brief_block(routine, state, now)
     if res.startswith(("read-failed", "write-failed")):
         print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
+
+    # 周一早上那一页小账：用 metrics 现成数据回答「上周靠谱吗」。
+    # 只挂在 plan 上——宿主定时任务条数必须恒定，不许为它多开一条 cron。
+    try:
+        for line in metrics.weekly_report(now) or []:
+            print(line)
+    except (OSError, ValueError, TypeError, sqlite3.Error) as e:
+        print(f"weekly: 周报生成失败 {type(e).__name__}: {e}", file=sys.stderr)
     return 0
 
 

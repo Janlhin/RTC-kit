@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import rtc_core as core
@@ -147,6 +148,103 @@ def metrics_dump() -> Path | None:
     finally:
         con.close()
     return out
+
+
+def _last_week(today) -> tuple:
+    """上周一 ~ 上周日。周一才算「上周」结束，所以以本周一往前推。"""
+    monday = today - timedelta(days=today.weekday())
+    return monday - timedelta(days=7), monday - timedelta(days=1)
+
+
+def _week_key(d) -> str:
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def weekly_report(now) -> list[str] | None:
+    """周一早上的一页小账：上周靠谱吗。
+
+    只在周一输出；发过就记在 state/.weekly-last.json（ISO 周号），一天多条不重复。
+    数据全来自 metrics.db；库不在、数据太少都只回一句解释，绝不编百分比。
+    """
+    if now.weekday() != 0:
+        return None
+    key = _week_key(now.date())
+    mark = core.WORKSPACE / "state" / ".weekly-last.json"
+    if mark.exists():
+        try:
+            if json.loads(mark.read_text(encoding="utf-8")).get("week") == key:
+                return None
+        except (OSError, ValueError):
+            pass
+
+    start, end = _last_week(now.date())
+    title = f"📊 上周（{start:%m-%d} ~ {end:%m-%d}）"
+    if not core.DB.exists():
+        lines = [title, "还没有 statistics 数据（metrics.db 没生成），这周先照常跑"]
+    else:
+        con = sqlite3.connect(core.DB)
+        try:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """SELECT date, window, label, expect, fired, acked_at, missed
+                   FROM daily WHERE date BETWEEN ? AND ?""",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+            prev = con.execute(
+                """SELECT COUNT(*) rows, SUM(CASE WHEN acked_at IS NOT NULL THEN 1 ELSE 0 END) acked
+                   FROM daily WHERE date BETWEEN ? AND ?""",
+                ((start - timedelta(days=7)).isoformat(), (start - timedelta(days=1)).isoformat()),
+            ).fetchone()
+            span = con.execute(
+                """SELECT MIN(start), MAX(start) FROM schedule WHERE date BETWEEN ? AND ?""",
+                (start.isoformat(), end.isoformat()),
+            ).fetchone()
+        finally:
+            con.close()
+        if len(rows) < 3:
+            lines = [title, f"上周记录太少（{len(rows)} 个窗口），先看这周"]
+        else:
+            # 「提醒 N 次」数的是提醒条目，不是每个窗口里 5 分钟一次的重复响铃——
+            # 用户脑子里的一周是「该提醒我 42 次」，不是「喇叭响了 294 遍」。
+            slots = len(rows)
+            acked = sum(1 for r in rows if r["acked_at"])
+            missed = sum(1 for r in rows if r["missed"])
+            rate = f"{acked / slots * 100:.0f}%"
+            lines = [title, f"提醒 {slots} 次 · 确认 {acked} 次（{rate}）· 漏响 {missed} 次"]
+            worst: dict[str, int] = {}
+            for r in rows:
+                if r["missed"]:
+                    worst[r["label"]] = worst.get(r["label"], 0) + 1
+            if worst:
+                top, n = max(worst.items(), key=lambda kv: kv[1])
+                lines.append(f"最常漏：{top} {n} 次")
+            if span and span["MIN(start)"]:
+                lines.append(f"最早 {span['MIN(start)'][11:16]} · 最晚 {span['MAX(start)'][11:16]}")
+            if prev and prev["rows"] and prev["acked"] is not None:
+                old = prev["acked"] / prev["rows"] * 100
+                lines.append(f"比上上周：确认率 {old:.0f}% → {rate}")
+            paused = _paused_days(start, end)
+            if paused:
+                lines.append(f"上周暂停 {paused} 天")
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text(json.dumps({"week": key, "at": now.isoformat()}, ensure_ascii=False), encoding="utf-8")
+    return lines
+
+
+def _paused_days(start, end) -> int:
+    """上周被 pause 盖住的天数。读不到就当没暂停——宁可少说一句，不编。"""
+    path = core.WORKSPACE / "state" / "paused.json"
+    try:
+        p = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    try:
+        f, t = date.fromisoformat(p["from"]), date.fromisoformat(p["to"])
+    except (KeyError, ValueError, TypeError):
+        return 0
+    lo, hi = max(f, start), min(t, end)
+    return (hi - lo).days + 1 if lo <= hi else 0
 
 
 def cmd_metrics(args) -> int:

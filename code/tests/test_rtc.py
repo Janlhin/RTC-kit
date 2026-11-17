@@ -17,6 +17,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -247,7 +248,8 @@ class TestValidity(RtcCase):
             self.assertEqual(len(self.state()["windows"]), 1, d)
 
     def test_quiet_before_start(self):
-        rc, out, err = self.cli("plan", now="2026-11-09T06:00:00+08:00")
+        # 专门挑周日：周一是「周报日」，plan 会额外打一段周报，静默断言就测不到空日本身了
+        rc, out, err = self.cli("plan", now="2026-11-08T06:00:00+08:00")
         self.assertEqual(rc, 0, "有效期内没有窗口 = 合法空日，不该报配置错误")
         self.assertEqual(out, "")
         self.assertEqual(self.state().get("windows"), [])
@@ -2435,6 +2437,120 @@ class TestSimulate(RtcCase):
         self.assertFalse(state_dir.exists(), "simulate 建了 state 目录")
 
 
+class TestWeeklyReport(RtcCase):
+    """周报：周一早上用 metrics 现成数据回答「上周靠谱吗」。
+
+    这里直接往 metrics.db 里灌固定的一周数据——周报读的是库，不是现场状态，
+    所以用真实表结构造数据比连跑七天 plan 更接近它实际面对的输入。
+    """
+
+    def seed(self, days: list[str], per_day: list[str], acked_every: int = 0, missed_every: int = 0):
+        db = self.ws / "state" / "metrics.db"
+        con = sqlite3.connect(db)
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS daily (
+                 date TEXT NOT NULL, window TEXT NOT NULL, label TEXT,
+                 expect INTEGER NOT NULL, fired INTEGER NOT NULL,
+                 acked_at TEXT, missed TEXT, PRIMARY KEY (date, window))"""
+        )
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS schedule (
+                 date TEXT NOT NULL, window TEXT NOT NULL, label TEXT,
+                 start TEXT, end TEXT, expect INTEGER NOT NULL,
+                 one_off INTEGER NOT NULL DEFAULT 0,
+                 valid_from TEXT, valid_until TEXT, PRIMARY KEY (date, window))"""
+        )
+        n = 0
+        for day in days:
+            for wid, label in per_day:
+                acked = f"{day}T08:00:00+08:00" if acked_every and n % acked_every == 0 else None
+                missed = "user_ack_timeout" if missed_every and n % missed_every == 0 else None
+                con.execute(
+                    "INSERT INTO daily VALUES (?,?,?,?,?,?,?)",
+                    (day, wid, label, 6, 6, acked, missed),
+                )
+                con.execute(
+                    "INSERT INTO schedule (date, window, label, start, end, expect, one_off)"
+                    " VALUES (?,?,?,?,?,?,0)",
+                    (day, wid, label, f"{day}T07:00:00+08:00", f"{day}T07:25:00+08:00", 6),
+                )
+                n += 1
+        con.commit()
+        con.close()
+
+    def test_monday_plan_prints_weekly(self):
+        self.write_routine(base_routine())
+        labels = [
+            ("wake", "起床"),
+            ("meds-am", "吃药（早）"),
+            ("meds-pm", "吃药（晚）"),
+            ("brief-morning", "早报"),
+            ("brief-follow", "跟进"),
+            ("brief-night", "晚总结"),
+        ]
+        self.seed(
+            [f"2026-11-{d:02d}" for d in range(9, 16)],
+            labels,
+            acked_every=0,
+            missed_every=9,
+        )
+        # 再单独给 9 条确认，凑出 9/42 的确认率
+        db = self.ws / "state" / "metrics.db"
+        con = sqlite3.connect(db)
+        for i in range(9):
+            day = f"2026-11-{9 + i % 7:02d}"
+            wid = labels[i % 3][0]
+            con.execute(
+                "UPDATE daily SET acked_at=? WHERE date=? AND window=?",
+                (f"{day}T08:00:00+08:00", day, wid),
+            )
+        con.commit()
+        con.close()
+        rc, out, err = self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 上周（11-09 ~ 11-15）", out)
+        self.assertIn("提醒 42 次 · 确认 9 次（21%）· 漏响", out)
+        self.assertIn("最常漏：", out)
+
+    def test_only_monday(self):
+        self.write_routine(base_routine())
+        labels = [("wake", "起床")]
+        self.seed(["2026-11-09", "2026-11-10", "2026-11-11"], labels)
+        rc, out, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("📊", out)
+        self.assertNotIn("上周", out)
+
+    def test_weekly_once_a_week(self):
+        self.write_routine(base_routine())
+        labels = [("wake", "起床")]
+        self.seed([f"2026-11-{d:02d}" for d in range(9, 16)], labels)
+        rc, out, err = self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊", out)
+        rc, out2, err = self.cli("plan", now="2026-11-16T07:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("📊", out2, out2)
+
+    def test_too_few_records(self):
+        self.write_routine(base_routine())
+        self.seed(["2026-11-09", "2026-11-10"], [("wake", "起床")])
+        rc, out, err = self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("上周记录太少", out)
+        self.assertNotIn("确认率", out)
+        self.assertNotIn("0%", out)
+
+    def test_no_records_does_not_crash(self):
+        """新工作区：plan 会先建出空的 metrics.db，周报只能走「没数据」分支。"""
+        self.write_routine(base_routine())
+        rc, out, err = self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("上周记录太少", out)
+        self.assertIn("先看这周", out)
+        self.assertNotIn("Traceback", out + err)
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 
@@ -2606,7 +2722,7 @@ class TestBackup(RtcCase):
         扫盘会在别人机器上往不认识的盘写字，测试也会污染真实磁盘。"""
         self.write_routine(base_routine())
         self.assertFalse((self.ws / "rules" / "backup.json").exists())
-        rc, out, err = self.cli("plan", now="2026-11-16T08:00:00+08:00")
+        rc, out, err = self.cli("plan", now="2026-11-17T08:00:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertEqual(out.strip(), "", "没有备份配置时 plan 不该多说什么")
         self.assertFalse((self.ws / "state" / ".backup-last.json").exists(), "没配置就不该留下备份标记")
