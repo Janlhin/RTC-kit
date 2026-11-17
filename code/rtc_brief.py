@@ -239,16 +239,27 @@ def cmd_status(args) -> int:
                 "ackedAt": w.get("ackedAt"),
             }
         )
+    timetable = _timetable_summary(routine)
     if args.json:
         print(
             json.dumps(
-                {"planDate": state["planDate"], "rev": state["rev"], "windows": rows},
+                {
+                    "planDate": state["planDate"],
+                    "rev": state["rev"],
+                    "timetable": timetable,
+                    "windows": rows,
+                },
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return 0
     print(f"{state['planDate']}  {state['planKind']}  rev={state['rev']}")
+    if timetable["recurring"] == 0:
+        print(
+            f"  ⚠ 时刻表里没有日常窗口（一次性 {timetable['oneOff']} 条）——"
+            "今天能响，明天不会自动排；改时刻表见 rules/routines.md"
+        )
     hb = core.read_heartbeat()
     if hb is None:
         print("  调度器心跳：无记录")
@@ -313,6 +324,17 @@ def _recurring_count(routine: dict) -> int:
             continue
         n += 1
     return n
+
+
+def _timetable_summary(routine: dict) -> dict:
+    """时刻表体检：日常窗口几个、一次性几个。日常 0 个 = 明天不会自动排。"""
+    one_off = 0
+    total = 0
+    for w in routine.get("alarmWindows") or []:
+        total += 1
+        if w.get("oneOff") or str(w.get("id") or "").startswith("once-"):
+            one_off += 1
+    return {"total": total, "recurring": total - one_off, "oneOff": one_off}
 
 
 def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:

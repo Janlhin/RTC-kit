@@ -270,5 +270,45 @@ class TestConsoleEncoding(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"cp1252 控制台下安装器崩了：{(proc.stderr or '')[-400:]}")
 
 
+class TestSmokeTimetableGate(unittest.TestCase):
+    """表里没有日常窗口时，install --smoke 必须判失败，而不是给一个绿灯。
+
+    实机上出现过：时刻表被清成只剩一次性提醒，用户装完跑自检，一条提醒
+    顺利到手，于是以为「好了」——第二天什么都没响。
+    """
+
+    def _ws(self, windows):
+        base = Path(tempfile.mkdtemp(prefix="rtc-gate-"))
+        ws = base / "ws"
+        (ws / "rules").mkdir(parents=True)
+        (ws / "rules" / "routines.json").write_text(
+            json.dumps({"alarmWindows": windows}, ensure_ascii=False), encoding="utf-8"
+        )
+        return ws
+
+    def test_summary_counts(self):
+        routine = {
+            "alarmWindows": [
+                {"id": "wake", "label": "起床", "start": "07:00", "end": "07:24"},
+                {"id": "once-1300", "label": "出门", "start": "13:00", "end": "13:04", "oneOff": True},
+            ]
+        }
+        self.assertEqual(install.timetable_summary(routine), {"total": 2, "recurring": 1, "oneOff": 1})
+
+    def test_blocks_when_only_one_off(self):
+        ws = self._ws(
+            [{"id": "once-1300", "label": "出门", "start": "13:00", "end": "13:04", "oneOff": True}]
+        )
+        self.assertIn("没有日常窗口", install.smoke_blocked_reason(ws) or "")
+
+    def test_passes_when_recurring_present(self):
+        ws = self._ws([{"id": "wake", "label": "起床", "start": "07:00", "end": "07:04"}])
+        self.assertIsNone(install.smoke_blocked_reason(ws))
+
+    def test_blocks_when_routine_missing(self):
+        ws = Path(tempfile.mkdtemp(prefix="rtc-gate2-"))
+        self.assertIn("找不到", install.smoke_blocked_reason(ws) or "")
+
+
 if __name__ == "__main__":
     unittest.main()
