@@ -380,11 +380,21 @@ def cmd_status(args) -> int:
             "今天能响，明天不会自动排；改时刻表见 rules/routines.md"
         )
     hb = core.read_heartbeat()
+    hb_attempt = core.read_heartbeat_attempt()
+    now = core.now_tz(routine["tzOffset"])
     if hb is None:
-        print("  调度器心跳：无记录")
+        extra = (
+            f"（{int((now - hb_attempt).total_seconds() // 60)} 分钟前调过，但没判完）"
+            if hb_attempt is not None
+            else ""
+        )
+        print(f"  调度器心跳：无成功判定{extra}")
     else:
-        gap = (core.now_tz(routine["tzOffset"]) - hb).total_seconds() / 60
-        print(f"  调度器心跳：{gap:.0f} 分钟前")
+        gap = (now - hb).total_seconds() / 60
+        line = f"  调度器心跳：上次成功判定 {gap:.0f} 分钟前"
+        if hb_attempt is not None and hb_attempt > hb:
+            line += f"（其后又调过 {int((now - hb_attempt).total_seconds() // 60)} 分钟前）"
+        print(line)
     print(_backup_line(backup))
     if delivery["total"]:
         line = f"  投递  {delivery['total']} 条 · 成功 {delivery['ok']} · 失败 {delivery['failed']}"
