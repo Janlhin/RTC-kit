@@ -164,6 +164,14 @@ class Lab:
         (self.ws / "rules" / "routines.json").write_text(
             json.dumps(FIXTURE_TIMETABLE, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        # 备份目标必须钉在沙箱内部。没有 backup.json 时 archive 会回落到「除源盘以外的固定盘」，
+        # 也就是用户真实的 D:\ / E:\RTC-Backup——测试数据会以当天日期覆盖用户的真备份。
+        (self.ws / "rules" / "backup.json").write_text(
+            json.dumps(
+                {"targets": [str(self.root / tag / "backup")], "keep": 5}, ensure_ascii=False, indent=2
+            ),
+            encoding="utf-8",
+        )
 
     def add_window(self, **win) -> None:
         r = self.routines()
