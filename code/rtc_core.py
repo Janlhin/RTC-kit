@@ -33,6 +33,7 @@ from typing import Any, cast
 
 import rtc_archive as archive
 import rtc_brief as brief
+import rtc_history as hist
 import rtc_metrics as metrics
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -231,6 +232,37 @@ def _exclusive_file_lock(path: Path):
                     _unlock_fd(fd)
             finally:
                 os.close(fd)
+
+
+def _record_history(
+    state: dict | None,
+    routine: dict | None = None,
+    *,
+    kind: str | None = None,
+    window: str | None = None,
+    item: str | None = None,
+    note: str | None = None,
+    ts: datetime | None = None,
+) -> None:
+    """每次成功写状态之后，同步进 history.db。
+
+    审计不参与判定，库写不进去也只是少一条轨迹——绝不能让提醒本身失败。
+    """
+    if not state:
+        return
+    try:
+        hist.sync_state(state, routine)
+        if kind:
+            hist.log_event(
+                kind,
+                window or "-",
+                ts=ts,
+                day=state.get("planDate"),
+                item_id=item,
+                note=note,
+            )
+    except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+        print(f"history: 写库失败（{type(e).__name__}: {e}），本轮历史可能少一条", file=sys.stderr)
 
 
 def atomic_write(path: Path, data: dict, expected_rev: int | None, expected_digest: str | None = None) -> str:
@@ -1126,6 +1158,14 @@ def cmd_plan(args) -> int:
         "history": history,
     }
     atomic_write(STATE, state, expected_rev=int((old or {}).get("rev", 0)) if old else None)
+    # 第一次建库时把老快照与 alarms.json 里的历史摘要灌进去——换仓库形态，历史不丢。
+    if not hist.history_db().exists():
+        try:
+            hist.backfill_from_snapshots()
+            hist.import_state_history(state, routine)
+        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+            print(f"history: 回填失败（{type(e).__name__}: {e}），库从今天开始记", file=sys.stderr)
+    _record_history(state, routine, kind="plan", ts=now)
     print(
         f"plan: {today} {kind} {len(windows)} 窗口 / {total} 次，rev={state['rev']}"
         + ("（已暂停）" if paused_today else ""),
@@ -1265,6 +1305,7 @@ def cmd_due(args) -> int:
             state["rev"] = rev + 1
             try:
                 atomic_write(STATE, state, expected_rev=rev)
+                _record_history(state, routine, ts=now)
                 print("due: 已把过期窗口标为 missed", file=sys.stderr)
             except Conflict as e:
                 # 契约（issue #4 §11）：due 冲突保持静默，诊断走 stderr，
@@ -1299,6 +1340,7 @@ def cmd_due(args) -> int:
         # 显式背离：重复投递比晚一 tick 响更糟，而宿主把空 stdout 当作不响。
         print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
         return 0
+    _record_history(state, routine, ts=now)
 
     # 状态变了就连带刷新 AGENTS.md 里的行程：模型下次开口时读到的是刚响过什么，
     # 而不是 06:00 生成时的旧版本。写失败只提示，绝不影响这次投递。
@@ -1406,6 +1448,7 @@ def cmd_ack(args) -> int:
         print(f"ack: 写入冲突（{e}）", file=sys.stderr)
         return 2
     print(f"ack: {hit['id']} 已确认", file=sys.stderr)
+    _record_history(state, routine, kind="ack", window=hit["id"], note=args.text, ts=now)
     res = brief.sync_brief_block(routine, state, now)
     if res.startswith(("read-failed", "write-failed")):
         print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
@@ -1471,6 +1514,15 @@ def cmd_check(args) -> int:
         hit["state"] = "acked"
         hit["ackedAt"] = now.isoformat()
     atomic_write(STATE, state, expected_rev=rev)
+    _record_history(
+        state,
+        routine,
+        kind="check",
+        window=hit["id"],
+        item=target["id"],
+        note="undo" if args.undo else None,
+        ts=now,
+    )
     verb = "已取消" if args.undo else "已打勾"
     print(f"check: {target['label']} {verb}（{len(checked)}/{len(items)}）", file=sys.stderr)
     return 0
@@ -1620,6 +1672,14 @@ def cmd_postpone(args) -> int:
             state["rev"] = srev + 1
             try:
                 atomic_write(STATE, state, expected_rev=srev)
+                _record_history(
+                    state,
+                    routine,
+                    kind="postpone",
+                    window=args.window,
+                    note=f"{args.to} <- {state.get('planDate')}",
+                    ts=now,
+                )
                 outcome = "skipped"
             except Conflict as e:
                 # 回滚时刻表：宁可今天照响，也不要明天没有。
@@ -1943,6 +2003,7 @@ def cmd_cancel(args) -> int:
         except Conflict as e:
             print(f"cancel: 状态冲突（{e}）", file=sys.stderr)
             return 2
+        _record_history(state, routine, kind="cancel", window=args.window, ts=now)
 
     # 安排本身的去留
     # 一次性窗口：取消 = 这件事不做了 → 彻底停用（它本来也只存在于某一天）
@@ -2006,6 +2067,14 @@ def cmd_complete(args) -> int:
         except Conflict as e:
             print(f"complete: 状态冲突（{e}）", file=sys.stderr)
             return 2
+        _record_history(
+            state,
+            routine,
+            kind="complete",
+            window=args.window,
+            note=args.text,
+            ts=now,
+        )
 
     w["disabled"] = True
     _write_routine(routine, digest)
@@ -2053,6 +2122,7 @@ def cmd_disable(args) -> int:
         except Conflict as e:
             print(f"disable: 状态冲突（{e}）", file=sys.stderr)
             return 2
+        _record_history(state, routine, kind="disable", window=args.window, ts=now)
 
     w["disabled"] = True
     _write_routine(routine, digest)
@@ -2074,6 +2144,8 @@ def cmd_enable(args) -> int:
         return 4
     w["disabled"] = False
     _write_routine(routine, digest)
+    with contextlib.suppress(sqlite3.Error, OSError, ValueError, TypeError):
+        hist.log_event("enable", args.window)
     print(f"enable: {args.window} 已重新启用", file=sys.stderr)
     return 0
 
@@ -2184,8 +2256,22 @@ def main(argv=None) -> int:
     shis = sub.add_parser("history")
     shis.add_argument("date", nargs="?", help="YYYY-MM-DD")
     shis.add_argument("--month", help="YYYY-MM")
+    shis.add_argument("--range", help="<起>..<止>，两端都是 YYYY-MM-DD")
     shis.add_argument("--json", action="store_true")
     shis.set_defaults(func=brief.cmd_history)
+
+    sev = sub.add_parser("events", help="看某个窗口的状态迁移轨迹（history.db 的 events 表）")
+    sev.add_argument("window", nargs="?", help="窗口 ID；不写则看全部")
+    sev.add_argument("--since", help="起始时间（ISO）")
+    sev.add_argument("--until", help="结束时间（ISO）")
+    sev.add_argument("--json", action="store_true")
+    sev.set_defaults(func=brief.cmd_events)
+
+    sst = sub.add_parser("stats", help="按窗口 / 日期 / 月份聚合执行结果")
+    sst.add_argument("--group-by", choices=["window", "date", "month"], default="window")
+    sst.add_argument("--missed-only", action="store_true")
+    sst.add_argument("--json", action="store_true")
+    sst.set_defaults(func=brief.cmd_stats)
 
     ss = sub.add_parser("status")
     ss.add_argument("--json", action="store_true")

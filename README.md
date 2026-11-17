@@ -205,6 +205,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 - `code/metrics.mjs` 是可选旁路统计，**不随主链路维护**；主链路统计走 `rtc.py metrics`。
 - 覆盖率当前未达语句 80% / 分支 70%，阈值按实测基线逐季上调（见 `TASKS.md` T-002 / T-003）。
 - `mypy` 尚未收紧到 `--strict`，存量注解分批补（见 `TASKS.md` T-004）。
+- 执行历史在 `state/history.db`（`windows` / `daily` / `checklist` / `events` 四表，唯一真相源）；`state/schedule/*.json` 是它的人读副本，删掉整个目录历史照样查得到。查询用 `rtc.py history` / `history --range` / `events` / `stats`。
 - 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天压一份 zip 到**其他本地盘**的 `RTC-Backup`（目标盘由 `rules/backup.json` 指定），也可按天提交进私有 git 仓库。恢复办法见 `docs/troubleshooting.md` §7 / §8。
 - 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文，详见 `docs/attribution.md`。
 

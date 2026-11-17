@@ -84,7 +84,8 @@
 │ ③ 内容层（文件）                                         │
 │   rules/routines.json   时刻表（人写）                   │
 │   state/alarms.json     今天的账本（只有代码写）          │
-│   state/schedule/*.json 每日快照（代码写，永久）          │
+│   state/history.db      执行历史（四表，唯一真相源）      │
+│   state/schedule/*.json 每日快照（代码写，人读的派生副本）│
 │   state/metrics.db      统计索引（旁路，可缺失）          │
 │   tasks.md / errors.md  人的东西                          │
 └─────────────────────────────────────────────────────────┘
@@ -283,16 +284,24 @@ cron（no-agent）
 
 
 ```
-alarms.json          当天计划 + 最近 14 天执行摘要   ← 主链路当前状态
-state/schedule/*.json 每日完整快照，永久              ← 历史存档（权威）
-metrics.db           统计索引，可缺失                 ← 旁路
+state/history.db      四张表：windows / daily / checklist / events  ← 历史（唯一真相源）
+state/schedule/*.json 每日完整快照，永久                              ← 派生副本（人读、可 diff）
+alarms.json           当天计划 + 最近 14 天执行摘要                     ← 主链路当前状态
+metrics.db            统计索引，可缺失                                 ← 旁路
 ```
 
+* `history` / `stats` / `events` 先读 `history.db`；库里没这一天时才退回快照。
+  **删掉整个 `state/schedule/` 目录，历史照样查得到**——这是 issue #9 的验收条款 1。
 
+* 库在每次状态写入成功后同步：`plan` / `due` / `ack` / `check` / `postpone` /
+  `cancel` / `complete` / `disable` / `enable` 各写自己的行与事件。写库失败只在
+  stderr 记一句，绝不阻断提醒本身（审计不参与判定）。
 
-* `history` 的 14 天截断只影响执行摘要，**不影响快照**。
+* 老工作区第一次 `plan` 时自动回填：`state/schedule/*.json` 与 `alarms.json`
+  里那 14 天摘要都灌进库，历史不会从「装上新版」那天才断。
 
-* 快照由 `plan` 写、`fill_snapshot_results` 回填结果，写一次留永久。
+* 快照仍由 `plan` 写、`fill_snapshot_results` 回填结果，写一次留永久——它现在是
+  可以随时重建的副本，不再是唯一的历史存档。
 
 * 删掉「每天重建」省掉了 29 条 Todo + 29 条 Cron，但「每天存档」不能跟着删 —— 那是旧系统 1600 行规则里唯一真正有价值的东西。
 

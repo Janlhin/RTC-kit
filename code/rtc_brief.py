@@ -9,6 +9,7 @@ import sys
 from datetime import date, datetime, time, timedelta
 
 import rtc_core as core
+import rtc_history as history
 
 # ---------------------------------------------------------------- 历史日程查询
 
@@ -162,34 +163,70 @@ def cmd_schedule(args) -> int:
 def cmd_history(args) -> int:
     """查某天（或某月）每个提醒的实际结果。
 
-    快照的 `results` 层——推过、取消、没做成、响了几次、确认没确认。
-    这是「那天到底发生了什么」的答案，与 `schedule`（那天计划了什么）互补。
+    先读 `state/history.db`（唯一真相源）；库里没有这一天时才退回旧快照——
+    删掉整个 `state/schedule/` 目录，只要库在，历史照样查得到。
     """
+    if getattr(args, "range", None):
+        try:
+            start, _, end = args.range.partition("..")
+            if not end:
+                start, end = start, start
+            date.fromisoformat(start)
+            date.fromisoformat(end)
+        except ValueError:
+            print("history: --range 用法 <起>..<止>（YYYY-MM-DD）", file=sys.stderr)
+            return 4
+        rows = history.rows_for_range(start, end)
+        if not rows:
+            print(f"history: {start}..{end} 没有执行结果", file=sys.stderr)
+            return 4
+        if args.json:
+            out = [
+                {"date": d, "results": history.results_for_day(d)} for d in sorted({r["date"] for r in rows})
+            ]
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
+        for d in sorted({r["date"] for r in rows}):
+            res = history.results_for_day(d)
+            done = sum(1 for r in res.values() if r.get("state") in {"acked", "delivered"})
+            print(f"{d} {len(res)} 项，完成 {done}，未成 {len(res) - done}")
+        return 0
+
     if args.month:
         files = sorted(core.SCHEDULE_DIR.glob(f"{args.month}-*.json"))
-        if not files:
+        db_days = history.days_in_month(args.month)
+        if not files and not db_days:
             print(f"history: 没有 {args.month} 的快照", file=sys.stderr)
             return 4
         if args.json:
             out = []
-            for f in files:
-                s = json.loads(f.read_text(encoding="utf-8"))
-                res = s.get("results") or {}
+            for day_iso in db_days:
+                res = history.results_for_day(day_iso)
                 if res:
-                    out.append({"date": s["date"], "results": res})
+                    out.append({"date": day_iso, "results": res})
+            if not out:
+                for f in files:
+                    s = json.loads(f.read_text(encoding="utf-8"))
+                    res = s.get("results") or {}
+                    if res:
+                        out.append({"date": s["date"], "results": res})
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return 0
         any_row = False
-        for f in files:
-            s = json.loads(f.read_text(encoding="utf-8"))
-            res = s.get("results") or {}
+        for day_iso in db_days or [json.loads(f.read_text(encoding="utf-8"))["date"] for f in files]:
+            res = history.results_for_day(day_iso)
+            if not res:
+                path = core.SCHEDULE_DIR / f"{day_iso}.json"
+                if not path.exists():
+                    continue
+                res = json.loads(path.read_text(encoding="utf-8")).get("results") or {}
             if not res:
                 continue
             any_row = True
-            d = date.fromisoformat(s["date"])
+            d = date.fromisoformat(day_iso)
             dow = "一二三四五六日"[d.weekday()]
             done = sum(1 for r in res.values() if r.get("state") in {"acked", "delivered"})
-            print(f"{s['date']}（周{dow}）{len(res)} 项，完成 {done}，未成 {len(res) - done}")
+            print(f"{day_iso}（周{dow}）{len(res)} 项，完成 {done}，未成 {len(res) - done}")
             for wid, r in res.items():
                 print(f"    {r.get('label') or wid:<14} {outcome_text(r)}")
         if not any_row:
@@ -199,21 +236,64 @@ def cmd_history(args) -> int:
     if not args.date:
         print("用法：rtc.py history <YYYY-MM-DD> | --month YYYY-MM [--json]", file=sys.stderr)
         return 4
+    res = history.results_for_day(args.date)
     path = core.SCHEDULE_DIR / f"{args.date}.json"
-    if not path.exists():
-        print(f"history: 没有 {args.date} 的快照", file=sys.stderr)
-        return 4
-    s = json.loads(path.read_text(encoding="utf-8"))
-    res = s.get("results") or {}
-    if args.json:
-        print(json.dumps({"date": s["date"], "results": res}, ensure_ascii=False, indent=2))
-        return 0
+    if not res and path.exists():
+        res = json.loads(path.read_text(encoding="utf-8")).get("results") or {}
     if not res:
+        if history.has_day(args.date):
+            print(f"history: {args.date} 还没有归档的执行结果")
+            return 0
+        if not path.exists():
+            print(f"history: 没有 {args.date} 的快照", file=sys.stderr)
+            return 4
         print(f"history: {args.date} 还没有归档的执行结果（快照只有计划——结果在次日归档时回填）")
+        return 0
+
+    if args.json:
+        print(json.dumps({"date": args.date, "results": res}, ensure_ascii=False, indent=2))
         return 0
     print(f"{args.date} 的执行结果（{len(res)} 项）：")
     for wid, r in res.items():
         print(f"    {r.get('label') or wid:<14} {outcome_text(r)}")
+    return 0
+
+
+def cmd_events(args) -> int:
+    """看某个窗口（或全部）的状态迁移轨迹。"""
+    rows = history.events(args.window, args.since, args.until)
+    if not rows:
+        print("events: 没有事件", file=sys.stderr)
+        return 4
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    for r in rows:
+        extra = " ".join(
+            x for x in (r.get("item_id"), r.get("from_date"), r.get("to_date"), r.get("note")) if x
+        )
+        print(f"{r['ts']}  {r['kind']:<9}{r['window_id']:<22}{extra}".rstrip())
+    return 0
+
+
+def cmd_stats(args) -> int:
+    """按窗口 / 日期 / 月份聚合执行结果。"""
+    try:
+        rows = history.stats(args.group_by, args.missed_only)
+    except ValueError as e:
+        print(f"stats: {e}", file=sys.stderr)
+        return 4
+    if not rows:
+        print("stats: 库里还没有执行结果", file=sys.stderr)
+        return 4
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    for r in rows:
+        print(
+            f"{r['grp']:<24}{r['days']:>4} 天  计划 {r['expect']:>3}  响 {r['fired']:>3}"
+            f"  确认 {r['acked']:>3}  漏 {r['missed']:>3}"
+        )
     return 0
 
 
