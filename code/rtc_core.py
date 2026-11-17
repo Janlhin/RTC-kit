@@ -1630,6 +1630,11 @@ def cmd_check(args) -> int:
     if len(checked) == len(items) and not args.undo:
         hit["state"] = "acked"
         hit["ackedAt"] = now.isoformat()
+    elif args.undo and hit.get("state") == "acked":
+        # 撤销打勾必须把窗口一起退回「没完成」，否则会留下「已确认但清单没勾完」
+        # 的矛盾状态：窗口不再响，没勾完的项永远提不到（审计 #8 的遗留问题）
+        hit["state"] = "pending"
+        hit["ackedAt"] = None
     atomic_write(STATE, state, expected_rev=rev)
     _record_history(
         state,
