@@ -103,6 +103,42 @@ hermes cron runs <rtc-due 的任务 id> --limit 5
 grep "delivered to" %LOCALAPPDATA%\hermes\logs\agent.log
 ```
 
+### 2.1 第二渠道：失败也要有人知道
+
+`--deliver` 只保证「宿主拿到了一段文本」，不保证「你收到了」。给两条任务都配上
+`--failure-deliver`（指向邮件 / 短信 / 另一台设备），失败时才能从另一个渠道看到：
+
+```bash
+hermes cron create "0 6 * * *" --name rtc-plan --no-agent --script rtc_plan.py \
+  --deliver <主渠道> --failure-deliver <第二渠道> --catch-up on --timezone +08:00
+```
+
+**为什么必须配**：投递发生在脚本退出之后，脚本无法知道结果；主渠道静默失败时，
+没有第二渠道就等于「任务 completed，用户什么都没收到」。
+
+### 2.2 投递回执：昨天那一条到底发出去没有
+
+主渠道投完一条，让宿主（或包装脚本）补一行回执，之后就有账可查：
+
+```bash
+python code/rtc.py --workspace <工作区> delivery-record --window brief-morning --target weixin --result ok
+python code/rtc.py --workspace <工作区> delivery-record --window brief-follow --target weixin --result fail --error "iLink session not ready ret=-2"
+python code/rtc.py --workspace <工作区> delivery --date 2026-11-17
+python code/rtc.py --workspace <工作区> status
+```
+
+```
+2026-11-17  投递 2 条：成功 1 · 失败 1
+  15:00  brief-follow → weixin  iLink session not ready ret=-2
+```
+
+回执是 `state/delivery.log`，一行一条 JSON（`at` / `window` / `target` / `result` / `error`）。
+没写回执时 `status` 不显示这一行，`delivery` 会直接说「还没有投递回执」——**不会假装成功**。
+
+**宿主接不了回执怎么办**：那就必须配 `--failure-deliver`（见 2.1），
+并定期看一次 `hermes cron runs <rtc-due 的 id>`，别只看「任务 completed」。
+
+
 出现 `delivered to weixin:... via live adapter` 就是真送出去了。
 
 ---
