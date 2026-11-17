@@ -324,6 +324,39 @@ def smoke_target(now: datetime) -> str:
     return (now + timedelta(minutes=SMOKE_LEAD_MIN)).strftime("%H:%M")
 
 
+def timetable_summary(routine: dict) -> dict:
+    """时刻表体检：日常窗口几个、一次性几个。纯函数，便于测试。"""
+    total = 0
+    one_off = 0
+    for w in routine.get("alarmWindows") or []:
+        total += 1
+        if w.get("oneOff") or str(w.get("id") or "").startswith("once-"):
+            one_off += 1
+    return {"total": total, "recurring": total - one_off, "oneOff": one_off}
+
+
+def smoke_blocked_reason(workspace: Path) -> str | None:
+    """表里一个日常窗口都没有时，自检没有意义：一次性能响，明天照样不排。
+
+    自检只证明「这一条能投递到手机」，用户真正怕的是「明天的还响不响」。
+    所以日常窗口为 0 时直接判失败，而不是给一个虚假的绿灯。
+    """
+    routine_path = workspace / "rules" / "routines.json"
+    if not routine_path.is_file():
+        return "找不到 rules/routines.json，无法判断时刻表"
+    try:
+        routine = json.loads(routine_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return f"rules/routines.json 读不出来（{e}），无法判断时刻表"
+    summary = timetable_summary(routine)
+    if summary["recurring"] == 0:
+        return (
+            f"时刻表里没有日常窗口（一次性 {summary['oneOff']} 条）——"
+            "自检会绿，但明天不会自动排；先把日常窗口补回 rules/routines.md"
+        )
+    return None
+
+
 def _run_quiet(cmd: list) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
@@ -339,6 +372,10 @@ def run_smoke(scripts_dir: Path, workspace: Path, wait_sec: int = SMOKE_DEFAULT_
     if not once.is_file() or not rtc.is_file():
         print(f"[install] 自检跳过：找不到 {once.name} 或 {rtc.name}", file=sys.stderr)
         return 2
+    blocked = smoke_blocked_reason(workspace)
+    if blocked:
+        print(f"[install] 自检判失败：{blocked}", file=sys.stderr)
+        return 1
 
     now = datetime.now()
     at = smoke_target(now)
@@ -503,6 +540,18 @@ def run(args: argparse.Namespace) -> int:
             "[install] 默认时刻表已就位：起床 08:10、早间 09:00、午间 12:00、晚间 19:00"
             "（用 set-time 改，别手改 JSON）"
         )
+    if not dry_run:
+        routine_path = workspace / "rules" / "routines.json"
+        try:
+            summary = timetable_summary(json.loads(routine_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            summary = None
+        if summary and summary["recurring"] == 0:
+            print(
+                f"[install] ⚠ 时刻表只有一次性提醒（{summary['oneOff']} 条），没有日常窗口："
+                "明天不会自动排，先按 rules/routines.md 补回日常窗口",
+                file=sys.stderr,
+            )
 
     # 4/5 宿主登记（可选）
     if getattr(args, "with_host", False):

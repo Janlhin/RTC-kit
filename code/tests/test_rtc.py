@@ -2187,6 +2187,59 @@ class TestBrief(RtcCase):
         self.assertEqual(rc, 0)
         self.assertIn("时刻表里只有一次性提醒", out, out)
 
+    def test_plan_warns_when_only_one_offs(self):
+        """表里只剩一次性提醒时，plan 的 stderr 要说一句，免得「计划成功」被当成「明天还会响」。"""
+        self.write_routine(
+            base_routine(
+                alarmWindows=[
+                    {
+                        "id": "once-1300",
+                        "label": "出门",
+                        "start": "13:00",
+                        "end": "13:04",
+                        "intervalMin": 5,
+                        "expectFires": 1,
+                        "ackHints": ["知道了"],
+                        "oneOff": True,
+                        "validFrom": "2026-11-10",
+                        "validUntil": "2026-11-10",
+                    }
+                ]
+            )
+        )
+        rc, _, err = self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("时刻表里只有一次性提醒", err, err)
+
+    def test_status_reports_timetable(self):
+        """status 要能一眼看出「今天几个日常窗口」，JSON 与文字都要有。"""
+        self.write_routine(
+            base_routine(
+                alarmWindows=[
+                    {
+                        "id": "once-1300",
+                        "label": "出门",
+                        "start": "13:00",
+                        "end": "13:04",
+                        "intervalMin": 5,
+                        "expectFires": 1,
+                        "ackHints": ["知道了"],
+                        "oneOff": True,
+                        "validFrom": "2026-11-10",
+                        "validUntil": "2026-11-10",
+                    }
+                ]
+            )
+        )
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, err = self.cli("status", "--json")
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["timetable"], {"total": 1, "recurring": 0, "oneOff": 1}, out)
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("没有日常窗口", out, out)
+
 
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。

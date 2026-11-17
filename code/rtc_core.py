@@ -806,6 +806,19 @@ def cmd_plan(args) -> int:
         file=sys.stderr,
     )
 
+    # 表里只剩一次性提醒时，今天的计划会「生成成功但明天不再有日常窗口」——
+    # 这类状态最容易被误判成脚本坏了，所以在这里显式报一句（退出码仍为 0）。
+    recurring = sum(
+        1
+        for w in routine.get("alarmWindows") or []
+        if not w.get("oneOff") and not str(w.get("id") or "").startswith("once-")
+    )
+    if recurring == 0:
+        print(
+            "plan: 时刻表里只有一次性提醒，没有日常窗口——今天不会有日常提醒；改时刻表见 rules/routines.md",
+            file=sys.stderr,
+        )
+
     # 顺手清掉过期的一次性提醒：只删「oneOff 且 validUntil 已过」的。
     # 放在 state 写成功之后，且任何冲突都只提示不阻断——清理失败不影响今天照响。
     try:
