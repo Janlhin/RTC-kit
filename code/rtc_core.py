@@ -1460,19 +1460,33 @@ def _due_eval(args, routine, tz, now) -> int:
     changed = False
 
     # 1) 过期未确认 → missed
+    # 兜底窗口例外：过了点的兜底窗口，只要当天 reports 文件在，就算交付完成
+    # （9:00 的 agent cron 已经把汇报发出去了），不该记成「漏响」。
     for w in state["windows"]:
         end = datetime.fromisoformat(w["end"])
         if now > end and w["state"] in {"pending", "ringing"}:
-            w["state"] = "missed"
-            w["missedAt"] = now.isoformat()
-            w["missedReason"] = "window_expired"
+            if w.get("format") == "report-fallback" and brief.report_exists(now.date()):
+                w["state"] = "delivered"
+                w["lastFiredAt"] = now.isoformat()
+            else:
+                w["state"] = "missed"
+                w["missedAt"] = now.isoformat()
+                w["missedReason"] = "window_expired"
             changed = True
 
     # 2) 找命中窗口
+    # 早报兜底窗口（format=report-fallback）：当天 model 已写出 reports 文件时，
+    # 这一窗不响、直接判 delivered（不是 skipped——它的任务确实完成了，只是由
+    # 9:00 的 agent cron 完成）。必须在选 hit 之前处理，否则会重复投递。
     hit = None
     for w in state["windows"]:
         start, end = datetime.fromisoformat(w["start"]), datetime.fromisoformat(w["end"])
         if start <= now <= end and w["state"] in {"pending", "ringing"}:
+            if w.get("format") == "report-fallback" and brief.report_exists(now.date()):
+                w["state"] = "delivered"
+                w["lastFiredAt"] = now.isoformat()
+                changed = True
+                continue
             hit = w
             break
 

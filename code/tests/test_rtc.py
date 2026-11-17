@@ -3790,5 +3790,160 @@ class TestHeartbeatOk(RtcCase):
         self.assertNotIn("心跳", out, "旧格式 at 应被当作成功判定")
 
 
+class TestMorningReport(RtcCase):
+    """早报由模型生成（issue #60 方案 B）：09:00 模型写文件，09:10 兜底窗口。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "brief-morning",
+                "label": "☀️早报",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report",
+            },
+            {
+                "id": "brief-morning-fallback",
+                "label": "早报兜底",
+                "start": "09:10",
+                "end": "09:14",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report-fallback",
+            },
+        ]
+        self.write_routine(r)
+        self.reports = self.ws / "state" / "reports"
+        self.reports.mkdir(parents=True, exist_ok=True)
+
+    def write_report(self, day: str, text: str):
+        (self.reports / f"{day}.md").write_text(text, encoding="utf-8")
+
+    def test_report_window_uses_model_file(self):
+        """有 reports 文件时，9:00 窗口原文输出模型写的内容。"""
+        body = (
+            "📊 昨日汇报 — 2026-11-16\n"
+            "✅ 已完成：\n- 跑了 3 公里\n"
+            "❌ 未完成：\n- 无\n"
+            "📝 备注：\n- 下午去医院\n"
+            "💬 遗留建议：\n- 无"
+        )
+        self.write_report("2026-11-17", body)
+        rc, out, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.cli("due", now="2026-11-17T09:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("跑了 3 公里", out)
+        self.assertIn("下午去医院", out)
+
+    def test_report_window_falls_back_to_static(self):
+        """没有 reports 文件时，9:00 窗口必须发静态汇报，不能空着不响。"""
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-17T09:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out)
+        self.assertIn("✅ 已完成", out)
+        self.assertIn("📝 备注", out)
+
+    def test_fallback_window_silent_when_report_exists(self):
+        """兜底窗口：模型已写文件 → 9:10 静默，不重复发。"""
+        self.write_report("2026-11-17", "📊 昨日汇报 — 2026-11-16\n模型写的")
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T09:01:00+08:00")  # 9:00 窗口已响
+        rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.strip(), "", f"兜底窗口不该再发一次：{out}")
+        w = self.window("brief-morning-fallback")
+        self.assertEqual(w["state"], "delivered")
+
+    def test_fallback_window_fires_when_report_missing(self):
+        """兜底窗口：模型没写文件 → 9:10 补发静态汇报，保证有声音。"""
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T09:01:00+08:00")  # 9:00 窗口发静态
+        rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out)
+        self.assertEqual(self.window("brief-morning-fallback")["fireCount"], 1)
+
+    def test_fallback_not_counted_in_tally(self):
+        """兜底窗口是技术守卫，不该出现在「今日闹钟 N 个窗口」里。"""
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        state = self.state()
+        # 直接验统计口径：两个窗口，但兜底不计入
+        self.assertEqual(len(state["windows"]), 2)
+        from rtc_brief import _window_tally
+
+        tally = _window_tally(state)
+        self.assertEqual(tally["windows"], 1, "兜底窗口不该计入「N 个窗口」")
+        self.assertNotIn(
+            "brief-morning-fallback",
+            [w["id"] for w in tally["pending"]],
+            "兜底窗口不该出现在待办统计里",
+        )
+
+    def test_empty_report_file_falls_back(self):
+        """模型写了空文件 = 没写成功，仍要静态兜底。"""
+        self.write_report("2026-11-17", "   \n  ")
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-17T09:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out)
+
+
+class TestReportMaterial(RtcCase):
+    """早报素材脚本（rtc_report.py）：给模型喂料，只读不写。"""
+
+    def run_material(self, day="2026-11-17"):
+        script = Path(__file__).resolve().parents[1] / "rtc_report.py"
+        p = subprocess.run(
+            [sys.executable, str(script), "--workspace", str(self.ws), "--date", day],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return p.returncode, p.stdout, p.stderr
+
+    def test_material_contains_three_sources(self):
+        self.write_routine(base_routine())
+        (self.ws / "tasks.md").write_text(
+            "# tasks.md\n\n## Today\n\n### 我\n\n- [ ] 写周报\n- [x] 已完成的事\n",
+            encoding="utf-8",
+        )
+        notes = self.ws / "state" / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "2026-11-16.md").write_text("- 下午去医院了\n", encoding="utf-8")
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+
+        rc, out, err = self.run_material()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("写周报", out, "今日待办要进素材")
+        self.assertIn("下午去医院了", out, "用户口述要进素材")
+        self.assertIn("state/reports/2026-11-17.md", out, "要告诉模型写到哪")
+
+    def test_material_missing_files_is_not_error(self):
+        """没有 tasks.md / notes 也不能报错——素材可以缺，早报不能因此不发。"""
+        self.write_routine(base_routine())
+        rc, out, err = self.run_material()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("早报素材", out)
+        self.assertNotIn("Traceback", out + err)
+
+    def test_material_never_writes(self):
+        """素材脚本只读：跑完不能在 state/ 里留下 reports/notes。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        before = {p.name for p in (self.ws / "state").iterdir()}
+        self.run_material()
+        after = {p.name for p in (self.ws / "state").iterdir()}
+        self.assertEqual(before, after, f"素材脚本不该写文件，却多了：{after - before}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
