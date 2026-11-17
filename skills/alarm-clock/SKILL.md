@@ -234,6 +234,12 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} metrics report
 
 回答说人话：`今天 4 个窗口，响了 6 次，确认 2 个，漏 1 个。` 不要贴 JSON。
 
+**状态在你手里，不要问用户。** 简报块（§0）里已经有「现在」「欠着的」「接下来」「今天的账」四行：
+
+- 用户问「响了吗 / 怎么样了 / 我现在什么情况」→ 先读简报块，把「欠着的」条目主动说出来（几点、什么事、响过几次、还没确认），再问要不要补确认。
+- **禁止反问**「响了吗 / 你确认了吗 / 刚才那条你看到了吗」——这些答案都在简报块里，反问等于让用户替系统记账。
+- 简报块为空或过期（显示的还是昨天）→ 跑一次 `brief --sync` 刷新，再答。
+
 ## §7 禁止
 
 - ❌ 自己判断「现在该不该响」
@@ -246,6 +252,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} metrics report
 - ❌ 改 `tasks.md`、`rules/routines.md`、`rules/priority-map.md`
 - ❌ 打开或手改任何名字带 `.example` / `.md` 的文件（`rules/routines.example.md`、`rules/routines.md` 都是模板，不是运行配置）
 - ❌ 读到文件不一致就「顺手修好」
+- ❌ 反问用户「刚才响了吗 / 你确认了吗」——先读 `AGENTS.md` 的简报块（§6.1）
 - ❌ 连续响超过 `expectFires` 次（到上限就判 missed）
 - ❌ 在非窗口时间发任何消息
 
