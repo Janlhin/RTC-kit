@@ -2877,6 +2877,16 @@ class TestDigestWindow(RtcCase):
         self.assertIn("今日闹钟：5 个窗口，响 4 次，确认 3 / 漏 1 / 未到 1", out)
         self.assertIn("📅 明日预告：", out)
         self.assertIn("12:00 午间提醒", out)  # 漏的那条要出现在「未完成」
+        self.assertIn("（没确认）", out, "内部原因码要翻成人话，别把 window_expired 丢给用户")
+
+    def test_label_with_its_own_icon_is_not_doubled(self):
+        r = self.digest_routine()
+        r["alarmWindows"][4]["label"] = "📋晚总结"  # 实机里的写法
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-17T19:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[0], "📋 晚总结 — 2026-11-17")
 
     def test_tasks_today_feeds_the_digest(self):
         (self.ws / "tasks.md").write_text(

@@ -566,6 +566,22 @@ def _tomorrow_line(routine: dict, today: date) -> str:
     return "、".join(parts)
 
 
+def _label_plain(w: dict, icon: str) -> str:
+    """实机窗口的 label 常自带同样的表情（「📋晚总结」），别让它和版式头撞成两个。"""
+    label = str(w.get("label") or w.get("id") or "")
+    if label.startswith(icon):
+        label = label[len(icon) :].lstrip()
+    return label or str(w.get("id") or "")
+
+
+_REASON_WORD = {"window_expired": "没确认", "late_plan": "生成得太晚", "paused": "休假静音"}
+
+
+def _reason_text(w: dict) -> str:
+    reason = w.get("missedReason")
+    return _REASON_WORD.get(str(reason), str(reason or "没确认"))
+
+
 def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[str]:
     """按 rules/formats.md 的「跟进」/「总结」版式现算文案。只读，不改任何文件。"""
     tally = _window_tally(state)
@@ -573,7 +589,7 @@ def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[s
     tasks = _tasks_today()
 
     if hit["format"] == "follow":
-        lines = [f"🔔 {hit['label']} — {now.date().isoformat()} {stamp}"]
+        lines = [f"🔔 {_label_plain(hit, '🔔')} — {now.date().isoformat()} {stamp}"]
         lines.append("📋 今日待办：")
         lines.extend(_bullets(tasks, "（tasks.md 里今天没有待办）"))
         lines.append("💬 进展：")
@@ -585,19 +601,16 @@ def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[s
         for w in tally["pending"]:
             todo.append(f"{_hhmm(w['start'])} {w['label']} 还没到点")
         for w in tally["missed"]:
-            todo.append(f"{_hhmm(w['start'])} {w['label']} 漏了（{w.get('missedReason') or '没确认'}）")
+            todo.append(f"{_hhmm(w['start'])} {w['label']} 漏了（{_reason_text(w)}）")
         lines.extend(_bullets(todo, "今天的窗口都处理完了"))
     else:
-        lines = [f"📋 {hit['label']} — {now.date().isoformat()}"]
+        lines = [f"📋 {_label_plain(hit, '📋')} — {now.date().isoformat()}"]
         lines.append("✅ 已完成：")
         lines.extend(_bullets([f"{_span_text(w)} {w['label']}" for w in tally["acked"]], "（没有确认的）"))
         lines.append("❌ 未完成：")
         lines.extend(
             _bullets(
-                [
-                    f"{_hhmm(w['start'])} {w['label']}（{w.get('missedReason') or '没确认'}）"
-                    for w in tally["missed"]
-                ],
+                [f"{_hhmm(w['start'])} {w['label']}（{_reason_text(w)}）" for w in tally["missed"]],
                 "（没有漏的）",
             )
         )
