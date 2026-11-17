@@ -423,4 +423,36 @@ python code/rtc.py --workspace <工作区> status
 
 **注意**：`pause` 只影响提醒，不影响 `tasks.md` 和档案备份。
 
+---
+
+## 10. tasks.md 被写坏了
+
+`tasks.md` 是 RTC 里唯一没有程序守护的活文件：`routines.json` 有印章和底稿、
+`alarms.json` 有 rev 校验和原子写、`schedule` 有每日快照，只有它靠编辑器直接改。
+
+**写入前先留底稿**（技能里已是硬性步骤，手动改也建议先跑）：
+
+```bash
+python code/rtc.py --workspace <工作区> touch-tasks
+```
+
+内容没变时它会说「内容和上一份底稿一样」并且什么都不写，所以不必担心刷出一堆重复文件。
+
+**写坏了怎么回退**：
+
+```bash
+# 1. 看有哪些底稿
+dir state\backups\tasks.*.md
+
+# 2. 先把你现在的坏件另存一份（别覆盖）
+copy tasks.md tasks.bad.md
+
+# 3. 挑最近一份能用的盖回去
+copy state\backups\tasks.20261117-153829.md tasks.md
+```
+
+底稿份数按 `rules/backup.json` 的 `keep` 滚动（默认 30），最旧的先删；
+它们同时进每日 zip 和 git 归档，所以「上周某天」的版本也能找回来。
+
+
 

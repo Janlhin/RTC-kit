@@ -2633,6 +2633,85 @@ class TestPause(RtcCase):
         self.assertEqual(data["paused"]["until"], "2026-11-20")
 
 
+class TestTasksSnapshot(RtcCase):
+    """tasks.md 的底稿：唯一没人守护的活文件，写坏了就真丢。"""
+
+    def add_task(self, text: str):
+        p = self.ws / "tasks.md"
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+
+    def snapshots(self):
+        return sorted((self.ws / "state" / "backups").glob("tasks.*.md"))
+
+    def test_three_edits_three_snapshots(self):
+        self.add_task("- [ ] 第一条")
+        for i in range(3):
+            rc, out, err = self.cli("touch-tasks")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("已留底稿", out)
+            if i < 2:
+                self.add_task(f"- [ ] 第{i + 2}条")
+        self.assertEqual(len(self.snapshots()), 3, [p.name for p in self.snapshots()])
+
+    def test_same_content_writes_nothing(self):
+        self.add_task("- [ ] 只有这一条")
+        self.cli("touch-tasks")
+        before = len(self.snapshots())
+        rc, out, err = self.cli("touch-tasks")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.snapshots()), before, "内容没变还写新底稿")
+        self.assertIn("一样", out)
+
+    def test_restore_after_truncation(self):
+        self.write_routine(base_routine())
+        self.add_task("- [ ] 交周报（截止 11-20）")
+        self.add_task("- [ ] 买药")
+        self.cli("touch-tasks")
+        (self.ws / "tasks.md").write_text("", encoding="utf-8")
+        latest = self.snapshots()[-1]
+        (self.ws / "tasks.md").write_text(latest.read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertIn("交周报", (self.ws / "tasks.md").read_text(encoding="utf-8"))
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+
+    def test_keep_limit_prunes_oldest(self):
+        (self.ws / "rules" / "backup.json").write_text(
+            json.dumps({"targets": [], "keep": 2}), encoding="utf-8"
+        )
+        self.add_task("- [ ] a")
+        self.cli("touch-tasks")
+        for t in ("b", "c"):
+            self.add_task(f"- [ ] {t}")
+            self.cli("touch-tasks")
+            import time as _t
+
+            _t.sleep(1.1)  # 时间戳按秒，隔开一秒才能产生不同文件名
+        self.assertEqual(len(self.snapshots()), 2, [p.name for p in self.snapshots()])
+        self.assertIn("c", self.snapshots()[-1].read_text(encoding="utf-8"))
+
+    def test_snapshots_go_into_zip(self):
+        target = Path(tempfile.mkdtemp(prefix="rtc-taskzip-"))
+        try:
+            self.write_routine(base_routine())
+            (self.ws / "rules" / "backup.json").write_text(
+                json.dumps({"targets": [str(target)], "keep": 5}), encoding="utf-8"
+            )
+            self.add_task("- [ ] 会被打包")
+            self.cli("touch-tasks")
+            rc, out, err = self.cli("backup")
+            self.assertEqual(rc, 0, err)
+            zips = list(target.glob("RTC-*.zip"))
+            self.assertTrue(zips, err)
+            import zipfile
+
+            with zipfile.ZipFile(zips[0]) as z:
+                names = z.namelist()
+            self.assertTrue(any(n.startswith("state/backups/tasks.") for n in names), names)
+        finally:
+            shutil.rmtree(target, ignore_errors=True)
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 

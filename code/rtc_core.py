@@ -1994,6 +1994,9 @@ def main(argv=None) -> int:
     srs.add_argument("--now")
     srs.set_defaults(func=cmd_resume)
 
+    stt = sub.add_parser("touch-tasks", help="改 tasks.md 之前先留底稿（内容没变就不写）")
+    stt.set_defaults(func=archive.cmd_touch_tasks)
+
     sa = sub.add_parser("ack")
     sa.add_argument("--window")
     sa.add_argument("--text")
