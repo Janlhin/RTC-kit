@@ -37,6 +37,59 @@ DEFAULT_WS = Path.home() / "RTC"
 
 VALID_STATES = {"pending", "ringing", "delivered", "acked", "missed", "skipped", "cancelled"}
 
+# 沙箱夹具时刻表：4 个日常窗口，时间为「秒级可注入」的固定值。
+# 不用实机的 routines.json 当夹具——那张表可能被清空、只剩一次性提醒，
+# 用它会让整套用例跟着红，测到的是配置而不是代码。实机体检单列 A0。
+FIXTURE_TIMETABLE = {
+    "version": 1,
+    "timezone": "Asia/Shanghai",
+    "tzOffset": "+08:00",
+    "dateTypes": {"workday": [1, 2, 3, 4, 5], "weekend": [0, 6], "holidayOverrides": []},
+    "alarmWindows": [
+        {
+            "id": "wake",
+            "label": "起床",
+            "start": "07:00",
+            "end": "07:25",
+            "intervalMin": 5,
+            "expectFires": 6,
+            "ackHints": ["起了"],
+        },
+        {
+            "id": "meds-am",
+            "label": "吃药（早）",
+            "start": "08:00",
+            "end": "08:04",
+            "intervalMin": 5,
+            "expectFires": 1,
+            "ackHints": ["吃了"],
+        },
+        {
+            "id": "meds-noon",
+            "label": "吃药（午）",
+            "start": "12:00",
+            "end": "12:04",
+            "intervalMin": 5,
+            "expectFires": 1,
+            "ackHints": ["吃了"],
+        },
+        {
+            "id": "meds-pm",
+            "label": "吃药（晚）",
+            "start": "19:00",
+            "end": "19:04",
+            "intervalMin": 5,
+            "expectFires": 1,
+            "ackHints": ["吃了"],
+        },
+    ],
+    "rollcalls": [],
+    "phases": [
+        {"name": "active", "start": "07:00", "end": "23:00", "proactiveAllowed": True},
+        {"name": "quiet", "start": "23:00", "end": "07:00", "proactiveAllowed": False},
+    ],
+}
+
 
 # ─────────────────────────────────────────────────────────── 结果记录
 @dataclass
@@ -90,21 +143,27 @@ class Lab:
         return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
 
     # ── 沙箱 ─────────────────────────────────────────────
+    def real_routines(self) -> dict | None:
+        p = self.real_ws / "rules" / "routines.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     def fresh(self, tag: str) -> None:
+        """每个用例一个干净 workspace，时刻表用固定夹具（4 个日常窗口）。
+
+        不用实机的 `routines.json` 当夹具：那张表可能只剩一次性提醒，整套用例会跟着红，
+        测到的就变成「用户的配置」而不是「代码」。实机体检见 A0。
+        """
         self.ws = self.root / tag / "ws"
         (self.ws / "rules").mkdir(parents=True, exist_ok=True)
         (self.ws / "state").mkdir(parents=True, exist_ok=True)
-        src = self.real_ws / "rules" / "routines.json"
-        if src.exists():
-            shutil.copy(src, self.ws / "rules" / "routines.json")
-        else:  # 没有实机配置时退化为空时刻表
-            (self.ws / "rules" / "routines.json").write_text(
-                json.dumps(
-                    {"version": 1, "timezone": "Asia/Shanghai", "tzOffset": "+08:00", "alarmWindows": []},
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+        (self.ws / "rules" / "routines.json").write_text(
+            json.dumps(FIXTURE_TIMETABLE, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def add_window(self, **win) -> None:
         r = self.routines()
@@ -142,13 +201,26 @@ class Lab:
 def suite(lab: Lab) -> None:
     print("\n[1/6] 计划与日期（时间注入，不用真等）")
 
+    def t_real_timetable():
+        """实机体检：日常窗口还剩几个。表被清空不是代码问题，但会让人以为系统坏了。"""
+        r = lab.real_routines()
+        lab.ok(r is not None, "实机没有 rules/routines.json，先跑 install.py")
+        ws = r.get("alarmWindows") or []
+        recurring = [w for w in ws if not w.get("oneOff") and not str(w.get("id") or "").startswith("once-")]
+        one_off = len(ws) - len(recurring)
+        lab.ok(
+            True,
+            f"实机时刻表：日常窗口 {len(recurring)} 个、一次性 {one_off} 个"
+            + ("（日常窗口 0 个 → 明天不会按日常计划响，见 issue #43）" if not recurring else ""),
+        )
+
     def t_plan_basic():
         lab.fresh("plan_basic")
         p = lab.rt_now("plan", "2026-11-17T06:00")
         lab.ok(p.returncode == 0, f"plan 退出码 {p.returncode}")
         s = lab.status()
         lab.ok(s["planDate"] == "2026-11-17", f"planDate={s['planDate']}")
-        lab.ok(len(s["windows"]) == 4, f"窗口数 {len(s['windows'])}（真实 routines.json 应为 4）")
+        lab.ok(len(s["windows"]) == 4, f"窗口数 {len(s['windows'])}（夹具时刻表应为 4）")
         lab.ok(s["rev"] == 1, f"首次 plan rev 应为 1，实际 {s['rev']}")
 
     def t_plan_dedupe():
@@ -199,6 +271,7 @@ def suite(lab: Lab) -> None:
         lab.ok(p.returncode == 0, "跨日 plan 失败")
         lab.ok(lab.status()["planDate"] == "2026-11-22", f"跨日未换 planDate：{lab.status()['planDate']}")
 
+    lab.case("A0 实机时刻表体检", "日常窗口还剩几个（0 个 = 明天不会按日常计划响）", t_real_timetable)
     lab.case("A1 plan 生成今日计划", "plan 在指定日期生成 4 窗口", t_plan_basic)
     lab.case("A2 plan 幂等", "同日重复 plan 不重复建窗口", t_plan_dedupe)
     lab.case("A3 plan --force 保已确认", "--force 不丢 acked 与已响数", t_force_keeps_state)
@@ -471,7 +544,7 @@ def suite(lab: Lab) -> None:
                     str(lab.ws),
                     "due",
                     "--now",
-                    "2026-12-02T07:00",
+                    "2026-12-02T09:00",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -513,13 +586,13 @@ def suite(lab: Lab) -> None:
         return child
 
     def _lock_window(tag, date):
-        """沙箱里自建一个覆盖 07:00 的一次性窗口，不依赖实机时刻表里有没有 wake。"""
+        """沙箱里自建一个 09:00 的一次性窗口：避开夹具里的 wake / meds，免得撞在一起。"""
         lab.fresh(tag)
         lab.add_window(
             id="lk",
             label="锁测试",
-            start="07:00",
-            end="07:15",
+            start="09:00",
+            end="09:15",
             intervalMin=5,
             expectFires=1,
             ackHints=["好了"],
@@ -533,7 +606,7 @@ def suite(lab: Lab) -> None:
         _lock_window("lock1", "2026-12-03")
         child = _hold_lock(20)  # 比 RTC 的 10s 等待更长，确保它等不到锁
         try:
-            p = lab.rt_now("due", "2026-12-03T07:00")
+            p = lab.rt_now("due", "2026-12-03T09:00")
             lab.ok("写入冲突" in p.stderr, f"锁被别的进程持有时未提示冲突：{p.stderr.strip()[:90]!r}")
             lab.ok(p.stdout.strip() == "", f"锁被占时不该响：{p.stdout.strip()[:60]!r}")
             lab.ok(lab.win("lk")["fireCount"] == 0, "锁被占时仍写了状态")
@@ -549,7 +622,7 @@ def suite(lab: Lab) -> None:
         try:
             old = time.time() - 3600
             os.utime(lock, (old, old))
-            p = lab.rt_now("due", "2026-12-04T07:00")
+            p = lab.rt_now("due", "2026-12-04T09:00")
             lab.ok(
                 p.stdout.strip() == "", f"旧 mtime 被当成「可接管」，锁没起作用：{p.stdout.strip()[:60]!r}"
             )
@@ -558,7 +631,7 @@ def suite(lab: Lab) -> None:
         finally:
             child.kill()
             child.wait()
-        p = lab.rt_now("due", "2026-12-04T07:00")
+        p = lab.rt_now("due", "2026-12-04T09:00")
         lab.ok(p.stdout.strip() != "", f"持有者已退出，提醒仍未响：{p.stderr.strip()[:90]!r}")
         lab.ok(lock.exists(), "sidecar 应常驻，不应被删除或按年龄清理")
 
