@@ -2309,6 +2309,132 @@ class TestBrief(RtcCase):
         self.assertIn("本地 1 处 · git 未跑", out, out)
 
 
+class TestSimulate(RtcCase):
+    """预演：只读地回答「那天会怎样」。
+
+    硬约束只有一条：预演和真跑必须是同一套判定。所以断言方式不是「看起来对」，
+    而是把 plan 真跑出来的窗口逐条拿来对比 id / 起止 / expectFires。
+    """
+
+    def test_matches_real_plan(self):
+        self.write_routine(
+            base_routine(
+                alarmWindows=[
+                    {
+                        "id": "wake",
+                        "label": "起床",
+                        "start": "07:00",
+                        "end": "07:25",
+                        "intervalMin": 5,
+                        "expectFires": 6,
+                        "ackHints": ["起了"],
+                    },
+                    {
+                        "id": "meds-am",
+                        "label": "吃药（早）",
+                        "start": "08:00",
+                        "end": "08:04",
+                        "intervalMin": 5,
+                        "expectFires": 1,
+                        "ackHints": ["吃了"],
+                    },
+                ]
+            )
+        )
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("simulate", "--date", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        real = {w["id"]: w for w in self.state()["windows"]}
+        self.assertEqual(set(real), {"wake", "meds-am"}, out)
+        self.assertIn("起床", out)
+        self.assertIn("6 次", out)
+        self.assertIn("预计响 7 次", out)
+        rc, out, err = self.cli("simulate", "--date", "2026-11-17", "--json")
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["date"], "2026-11-17")
+        self.assertEqual(data["kind"], "workday")
+        self.assertEqual(data["totalFires"], 7)
+        for w in data["windows"]:
+            self.assertEqual(w["start"], real[w["id"]]["start"], w)
+            self.assertEqual(w["end"], real[w["id"]]["end"], w)
+            self.assertEqual(w["expectFires"], real[w["id"]]["expectFires"], w)
+
+    def test_one_off_only_on_its_day(self):
+        self.write_routine(
+            base_routine(
+                alarmWindows=[
+                    {
+                        "id": "once-1525",
+                        "label": "出门",
+                        "start": "15:25",
+                        "end": "15:29",
+                        "intervalMin": 5,
+                        "expectFires": 1,
+                        "ackHints": ["知道了"],
+                        "oneOff": True,
+                        "validFrom": "2026-11-17",
+                        "validUntil": "2026-11-17",
+                    }
+                ]
+            )
+        )
+        rc, out, err = self.cli("simulate", "--date", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("出门", out)
+        rc, out, err = self.cli("simulate", "--date", "2026-11-18")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("不会响", out)
+        self.assertIn("不在有效期", out)
+
+    def test_disabled_window_is_listed_as_skipped(self):
+        self.write_routine(
+            base_routine(
+                alarmWindows=[
+                    {
+                        "id": "meds-pm",
+                        "label": "吃药（晚）",
+                        "start": "19:00",
+                        "end": "19:04",
+                        "intervalMin": 5,
+                        "expectFires": 1,
+                        "ackHints": ["吃了"],
+                        "disabled": True,
+                    }
+                ]
+            )
+        )
+        rc, out, err = self.cli("simulate", "--date", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("已停用", out)
+
+    def test_bad_date_exits_3_without_traceback(self):
+        self.write_routine(base_routine())
+        rc, out, err = self.cli("simulate", "--date", "2026-13-45")
+        self.assertEqual(rc, 3, out + err)
+        self.assertIn("日期看不懂", err)
+        self.assertNotIn("Traceback", out + err)
+
+    def test_writes_nothing(self):
+        """只读是硬约束：跑完 state/ 下不能有任何文件被碰过。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        before = {p.name: p.stat().st_mtime_ns for p in (self.ws / "state").iterdir()}
+        rc, out, err = self.cli("simulate", "--date", "2026-11-18")
+        self.assertEqual(rc, 0, err)
+        after = {p.name: p.stat().st_mtime_ns for p in (self.ws / "state").iterdir()}
+        self.assertEqual(before, after, "--simulate 动了 state/")
+
+    def test_works_without_any_state(self):
+        """还没跑过 plan 的新工作区也能预演——不该顺手创建 state 目录。"""
+        self.write_routine(base_routine())
+        state_dir = self.ws / "state"
+        shutil.rmtree(state_dir)
+        rc, out, err = self.cli("simulate", "--date", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(state_dir.exists(), "simulate 建了 state 目录")
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 

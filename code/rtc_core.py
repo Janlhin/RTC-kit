@@ -758,6 +758,105 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
     return [h for k, h in sorted(dedup.items()) if h.get("date", "") >= cutoff]
 
 
+def simulate_day(routine: dict, d: date) -> dict:
+    """预演某一天会怎样：只读，绝不落盘。
+
+    判定全部复用 plan 的那一套（有效期 / skipDates / disabled / dateTypes / 算术校验），
+    唯一差别是把"现在"钉在那天的 00:00——这样计划里的窗口不会被判成"已过期"。
+    """
+    kind = plan_kind(d, routine)
+    tz = tz_of(routine["tzOffset"])
+    day_start = datetime.combine(d, time(0, 0), tzinfo=tz)
+    day_iso = d.isoformat()
+
+    windows: list[dict] = []
+    skipped: list[dict] = []
+    day_off = day_disabled(routine, kind)
+    if day_off:
+        skipped.append({"id": f"<{kind}>", "reason": f"{kind} 在契约里被禁用（整天空日）"})
+    else:
+        for w in build_windows(routine, d, kind, day_start):
+            windows.append(
+                {
+                    "id": w["id"],
+                    "label": w["label"],
+                    "start": w["start"],
+                    "end": w["end"],
+                    "expectFires": w["expectFires"],
+                    "oneOff": w["oneOff"],
+                }
+            )
+        for w in routine["alarmWindows"]:
+            if any(x["id"] == w["id"] for x in windows):
+                continue
+            if w.get("disabled"):
+                skipped.append({"id": w["id"], "reason": "已停用（disable）"})
+            elif not in_valid_range(w, day_iso):
+                skipped.append({"id": w["id"], "reason": "不在有效期"})
+            elif day_iso in (w.get("skipDates") or []):
+                skipped.append({"id": w["id"], "reason": "这一天被推迟（postpone）"})
+            elif w.get("dateTypes") and kind not in w["dateTypes"]:
+                skipped.append({"id": w["id"], "reason": f"只在这些日期类型响：{'/'.join(w['dateTypes'])}"})
+    windows.sort(key=lambda x: x["start"])
+    return {
+        "date": day_iso,
+        "kind": kind,
+        "dayDisabled": day_off,
+        "windows": windows,
+        "skipped": skipped,
+        "totalFires": sum(x["expectFires"] for x in windows),
+        "totalAttempts": sum(x["expectFires"] for x in windows),
+    }
+
+
+def render_simulate(data: dict) -> list[str]:
+    """预演的人读版：几号、几次、几点、重叠、跳过。"""
+    d = date.fromisoformat(data["date"])
+    weekday = "一二三四五六日"[d.weekday()]
+    lines = [f"{data['date']}（周{weekday}）预计响 {data['totalFires']} 次"]
+    if data["dayDisabled"]:
+        lines.append(f"  （{data['kind']} 按契约不响：整天空日）")
+        return lines
+    if not data["windows"]:
+        lines.append("  没有任何窗口——这一天不会响")
+    for w in data["windows"]:
+        kind = "一次性" if w["oneOff"] else "每天"
+        lines.append(f"  {w['start'][11:16]}–{w['end'][11:16]}  {w['label']}  {w['expectFires']} 次  {kind}")
+    if data["windows"]:
+        starts = [w["start"][11:16] for w in data["windows"]]
+        dupes = sorted({s for s in starts if starts.count(s) > 1})
+        overlap = "、".join(dupes) if dupes else "无"
+        lines.append(f"最早 {min(starts)}   最晚 {max(starts)}   同一时刻重叠：{overlap}")
+    if data["skipped"]:
+        lines.append("跳过：" + "、".join(f"{s['id']}（{s['reason']}）" for s in data["skipped"]))
+    return lines
+
+
+def cmd_simulate(args) -> int:
+    routine = load_routine()
+    tz = tz_of(routine["tzOffset"])
+    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    if args.date:
+        try:
+            d = date.fromisoformat(args.date)
+        except ValueError:
+            print(f"simulate: 日期看不懂：{args.date}（要 YYYY-MM-DD）", file=sys.stderr)
+            return 3
+    else:
+        d = now.date() + timedelta(days=1)
+    try:
+        data = simulate_day(routine, d)
+    except Validation as e:
+        print(f"simulate: {e}", file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    for line in render_simulate(data):
+        print(line)
+    return 0
+
+
 def cmd_plan(args) -> int:
     routine = load_routine()
     hand_edit = audit_routine(routine)
@@ -1743,6 +1842,12 @@ def main(argv=None) -> int:
     sd = sub.add_parser("due")
     sd.add_argument("--now")
     sd.set_defaults(func=cmd_due)
+
+    ssim = sub.add_parser("simulate", help="预演某一天会响几次（只读，不改任何文件）")
+    ssim.add_argument("--date", help="YYYY-MM-DD（默认明天）")
+    ssim.add_argument("--json", action="store_true")
+    ssim.add_argument("--now")
+    ssim.set_defaults(func=cmd_simulate)
 
     sa = sub.add_parser("ack")
     sa.add_argument("--window")

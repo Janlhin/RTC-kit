@@ -61,6 +61,31 @@ cancel     取消
 
 ---
 
+## 改表前先预演（simulate）
+
+改 `rules/routines.json` 之后，别等明天被吵到或漏掉才发现问题。预演一条命令就能回答「那天会响几次、几点」：
+
+```bash
+python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate
+python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate --date 2026-11-17
+python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate --date 2026-11-17 --json
+```
+
+```
+2026-11-17（周二）预计响 7 次
+  07:00–07:25  起床  6 次  每天
+  15:25–15:29  出门  1 次  一次性
+最早 07:00   最晚 15:25   同一时刻重叠：无
+跳过：meds-pm（已停用）
+```
+
+**只读**：不写 `state/alarms.json`、不写 `routines.json`、不碰印章文件。
+判定用的是 `plan` 那一套（有效期 / `skipDates` / `disabled` / 日期类型 / `expectFires` 算术校验），
+所以预演结果和真跑逐条一致——写两份逻辑迟早会各说一套。
+
+
+---
+
 ## 规则怎么复用
 
 `contract/` 下的 JSON Schema 定义了三类数据的字段与枚举：
