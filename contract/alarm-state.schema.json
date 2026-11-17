@@ -48,6 +48,11 @@
           "description": "摘要窗口类型：到点由代码现算文案（跟进 / 总结）；null = 普通静态提醒"
         },
         "oneOff": { "type": "boolean", "description": "是否一次性提醒（送达即完成）" },
+        "type": {
+          "enum": ["fixed", "oneoff", "appointment"],
+          "description": "日程身份：fixed=周期重复（可带 dueDate 变成倒计时）；oneoff=只活在指定日期；appointment=一次性 + 倒计时显示。cancelled 不是类型，是状态覆盖"
+        },
+        "review": { "type": "boolean", "description": "倒计时的复盘日实例（截止日次日，只响一次，响完永停）" },
         "dueDate": { "type": ["string", "null"], "format": "date", "description": "截止日（倒计时提醒用）" },
         "checklist": {
           "type": "array",

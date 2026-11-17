@@ -3136,6 +3136,95 @@ class TestStableIds(RtcCase):
         self.assertEqual(rows, [("main",)])
 
 
+class TestScheduleTypes(RtcCase):
+    """#9 §10：类型显式化 + 倒计时「最后一天 → 次日复盘 → 永停」。"""
+
+    def countdown(self, **over) -> dict:
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "event",
+                "label": "限时活动",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "validFrom": "2026-01-01",
+                "dueDate": "2026-01-15",
+                **over,
+            }
+        ]
+        return r
+
+    def test_three_types_are_explicit(self):
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "once",
+                "label": "一次性",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-17",
+                "validUntil": "2026-11-17",
+            },
+            {
+                "id": "appt",
+                "label": "预约",
+                "start": "10:00",
+                "end": "10:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-17",
+                "validUntil": "2026-11-17",
+                "dueDate": "2026-11-17",
+            },
+        ]
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        types = {w["id"]: w["type"] for w in self.state()["windows"]}
+        self.assertEqual(types, {"wake": "fixed", "once": "oneoff", "appt": "appointment"})
+
+    def test_last_day_then_review_then_gone(self):
+        self.write_routine(self.countdown())
+        self.cli("plan", now="2026-01-15T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-01-15T20:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("最后一天", out)
+        self.cli("plan", now="2026-01-16T06:00:00+08:00")
+        w = self.state()["windows"][0]
+        self.assertTrue(w["review"], "截止日次日是复盘日")
+        self.assertIn("复盘", w["label"])
+        rc, out, _ = self.cli("due", now="2026-01-16T20:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("复盘", out)
+        self.cli("plan", now="2026-01-17T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [], "复盘日之后永不重生")
+
+    def test_cancelled_countdown_has_no_review(self):
+        self.write_routine(self.countdown())
+        self.cli("plan", now="2026-01-14T06:00:00+08:00")
+        rc, _, err = self.cli("cancel", "--window", "event", now="2026-01-14T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.cli("plan", now="2026-01-16T06:00:00+08:00")
+        self.assertEqual(self.state().get("windows"), [], "取消了就整段停，复盘日也不响")
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 
