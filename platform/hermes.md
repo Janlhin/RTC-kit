@@ -17,7 +17,9 @@
 
 「空输出即静默」这一条消掉了整个 `NO_REPLY` 风险面：不存在「哨兵写进了该响的分支、任务照跑但用户什么都没收到」这种失败。
 
-## 两条触发器
+## 三条触发器
+
+前两条是**确定性链路**（`--no-agent`，不调模型）；第三条是**早报的模型生成**。
 
 ```
 hermes cron create "0 6 * * *"  --name rtc-plan --no-agent --script rtc_plan.py \
@@ -25,11 +27,34 @@ hermes cron create "0 6 * * *"  --name rtc-plan --no-agent --script rtc_plan.py 
 
 hermes cron create "*/5 * * * *" --name rtc-due  --no-agent --script rtc_due.py \
       --deliver <target> --failure-deliver <target> --catch-up off --timezone <TZ>
+
+hermes cron create "0 9 * * *"  --name rtc-report --script rtc_report.py \
+      --skill alarm-clock --deliver <target> --failure-deliver <target> \
+      --catch-up off --timezone <TZ>
 ```
 
 - `rtc-plan` 正常时**不输出**，所以接真实渠道也不会每天响一次；只有自检发现异常才推一条（见下节）
 - `rtc-due` 的 `--catch-up off` 是刻意的：机器关机数小时后开机，不需要补一串过期提醒
-- 任务条数恒定两条，任何流程只 `edit`，不重新 `create`
+- `rtc-report` **不带 `--no-agent`**：脚本 stdout 注入模型 prompt，模型据此写「汇报」并直接投递。这是 issue #60 的方案 B，**突破了「任务条数恒定两条」的旧约束**（用户已批准）
+
+### 早报为什么是三条而不是两条
+
+「9:00 现场叫模型」和「模型失败也不能不响」这两个要求互相冲突——模型不在线时，`rtc-report` 会失败，什么都不会发。解法是把兜底放在**已经存在的 due 机制**里，而不是再加第四条 cron：
+
+| 时间 | 谁 | 做什么 |
+|---|---|---|
+| 09:00 | `rtc-report`（agent 模式） | 读 `rtc_report.py` 吐的素材，写 `state/reports/<日期>.md` 并投递 |
+| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天文件**存在** → 判 `delivered`、静默；**缺失** → 发静态汇报 |
+
+所以时刻表里要配两个窗口：
+
+```jsonc
+{ "id": "brief-morning",          "format": "report",          "start": "09:00", "end": "09:04", ... }
+{ "id": "brief-morning-fallback", "format": "report-fallback", "start": "09:10", "end": "09:14", ... }
+```
+
+兜底窗口是技术性守卫，**不计入**「今日闹钟 N 个窗口」的统计（`_window_tally` 会跳过它）。
+- 任务条数**装完就固定**（默认两条；启用早报模型生成后三条），任何流程只 `edit`，不重新 `create`
 
 ## 入口脚本
 
