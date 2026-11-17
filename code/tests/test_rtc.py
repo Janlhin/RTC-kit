@@ -306,7 +306,11 @@ class TestSchema(unittest.TestCase):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         bad = base_routine()
         bad["alarmWindows"][0].update({"oneOff": True, "expectFires": 6})
-        errs = list(jsonschema.Draft202012Validator(schema).iter_errors(bad))
+        errs = list(
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+            ).iter_errors(bad)
+        )
         self.assertTrue(errs, "oneOff=true 但 expectFires≠1 必须被契约拒绝")
 
     @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
@@ -318,8 +322,52 @@ class TestSchema(unittest.TestCase):
         good["alarmWindows"][0].update(
             {"oneOff": True, "expectFires": 1, "validFrom": "2026-11-10", "validUntil": "2026-11-10"}
         )
-        errs = list(jsonschema.Draft202012Validator(schema).iter_errors(good))
+        errs = list(
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+            ).iter_errors(good)
+        )
         self.assertEqual(errs, [], f"合法配置不该被拒：{errs[:1]}")
+
+
+class TestContractExamples(unittest.TestCase):
+    """契约示例必须被「同一把尺子」判定（issue #3：统一校验口径）。
+
+    examples/ 里是**模板**，填占位符之前不能通过校验；否则「通过校验」就没有意义。
+    这里用 jsonschema Draft 2020-12 + format 断言，等价于 CI 与 README 里写的
+    ajv-cli --spec=draft2020 -c ajv-formats。
+    """
+
+    CASES = {
+        "alarms.example.json": "alarm-state.schema.json",
+        "routines.example.json": "routine.schema.json",
+        "tasks.example.json": "task.schema.json",
+    }
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_examples_are_rejected_before_placeholders_are_filled(self):
+        import jsonschema
+
+        for example, schema_name in self.CASES.items():
+            with self.subTest(example=example):
+                schema = json.loads((REPO / "contract" / schema_name).read_text(encoding="utf-8"))
+                data = json.loads((REPO / "contract" / "examples" / example).read_text(encoding="utf-8"))
+                validator = jsonschema.Draft202012Validator(
+                    schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+                )
+                errs = list(validator.iter_errors(data))
+                self.assertTrue(errs, f"{example} 含占位符，必须被 {schema_name} 拒绝")
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_real_routine_from_cli_is_accepted(self):
+        """代码生成的配置必须通过契约——两支尺子的另一端。"""
+        import jsonschema
+
+        schema = json.loads((REPO / "contract" / "routine.schema.json").read_text(encoding="utf-8"))
+        validator = jsonschema.Draft202012Validator(
+            schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+        )
+        self.assertEqual(list(validator.iter_errors(base_routine())), [])
 
 
 class TestMainlineRegression(RtcCase):
@@ -1266,7 +1314,11 @@ class TestSevenOpsSameDay(RtcCase):
         self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
         self.cli("postpone", "--window", "postpone-me", "--to", "2026-11-14", now=f"{T}T08:20:00+08:00")
         self.cli("disable", "--window", "tea", now=f"{T}T08:50:00+08:00")
-        errs = list(jsonschema.Draft202012Validator(schema).iter_errors(self.state()))
+        errs = list(
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+            ).iter_errors(self.state())
+        )
         self.assertEqual(errs, [], f"状态文件违反契约：{errs[:1]}")
 
     def test_cancelled_does_not_trigger_self_check_alarm(self):

@@ -25,6 +25,23 @@ npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json \
 
 `format` 断言必须开。默认关闭时，`date` / `date-time` 字段里的占位符不会被拦下——同一个文件在两个校验器下可能得出相反结论，「通过校验」也就失去了意义。
 
+## 校验口径（唯一权威）
+
+「通过校验」在本仓库只有一个定义，由门禁执行：
+
+| 项 | 取值 |
+|---|---|
+| 校验器 | Python `jsonschema`（`>=4.20,<5`） |
+| 规范版本 | Draft 2020-12（`Draft202012Validator`） |
+| `format` 断言 | **开启**（`format_checker=Draft202012Validator.FORMAT_CHECKER`） |
+| 执行点 | `code/tests/test_rtc.py` 的 `TestSchema` / `TestContractExamples` / `TestMainlineRegression`，随 `scripts/verify.ps1` 一起跑 |
+| 占位符模板 | `examples/*.json` **必须被拒绝**（`TestContractExamples` 钉死） |
+
+`npx ajv-cli ... --spec=draft2020 -c ajv-formats` 是同一把尺子的另一种渲染，供手工排查用。
+**两者结论不一致时，以门禁（Python jsonschema + format 断言）为准**——这是 #3 记录的教训：
+`ajv-cli` 与 Python 校验器对 `format` 的默认行为不同，曾让一份含占位符的示例“通过校验”。
+
+
 ## 双表示的同步规则
 
 改 `rules/` 里的字段名 → 必须同步改这里的 schema。
