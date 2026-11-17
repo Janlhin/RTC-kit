@@ -486,6 +486,7 @@ def run(args: argparse.Namespace) -> int:
         "rtc_archive.py",
         "rtc_metrics.py",
         "rtc_brief.py",
+        "rtc_history.py",
         "rtc_plan.py",
         "rtc_due.py",
         "rtc_once.py",

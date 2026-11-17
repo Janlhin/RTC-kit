@@ -2916,6 +2916,150 @@ class TestDigestWindow(RtcCase):
         self.assertEqual(first, second, "同一份数据必须算出同一段文字")
 
 
+class TestHistoryDB(RtcCase):
+    """#9 Phase 1：state/history.db 是执行历史的唯一真相源。
+
+    快照（state/schedule/*.json）继续生成，但它只是一份人读的副本；
+    删掉整个目录，历史照样查得到——这条是 issue #9 §4 的验收条款 1。
+    """
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "pack",
+                "label": "清点",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "checklist": ["电饭煲", "电脑"],
+            },
+        ]
+        self.write_routine(r)
+
+    def q(self, sql: str, params: tuple = ()) -> list[tuple]:
+        con = sqlite3.connect(self.ws / "state" / "history.db")
+        try:
+            return con.execute(sql, params).fetchall()
+        finally:
+            con.close()
+
+    def test_plan_creates_windows_daily_and_checklist(self):
+        rc, _, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        rows = self.q("SELECT window_id FROM windows ORDER BY window_id")
+        self.assertEqual([r[0] for r in rows], ["pack", "wake"])
+        daily = self.q("SELECT date, window_id, expect, state FROM daily ORDER BY window_id")
+        self.assertEqual([(d, w) for d, w, *_ in daily], [("2026-11-17", "pack"), ("2026-11-17", "wake")])
+        items = self.q("SELECT item_label, ordinal, checked_at FROM checklist ORDER BY ordinal")
+        self.assertEqual([(label, ordinal) for label, ordinal, _ in items], [("电饭煲", 1), ("电脑", 2)])
+
+    def test_history_still_answers_after_schedule_dir_is_deleted(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T07:00:00+08:00")
+        rc, _, err = self.cli("ack", now="2026-11-17T07:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        shutil.rmtree(self.ws / "state" / "schedule", ignore_errors=True)
+        rc, out, err = self.cli("history", "2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("已确认", out, out)
+
+    def test_ack_writes_daily_state_and_event(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T07:00:00+08:00")
+        self.cli("ack", "--text", "起了", now="2026-11-17T07:01:00+08:00")
+        state = self.q("SELECT state, fired, acked_at FROM daily WHERE window_id='wake'")[0]
+        self.assertEqual(state[0], "acked")
+        self.assertEqual(state[1], 1)
+        self.assertIsNotNone(state[2])
+        kinds = [r[0] for r in self.q("SELECT kind FROM events ORDER BY id")]
+        self.assertEqual(kinds, ["plan", "ack"])
+
+    def test_check_writes_checklist_state_and_event(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, _, err = self.cli("check", "--window", "pack", "--item", "电饭煲")
+        self.assertEqual(rc, 0, err)
+        checked = self.q("SELECT checked_at FROM checklist WHERE window_id='pack' AND item_label='电饭煲'")[
+            0
+        ][0]
+        self.assertEqual(checked, "2026-11-17")
+        ev = self.q("SELECT window_id, item_id, kind FROM events WHERE kind='check'")[0]
+        self.assertEqual(ev[0], "pack")
+        self.assertEqual(ev[2], "check")
+
+    def test_postpone_writes_event(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, _, err = self.cli("postpone", "--window", "wake", "--days", "1", now="2026-11-17T07:10:00+08:00")
+        self.assertEqual(rc, 0, err)
+        ev = self.q("SELECT window_id, kind FROM events WHERE kind='postpone'")
+        self.assertEqual(ev[0], ("wake", "postpone"))
+
+    def test_cancel_and_disable_write_events(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("cancel", "--window", "wake", now="2026-11-17T07:10:00+08:00")
+        kinds = [r[0] for r in self.q("SELECT kind FROM events ORDER BY id")]
+        self.assertIn("cancel", kinds)
+
+    def test_stats_and_range(self):
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T07:00:00+08:00")
+        self.cli("ack", now="2026-11-17T07:01:00+08:00")
+        rc, out, err = self.cli("stats", "--json")
+        self.assertEqual(rc, 0, err)
+        rows = json.loads(out)
+        self.assertEqual({r["grp"] for r in rows}, {"wake", "pack"})
+        self.assertTrue(any(r["acked"] == 1 for r in rows), out)
+        rc, out, err = self.cli("history", "--range", "2026-11-17..2026-11-17")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("2026-11-17", out)
+
+    def test_backfill_pulls_old_snapshots_into_db(self):
+        snap = self.ws / "state" / "schedule"
+        snap.mkdir(parents=True)
+        (snap / "2026-11-16.json").write_text(
+            json.dumps(
+                {
+                    "date": "2026-11-16",
+                    "planKind": "workday",
+                    "results": {
+                        "wake": {"state": "acked", "fires": 2, "ackedAt": "2026-11-16T07:01:00+08:00"}
+                    },
+                    "windows": [
+                        {
+                            "id": "wake",
+                            "label": "起床",
+                            "start": "2026-11-16T07:00:00+08:00",
+                            "end": "2026-11-16T07:25:00+08:00",
+                            "intervalMin": 5,
+                            "expectFires": 6,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        rc, _, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        days = [r[0] for r in self.q("SELECT DISTINCT date FROM daily ORDER BY date")]
+        self.assertIn("2026-11-16", days)
+        rc, out, _ = self.cli("history", "2026-11-16")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("已确认", out)
+
+
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
 
