@@ -413,23 +413,63 @@ def hb_path() -> Path:
     return WORKSPACE / "state" / "heartbeat.json"
 
 
-def touch_heartbeat(now: datetime) -> None:
-    """每次 due 都记一笔，无论响不响。这是「调度器还活着」的唯一证据。"""
+def touch_heartbeat(now: datetime, *, ok: bool = False) -> None:
+    """写心跳。attemptAt 每次进入 due 都写；lastOkAt 只在判定完整走完后写。
+
+    - ``attemptAt``：进程被调用过的证据（进入 due 即记，失败也留痕）。
+    - ``lastOkAt``：判定完整走完（含正确判定为静默）的证据；失败路径不推进。
+    - ``at``：lastOkAt 的镜像，兼容旧部署的 self_check / 读 ``at`` 的外部脚本。
+
+    这样区分了「调过但没判完」（状态文件损坏时进程已失败退出，心跳却曾
+    被刷成新鲜）和「判完了」两件事——前者不再冒充健康。写心跳失败只报
+    stderr，绝不影响提醒本身。
+    """
     p = hb_path()
     try:
+        prev: dict = {}
+        if p.exists():
+            try:
+                loaded = load_json(p)
+                if isinstance(loaded, dict):
+                    prev = loaded
+            except (Validation, ValueError, OSError, TypeError):
+                prev = {}
+        attempt = now.isoformat()
+        last_ok = attempt if ok else (prev.get("lastOkAt") or prev.get("at"))
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"at": now.isoformat()}, ensure_ascii=False), encoding="utf-8")
+        p.write_text(
+            json.dumps({"attemptAt": attempt, "lastOkAt": last_ok, "at": last_ok}, ensure_ascii=False),
+            encoding="utf-8",
+        )
     except OSError as e:
         print(f"heartbeat: 写入失败 {e}", file=sys.stderr)
 
 
 def read_heartbeat() -> datetime | None:
+    """最后一次「判定完整走完」的时间（lastOkAt）；兼容旧格式的 ``at``。"""
     p = hb_path()
     if not p.exists():
         return None
     try:
-        return datetime.fromisoformat(load_json(p)["at"])
-    except (ValueError, KeyError, TypeError, OSError):
+        data = load_json(p)
+        iso = None
+        if isinstance(data, dict):
+            iso = data.get("lastOkAt") or data.get("at")
+        return datetime.fromisoformat(iso) if iso else None
+    except (Validation, ValueError, KeyError, TypeError, OSError, AttributeError):
+        return None
+
+
+def read_heartbeat_attempt() -> datetime | None:
+    """最后一次「进入 due」的时间（attemptAt）；区分「没调过」与「调了没判完」。"""
+    p = hb_path()
+    if not p.exists():
+        return None
+    try:
+        data = load_json(p)
+        iso = data.get("attemptAt") if isinstance(data, dict) else None
+        return datetime.fromisoformat(iso) if iso else None
+    except (Validation, ValueError, KeyError, TypeError, OSError, AttributeError):
         return None
 
 
@@ -437,14 +477,22 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
     """只报告「任务在跑但可能没送达」的信号，正常时不输出任何东西。"""
     probs: list[str] = []
     hb = read_heartbeat()
+    hb_attempt = read_heartbeat_attempt()
 
     if hb is None:
-        if not first_run:
-            probs.append("⚠️ 没有调度器心跳：rtc-due 可能从未成功运行过")
+        # attempt 新鲜 = due 正在判定中（它会在出口补写 lastOkAt）或持续被调用，
+        # 此时不报——pause 期 due 每 tick 都在跑、只是判为静默，属健康。
+        # 若 due 因状态损坏失败退出，lastOkAt 永远不写，attemptAt 会随时间变旧，
+        # 次日这里就会告警——这正是要抓的场景。
+        attempt_fresh = (
+            hb_attempt is not None and 0 <= (now - hb_attempt).total_seconds() / 60 <= HEARTBEAT_STALE_MIN
+        )
+        if not first_run and not attempt_fresh:
+            probs.append("⚠️ 没有成功判定心跳：rtc-due 可能从未完整跑完一次判定")
     else:
         gap_min = (now - hb).total_seconds() / 60
         if gap_min > HEARTBEAT_STALE_MIN:
-            probs.append(f"⚠️ 调度器最近一次心跳在 {gap_min / 60:.1f} 小时前，这段时间里的窗口可能没响")
+            probs.append(f"⚠️ 调度器最近一次成功判定在 {gap_min / 60:.1f} 小时前，这段时间里的窗口可能没响")
 
     yesterday = (now.date() - timedelta(days=1)).isoformat()
     for h in state.get("history", []):
@@ -1378,13 +1426,26 @@ def cmd_plan(args) -> int:
 
 
 def cmd_due(args) -> int:
+    """due 入口：先进心跳 attemptAt，判定完整走完才补 lastOkAt。
+
+    `_due_eval` 的所有 return 0（含「正确判定为静默」）都算判定完整走完；
+    异常（Validation / Conflict 冒泡到 main 的非 0 退出）不会走到 ok 标记，
+    于是 lastOkAt 停在最后一次真正成功的判定上——这正是外部看门狗要读的值。
+    """
     routine = load_routine()
     for line in take_notices():
         print(line)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
-    touch_heartbeat(now)
+    touch_heartbeat(now)  # attemptAt：进入即记，失败也留痕
+    rc = _due_eval(args, routine, tz, now)
+    if rc == 0:
+        touch_heartbeat(now, ok=True)  # lastOkAt：判定完整走完（含静默）
+    return rc
 
+
+def _due_eval(args, routine, tz, now) -> int:
+    """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
     if not state or state.get("planDate") != now.date().isoformat():
         rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))

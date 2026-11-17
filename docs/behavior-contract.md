@@ -92,8 +92,9 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 - 显式禁用（`weekendAlarms: false` + 周末 / `holidayAlarms: false` + 节假日）→ 合法空日
 - 合法空日仍要落盘 state（`windows: []`、`planDate`、`planKind`、`rev+1`），
   否则 `due` 每次醒来都重跑 `plan`
-- 合法空日**不得跳过心跳**：判定放在 `plan` 层，不在 `due` 开头 return，
-  否则次日 `self_check` 会误报“调度器停过”
+- 合法空日**不得跳过成功判定心跳**：`due` 的判定主体无论是否命中窗口都正常收尾，
+  由外层包装统一写 `lastOkAt`（含静默），否则次日 `self_check` 会误报“调度器停过”。
+  `attemptAt` 在进入 `due` 时即写；失败路径（非 0 退出 / 冒泡异常）不推进 `lastOkAt`
 - 其它原因造成的空窗口 → 配置错误，退出 3（`Validation`）
 
 ## 6. 三条硬规矩（跨类型）

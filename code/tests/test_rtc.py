@@ -3698,5 +3698,97 @@ class TestOnceScriptSeals(RtcCase):
         self.assertNotIn("手改", out + err, "自己写的文件被当成人手改")
 
 
+class TestHeartbeatOk(RtcCase):
+    """心跳拆分（issue #25）：attemptAt 证明调过，lastOkAt 证明判定完整走完。"""
+
+    def hb(self) -> dict:
+        p = self.ws / "state" / "heartbeat.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    def test_successful_due_writes_both_timestamps(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        rc, _, err = self.cli("due", now="2026-11-16T07:02:00+08:00")
+        self.assertEqual(rc, 0, err)
+        hb = self.hb()
+        self.assertIn("attemptAt", hb)
+        self.assertEqual(hb["lastOkAt"], "2026-11-16T07:02:00+08:00")
+        self.assertEqual(hb["at"], hb["lastOkAt"], "旧字段 at 应与 lastOkAt 一致，兼容旧读者")
+
+    def test_silent_due_still_marks_ok(self):
+        """判为静默（无命中窗口）也算判定完整走完，必须推进 lastOkAt。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-16T09:00:00+08:00")  # wake 窗口早已过
+        self.assertEqual(rc, 0)
+        hb = self.hb()
+        self.assertEqual(hb["lastOkAt"], "2026-11-16T09:00:00+08:00")
+
+    def test_conflict_due_still_marks_ok(self):
+        """写入冲突时 due 静默退 0，也是完整判定，lastOkAt 应推进。"""
+        import rtc as rtcmod
+
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        real = rtcmod.atomic_write
+
+        def boom(*a, **k):
+            raise rtcmod.Conflict("test conflict")
+
+        rtcmod.atomic_write = boom
+        try:
+            # 进程级调用替换不到，改用同进程直接调 cmd_due
+            rtcmod.set_workspace(self.ws)
+            rc = rtcmod.cmd_due(argparse.Namespace(now="2026-11-16T07:02:00+08:00"))
+        finally:
+            rtcmod.atomic_write = real
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.hb()["lastOkAt"], "2026-11-16T07:02:00+08:00")
+
+    def test_broken_state_marks_only_attempt(self):
+        """状态文件损坏 → due 退 3，只留 attemptAt，lastOkAt 不推进。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.cli("due", now="2026-11-16T07:02:00+08:00")  # 先留一个成功的 lastOkAt
+        good = self.hb()["lastOkAt"]
+
+        (self.ws / "state" / "alarms.json").write_text("{坏掉的 JSON", encoding="utf-8")
+        rc, _, err = self.cli("due", now="2026-11-16T07:07:00+08:00")
+        self.assertEqual(rc, 3, err)
+        hb = self.hb()
+        self.assertEqual(hb["attemptAt"], "2026-11-16T07:07:00+08:00", "失败也要留下被调用的痕迹")
+        self.assertEqual(hb["lastOkAt"], good, "失败路径绝不推进 lastOkAt")
+
+    def test_self_check_warns_when_attempt_but_never_ok(self):
+        """只有 attempt、从无 lastOkAt：自检要报「没有成功判定」。"""
+        self.write_routine(base_routine())
+        hbpath = self.ws / "state" / "heartbeat.json"
+        hbpath.write_text(
+            json.dumps({"attemptAt": "2026-11-16T07:02:00+08:00", "lastOkAt": None, "at": None}),
+            encoding="utf-8",
+        )
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        rc, out, _ = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertIn("没有成功判定心跳", out)
+
+    def test_self_check_silence_on_healthy_day(self):
+        """正常成功判定后，次日自检不该报心跳异常。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.cli("due", now="2026-11-16T07:02:00+08:00")
+        rc, out, _ = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertNotIn("心跳", out)
+        self.assertNotIn("判定完整走完", out)
+
+    def test_legacy_heartbeat_at_field(self):
+        """旧格式只有 at 的心跳文件仍能被 self_check 识别为一次成功判定。"""
+        self.write_routine(base_routine())
+        (self.ws / "state" / "heartbeat.json").write_text(
+            json.dumps({"at": "2026-11-16T08:55:00+08:00"}), encoding="utf-8"
+        )
+        rc, out, _ = self.cli("plan", now="2026-11-16T09:00:00+08:00")
+        self.assertNotIn("心跳", out, "旧格式 at 应被当作成功判定")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
