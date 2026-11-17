@@ -234,7 +234,7 @@ def weekly_report(now) -> list[str] | None:
 
 def _paused_days(start, end) -> int:
     """上周被 pause 盖住的天数。读不到就当没暂停——宁可少说一句，不编。"""
-    path = core.WORKSPACE / "state" / ".pause.json"
+    path = core.WORKSPACE / "state" / "paused.json"
     try:
         p = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
