@@ -6,7 +6,7 @@ import contextlib
 import json
 import os
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 import rtc_core as core
 
@@ -512,3 +512,118 @@ def cmd_brief(args) -> int:
         print(f"brief: AGENTS.md {result}", file=sys.stderr)
     print(brief_text(routine, state, now))
     return 0
+
+
+# ---------------------------------------------------------------- 摘要窗口
+#
+# 「19:00 晚报」这类需求，快照里其实全都有：响过几次、哪条确认了、哪条漏了、
+# tasks.md 里还欠什么。全是本地确定性数据，所以文案由代码在到点那一刻算，
+# 不需要模型在线，也不会把实时性外包给用户。
+
+_TASKS_SECTION = "## Today"
+
+
+def _tasks_today() -> list[str]:
+    """读 tasks.md 的 Today 段里还没打勾的条目。缺失 = 空列表，不算错误。"""
+    path = core.WORKSPACE / "tasks.md"
+    if not path.exists():
+        return []
+    items = []
+    in_today = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_today = stripped == _TASKS_SECTION
+            continue
+        if in_today and stripped.startswith(("- [ ]", "* [ ]")):
+            text = stripped[5:].strip()
+            if text:
+                items.append(text)
+    return items
+
+
+def _window_tally(state: dict) -> dict:
+    wins = state.get("windows") or []
+    tally: dict = {"windows": len(wins), "fires": 0, "acked": [], "missed": [], "pending": []}
+    for w in wins:
+        tally["fires"] += int(w.get("fireCount") or 0)
+        st = w.get("state")
+        if st in ("acked", "delivered"):
+            tally["acked"].append(w)
+        elif st == "missed":
+            tally["missed"].append(w)
+        elif st != "skipped":
+            tally["pending"].append(w)
+    return tally
+
+
+def _tomorrow_line(routine: dict, today: date) -> str:
+    """明日预告：复用 simulate 的「给定一天算窗口」，没有窗口就说不响。"""
+    data = core.simulate_day(routine, today + timedelta(days=1))
+    if not data["windows"]:
+        return "明天没有窗口（不响）"
+    parts = [f"{_hhmm(w['start'])} {w['label']}" for w in data["windows"]]
+    return "、".join(parts)
+
+
+def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[str]:
+    """按 rules/formats.md 的「跟进」/「总结」版式现算文案。只读，不改任何文件。"""
+    tally = _window_tally(state)
+    stamp = _hhmm(hit.get("start")) or now.strftime("%H:%M")
+    tasks = _tasks_today()
+
+    if hit["format"] == "follow":
+        lines = [f"🔔 {hit['label']} — {now.date().isoformat()} {stamp}"]
+        lines.append("📋 今日待办：")
+        lines.extend(_bullets(tasks, "（tasks.md 里今天没有待办）"))
+        lines.append("💬 进展：")
+        lines.extend(
+            _bullets([f"{_span_text(w)} 已确认" for w in tally["acked"]], "（还没有确认过任何一条）")
+        )
+        lines.append("❓ 需要做什么：")
+        todo = []
+        for w in tally["pending"]:
+            todo.append(f"{_hhmm(w['start'])} {w['label']} 还没到点")
+        for w in tally["missed"]:
+            todo.append(f"{_hhmm(w['start'])} {w['label']} 漏了（{w.get('missedReason') or '没确认'}）")
+        lines.extend(_bullets(todo, "今天的窗口都处理完了"))
+    else:
+        lines = [f"📋 {hit['label']} — {now.date().isoformat()}"]
+        lines.append("✅ 已完成：")
+        lines.extend(_bullets([f"{_span_text(w)} {w['label']}" for w in tally["acked"]], "（没有确认的）"))
+        lines.append("❌ 未完成：")
+        lines.extend(
+            _bullets(
+                [
+                    f"{_hhmm(w['start'])} {w['label']}（{w.get('missedReason') or '没确认'}）"
+                    for w in tally["missed"]
+                ],
+                "（没有漏的）",
+            )
+        )
+        lines.append("📝 备注：")
+        if tasks:
+            lines.append(f"tasks.md 今天还剩 {len(tasks)} 条待办")
+        else:
+            lines.append("tasks.md 今天没有待办")
+        lines.append(f"📅 明日预告：{_tomorrow_line(routine, now.date())}")
+        lines.append(
+            f"今日闹钟：{tally['windows']} 个窗口，响 {tally['fires']} 次，"
+            f"确认 {len(tally['acked'])} / 漏 {len(tally['missed'])} / 未到 {len(tally['pending'])}"
+        )
+        if str(state.get("planDate")) != now.date().isoformat():
+            lines.append(f"⚠️ 窗口表异常（planDate={state.get('planDate')}，不是今天）")
+    return lines
+
+
+def _span_text(w: dict) -> str:
+    return _hhmm(w.get("start"))
+
+
+def _bullets(items: list[str], empty: str) -> list[str]:
+    if not items:
+        return [f"- {empty}"]
+    out = [f"- {x}" for x in items[:5]]
+    if len(items) > 5:
+        out.append(f"- …还有 {len(items) - 5} 条")
+    return out

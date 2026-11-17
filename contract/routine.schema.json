@@ -131,6 +131,10 @@
           "type": "string",
           "format": "date",
           "description": "截止日。给了就按倒计时提醒：文案自动带「距截止还有 N 天」，每天只提醒一次（expectFires 固定为 1），并从 validFrom 起每天重新提醒直到 dueDate 当天。剩余天数由代码算，不由模型判断"
+        },
+        "format": {
+          "enum": ["follow", "summary"],
+          "description": "摘要窗口：到点由代码用本地数据现算文案（跟进 / 总结版式），不是静态 label。文案不靠模型在线，数据缺失时降级成普通提醒"
         }
       },
       "allOf": [
