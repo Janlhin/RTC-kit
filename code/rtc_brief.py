@@ -305,32 +305,67 @@ def _span(minutes: int) -> str:
     return f"{m} 分钟"
 
 
+def _recurring_count(routine: dict) -> int:
+    """时刻表里「每天会响」的窗口数：一次性（`oneOff` / `once-*`）不算。"""
+    n = 0
+    for w in routine.get("alarmWindows") or []:
+        if w.get("oneOff") or str(w.get("id") or "").startswith("once-"):
+            continue
+        n += 1
+    return n
+
+
 def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
-    """一页行程：现在在响什么、接下来是什么、今天已经过了什么。"""
+    """一页行程：现在在响什么、有没有欠着没结的、接下来是什么、今天的账。"""
     weekday = "一二三四五六日"[now.weekday()]
     head = f"今日行程（{now.strftime('%m-%d')} 周{weekday}）"
+    alert = (
+        []
+        if _recurring_count(routine)
+        else ["注意：时刻表里只有一次性提醒，没有日常窗口；明天不会按日常计划响。"]
+    )
     if not state:
-        return [head, "今天还没生成计划（cron 每天 06:00 生成，也可以手动 plan --force）"]
+        return [
+            head,
+            *alert,
+            "今天还没生成计划（cron 每天 06:00 生成，也可以手动 plan --force）",
+        ]
     windows = state.get("windows") or []
     if not windows:
-        return [head, "今天没有安排。"]
+        return [head, *alert, "今天没有安排。"]
 
     def key(w: dict) -> str:
         return w.get("start") or ""
 
     ringing = [w for w in windows if w.get("state") == "ringing"]
     pending = [w for w in windows if w.get("state") == "pending" and key(w) > now.isoformat()]
+    # 欠着的：过期没确认的，以及已经到点但系统还没标 missed 的。
+    unsettled = [
+        w
+        for w in windows
+        if w.get("state") == "missed"
+        or (w.get("state") == "pending" and (w.get("start") or "") <= now.isoformat())
+    ]
     done = [w for w in windows if w.get("state") in ("acked", "delivered", "missed", "skipped", "cancelled")]
 
-    lines = [head]
+    lines = [head, *alert]
     if ringing:
         w = ringing[0]
+        hints = "、".join(f"「{h}」" for h in (w.get("ackHints") or []))
         lines.append(
             f"现在：{w['label']} 正在响（第 {w.get('fireCount', 1)} 次，"
-            f"{_hhmm(w.get('start'))}-{_hhmm(w.get('end'))}）"
+            f"{_hhmm(w.get('start'))}-{_hhmm(w.get('end'))}）" + (f"；回 {hints} 就停" if hints else "")
         )
     else:
         lines.append("现在：没有在响的提醒。")
+
+    if unsettled:
+        words = []
+        for w in sorted(unsettled, key=key)[:3]:
+            why = "已过期" if w.get("state") == "missed" else "到点后没结"
+            words.append(f"{_hhmm(w.get('start'))} {w['label']}（响 {w.get('fireCount', 0)} 次，{why}）")
+        more = "" if len(unsettled) <= 3 else f"，等 {len(unsettled)} 条"
+        lines.append("欠着的：" + "、".join(words) + more)
 
     if pending:
         rest = sorted(pending, key=key)
@@ -353,6 +388,11 @@ def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
                 for w in sorted(done, key=key)
             )
         )
+
+    fires = sum(int(w.get("fireCount") or 0) for w in windows)
+    settled = sum(1 for w in windows if w.get("state") in ("acked", "delivered"))
+    missed = sum(1 for w in windows if w.get("state") == "missed")
+    lines.append(f"今天的账：计划 {len(windows)} 条 · 响 {fires} 次 · 确认 {settled} 条 · 漏 {missed} 条")
     return lines
 
 

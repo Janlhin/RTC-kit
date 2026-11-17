@@ -2140,6 +2140,53 @@ class TestBrief(RtcCase):
         text = self.agents_md().read_text(encoding="utf-8")
         self.assertIn("起床 已确认", text, "确认后简报没刷新")
 
+    def test_brief_lists_unsettled(self):
+        """响过但没确认的必须点名，别让模型以为「没事了」。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:05:00+08:00")
+        self.cli("due", now="2026-11-10T07:35:00+08:00")  # 过了 end，标 missed
+        rc, out, _ = self.cli("brief", now="2026-11-10T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("欠着的：", out, out)
+        self.assertIn("起床", out, out)
+        self.assertIn("已过期", out, out)
+
+    def test_brief_daily_accounting(self):
+        """一行账：计划几条、响几次、确认几条、漏几条。"""
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:05:00+08:00")
+        self.cli("ack", "--window", "wake", "--text", "起了", now="2026-11-10T07:06:00+08:00")
+        rc, out, _ = self.cli("brief", now="2026-11-10T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("今天的账：计划 1 条 · 响 1 次 · 确认 1 条 · 漏 0 条", out, out)
+        self.assertNotIn("欠着的：", out, "已确认不该再列进欠着的")
+
+    def test_brief_warns_one_off_only_timetable(self):
+        """表里只剩一次性窗口时，简报第一行就得提醒：明天不会响。"""
+        r = base_routine(
+            alarmWindows=[
+                {
+                    "id": "once-2000",
+                    "label": "回家",
+                    "start": "20:00",
+                    "end": "20:04",
+                    "intervalMin": 5,
+                    "expectFires": 1,
+                    "ackHints": ["知道了"],
+                    "oneOff": True,
+                    "validFrom": "2026-11-10",
+                    "validUntil": "2026-11-10",
+                }
+            ]
+        )
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, _ = self.cli("brief", now="2026-11-10T07:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("时刻表里只有一次性提醒", out, out)
+
 
 class TestHandEditedRoutine(RtcCase):
     """文字约束拦不住手写；摘要守卫要能当场抓住并留原件。
