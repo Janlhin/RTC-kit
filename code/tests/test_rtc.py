@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -2286,6 +2287,26 @@ class TestBrief(RtcCase):
         rc, out, err = self.cli("status")
         self.assertEqual(rc, 0, err)
         self.assertIn("本地 1 处 · git 未推送 · 错误 1：E: 盘不可写", out, out)
+
+    def test_manual_backup_records_itself(self):
+        """手动 backup 也要记账：15:09 跑完，status 不能还报凌晨那次。
+
+        实机上就是这么被坑的：跑了一次 `rtc.py backup`，zip 写好了，
+        status 那行却还停在 00:00，看着像没备份。
+        """
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        out_dir = self.ws / "backup-target"
+        rc, out, err = self.cli("backup", "--to", str(out_dir))
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(list(out_dir.glob("RTC-*.zip")), err)
+        mark = json.loads((self.ws / "state" / ".backup-last.json").read_text(encoding="utf-8"))
+        self.assertEqual(mark["written"], 1, mark)
+        self.assertIsNone(mark["git"], mark)
+        self.assertEqual(date.today().isoformat(), mark["date"], mark)
+        rc, out, err = self.cli("status")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("本地 1 处 · git 未跑", out, out)
 
 
 class TestHandEditedRoutine(RtcCase):

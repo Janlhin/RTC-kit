@@ -102,18 +102,23 @@ def archive_members() -> list[tuple[Path, str]]:
     return members
 
 
-def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], list[str]]:
-    """把工作区档案压成一份 zip 写到每个目标盘；返回（写成功的路径, 错误列表）。"""
+def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], list[Path], list[str]]:
+    """把工作区档案压成一份 zip 写到每个目标盘。
+
+    返回（本次新写的, 今天已经在那儿、沿用的, 错误列表）。
+    两类分开报：沿用的那一份可能是别人写进来的，说成"刚写好"就是在骗用户。
+    """
     members = archive_members()
     if not members:
-        return [], ["工作区里没有可备份的档案（还没生成过数据？）"]
+        return [], [], ["工作区里没有可备份的档案（还没生成过数据？）"]
 
     written: list[Path] = []
+    existing: list[Path] = []
     errors: list[str] = []
     for t in targets:
         dst = t / f"RTC-{day.replace('-', '')}.zip"
         if dst.exists():
-            written.append(dst)
+            existing.append(dst)
             continue
         tmp = dst.with_name(dst.name + ".tmp")
         try:
@@ -145,7 +150,35 @@ def backup_now(targets: list[Path], keep: int, day: str) -> tuple[list[Path], li
                 old.unlink()
         except OSError:
             pass
-    return written, errors
+    return written, existing, errors
+
+
+def record_mark(day: str, at: datetime, written: int, git: bool | None, errors: list[str]) -> None:
+    """把「这次备份到底做了什么」落到 state/.backup-last.json。
+
+    status 那一行读的就是这里，所以**手动 backup 也必须写**——否则用户 15:09 跑完，
+    status 还在报凌晨那次，等于告诉他"没跑过"。
+    `git` 用 None 表示"这一趟没碰 git"，和"推了但失败"要分开。
+    """
+    mark = core.WORKSPACE / BACKUP_MARK
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(
+            json.dumps(
+                {
+                    "date": day,
+                    "at": at.isoformat(timespec="seconds"),
+                    "written": written,
+                    "git": git,
+                    "errors": errors,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def daily_backup(now: datetime) -> list[str]:
@@ -167,32 +200,16 @@ def daily_backup(now: datetime) -> list[str]:
         return []  # 一样都没配，静默；手动 backup / gitarchive 会明确告诉你
 
     written: list[Path] = []
+    existing: list[Path] = []
     errors: list[str] = []
     if targets:
-        written, errors = backup_now(targets, keep, today)
+        written, existing, errors = backup_now(targets, keep, today)
     did_git = False
     if has_git:
         did_git, git_errors = git_archive(now)
         errors = list(errors) + [f"git: {e}" for e in git_errors]
 
-    try:
-        mark.parent.mkdir(parents=True, exist_ok=True)
-        mark.write_text(
-            json.dumps(
-                {
-                    "date": today,
-                    "at": now.isoformat(timespec="seconds"),
-                    "written": len(written),
-                    "git": did_git,
-                    "errors": errors,
-                },
-                ensure_ascii=False,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
+    record_mark(today, now, len(written) + len(existing), did_git if has_git else None, errors)
     if errors:
         return [f"⚠️ 备份部分失败：{'；'.join(errors[:3])}"]
     return []
@@ -208,13 +225,18 @@ def cmd_backup(args) -> int:
     if not targets:
         print("backup: 没找到可写的第二块盘；用 --to 指定一个目录", file=sys.stderr)
         return 3
-    written, errors = backup_now(targets, keep, today)
+    written, existing, errors = backup_now(targets, keep, today)
     for w in written:
         size = w.stat().st_size / 1024
         print(f"backup: {w}  {size:.1f} KB")
+    for w in existing:
+        size = w.stat().st_size / 1024
+        print(f"backup: {w}  {size:.1f} KB（今天已存在，未覆盖）")
     for e in errors:
         print(f"backup: {e}", file=sys.stderr)
-    if not written:
+    # 手动备份同样要记账：status 那一行读的就是这份记录
+    record_mark(today, datetime.now(), len(written) + len(existing), None, errors)
+    if not written and not existing:
         return 3
     return 0
 
