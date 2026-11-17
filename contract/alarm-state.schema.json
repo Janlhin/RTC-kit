@@ -51,13 +51,13 @@
         "dueDate": { "type": ["string", "null"], "format": "date", "description": "截止日（倒计时提醒用）" },
         "checklist": {
           "type": "array",
-          "description": "该窗口的清单（id 按序号自动生成）",
+          "description": "该窗口的清单；id 是跨日不变的稳定身份（显式 id / 标签哈希），序号只用于显示",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["id", "label"],
             "properties": {
-              "id": { "type": "string" },
+              "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
               "label": { "type": "string" }
             }
           }

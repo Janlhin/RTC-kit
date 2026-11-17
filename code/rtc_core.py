@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -659,10 +660,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
                 "dueDate": due,
                 "disabled": False,
                 "cancelledAt": None,
-                "checklist": [
-                    {"id": str(i + 1), "label": str(label)}
-                    for i, label in enumerate(w.get("checklist") or [])
-                ],
+                "checklist": _checklist_defs(items_def),
                 "checked": [],
             }
         )
@@ -686,17 +684,87 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
 TERMINAL = {"acked", "missed", "skipped", "cancelled", "delivered"}
 
 
+def _item_id(label: str, explicit: str | None = None) -> str:
+    """清单项的稳定身份：有显式 id 就用（不合规的退回内容哈希），否则用标签哈希。
+
+    身份必须跨日不变——顺序会变、显示序号只是给人看的（issue #9 §9）。
+    """
+    if explicit:
+        cand = str(explicit).strip()
+        if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", cand):
+            return cand
+    norm = " ".join(str(label).split())
+    return "i" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
+
+
+def _checklist_defs(items_def: list) -> list[dict]:
+    """把法则里的清单定义（字符串或 {id,label}）统一成 {id,label}。"""
+    out: list[dict] = []
+    seen: dict[str, int] = {}
+    for raw in items_def:
+        if isinstance(raw, dict):
+            label = str(raw.get("label") or raw.get("id") or "").strip()
+            explicit = raw.get("id")
+        else:
+            label = str(raw).strip()
+            explicit = None
+        if not label:
+            continue
+        iid = _item_id(label, explicit)
+        if iid in seen:
+            seen[iid] += 1
+            iid = f"{iid}-{seen[iid]}"
+        else:
+            seen[iid] = 1
+        out.append({"id": iid, "label": label})
+    return out
+
+
 def _migrate_checklist(prev: dict, w: dict) -> None:
     """把旧窗口的勾选状态与「已打完」终态迁移到新窗口上。
 
     清单不会因为日切而重置——昨天打了 3 项，今天还剩 15 项。
+    迁移按**稳定 id** 对齐：老状态里存的可能还是序号（"1"），也认得出来；
+    新清单里已经没有的项，勾选随之作废并记一条 `orphaned` 事件，不静默丢。
     """
     if not w.get("checklist"):
         return
-    w["checked"] = list(prev.get("checked") or [])
     items = w["checklist"]
-    done = set(w["checked"])
-    if prev.get("state") == "acked" and len(done) >= len(items):
+    by_id = {it["id"]: it for it in items}
+    old = list(prev.get("checked") or [])
+    keep: list[str] = []
+    orphaned: list[str] = []
+    for token in old:
+        token = str(token)
+        resolved: str | None = None
+        if token in by_id:
+            resolved = token
+        elif token.isdigit():
+            idx = int(token) - 1
+            if 0 <= idx < len(items):
+                resolved = items[idx]["id"]
+        else:
+            for it in items:
+                if it["label"] == token:
+                    resolved = it["id"]
+                    break
+        if resolved is None:
+            orphaned.append(token)
+        else:
+            keep.append(resolved)
+    w["checked"] = sorted(set(keep))
+    if orphaned and prev.get("id"):
+        try:
+            for token in orphaned:
+                hist.log_event(
+                    "orphaned",
+                    prev["id"],
+                    item_id=token,
+                    note="清单项已不存在，勾选作废",
+                )
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            pass
+    if prev.get("state") == "acked" and len(w["checked"]) >= len(items):
         # 已经全部打完 → 保持完成状态，之后不再提醒
         w["state"] = "acked"
         w["ackedAt"] = prev.get("ackedAt")
@@ -1505,7 +1573,7 @@ def cmd_check(args) -> int:
         checked.discard(target["id"])
     else:
         checked.add(target["id"])
-    hit["checked"] = sorted(checked, key=lambda x: int(x) if x.isdigit() else 0)
+    hit["checked"] = sorted(checked)
 
     rev = int(state["rev"])
     state["rev"] = rev + 1
