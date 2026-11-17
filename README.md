@@ -170,6 +170,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 | `MANIFEST.md` | 第三方来源登记（URL / 版本 / 许可结论） |
 | `LICENSE` | AGPL-3.0（仅适用于本仓库原创内容） |
 | `docs/architecture.md` | 分层架构、职责边界、为什么这样切、演进路径 |
+| `docs/behavior-contract.md` | 业务契约：plan → due → ack → rollover 的状态转换、输出/退出码、冲突与空日 |
 | `docs/contributing.md` | 怎么改、怎么填占位符、什么不能提交 |
 | `docs/troubleshooting.md` | 故障处置、备份与恢复 |
 | `docs/attribution.md` | 与上游项目的关系、许可边界 |
