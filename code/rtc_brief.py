@@ -238,7 +238,13 @@ def _backup_line(backup: dict | None) -> str:
         return "  备份  尚未备份（python rtc.py archive backup 可手动跑一次）"
     at = str(backup.get("at") or "")[5:16].replace("T", " ")
     written = backup.get("written", 0)
-    git = "git 已推送" if backup.get("git") else "git 未推送"
+    g = backup.get("git")
+    if g is True:
+        git = "git 已推送"
+    elif g is False:
+        git = "git 未推送"
+    else:
+        git = "git 未跑（这次只做本地）"
     errors = backup.get("errors") or []
     if errors:
         return f"  备份  {at}  本地 {written} 处 · {git} · 错误 {len(errors)}：{str(errors[0])[:60]}"
