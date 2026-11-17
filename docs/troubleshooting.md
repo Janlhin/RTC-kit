@@ -312,6 +312,9 @@ Copy-Item -Force "C:\Temp\rtc-restore\rules\routines.json" "C:\Users\<你>\RTC\r
 恢复完跑一次 `rtc.py --workspace <工作区> status` 和 `history --month <当月>`，确认窗口和
 历史都对得上。
 
+完整的恢复流程（含「这份备份是不是我的」验证、只读试跑、对账、演练记录）见
+[RESTORE.md](RESTORE.md)。
+
 > 备份是**整份快照**，不是增量。恢复时先解开看一眼 `state/schedule/` 里有哪些日期，
 > 再决定整体盖回还是只挑需要的日子复制过去。
 
