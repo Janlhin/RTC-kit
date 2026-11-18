@@ -27,7 +27,7 @@
 - **模型版（09:00）**：`rtc-report` 把 `rtc_report.py` 的素材（昨日执行结果 / 今日待办 / 用户口述）注入 prompt，模型据此写人话，落盘成 `state/reports/<日期>.md` 并投递；投完记一条投递回执（`--window report --result ok`）
 - **静态版（09:10 兜底）**：没有投递回执时，`report-fallback` 窗口才接管——有模型文件就补发文件正文，没文件就用代码拼出上面的版式。**字段可以粗，但四个段头一个都不能少，也不许空着不发**
 
-**唯一能压住兜底的是投递回执，不是文件存在。** 文件只证明模型写完了；写完了但发送失败时若静默，用户会整天没有汇报。时刻表里 `format: report` 与 `format: report-fallback` 只能二选一，`plan` 会拒绝同时启用。
+**唯一能压住兜底的是投递回执，不是文件存在。** 文件只证明模型写完了；写完了但发送失败时若静默，用户会整天没有汇报。被回执压住的兜底记 `skipped`（原因 `covered_by_receipt`），不记 `delivered`——它没送过。时刻表里 `format: report` 与 `format: report-fallback` 只能二选一，`plan` 会拒绝同时启用。
 
 `📝 备注` 优先写用户口述（`state/notes/<日期>.md`）；没有口述就写 `tasks.md` 还剩几条。`💬 遗留建议` 只写 `tasks.md` 里顺延或反复没动的条目，不编。
 

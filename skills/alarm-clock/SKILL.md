@@ -269,6 +269,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} delivery-record --windo
 
 - 回执是「用户真的收到了」的唯一证据；**文件存在不算**，不要拿它当交付证明
 - 发送失败就记 `--result fail --error "失败原因"`（兜底窗口会接手，把汇报补发出去）
+- 被回执压住的兜底窗口记 `skipped`（原因 `covered_by_receipt`），**不是** `delivered`——它没送过，别在历史里冒充送达
 - 时刻表里 `format: report` 与 `format: report-fallback` **只能二选一**；同时配置 `plan` 会直接拒绝
 
 

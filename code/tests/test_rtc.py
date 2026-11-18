@@ -3937,7 +3937,12 @@ class TestMorningFallback(RtcCase):
         rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertEqual(out.strip(), "", f"有回执就不该再发：{out}")
-        self.assertEqual(self.window("brief-morning-fallback")["state"], "delivered")
+        self.assertEqual(self.window("brief-morning-fallback")["state"], "skipped")
+        self.assertEqual(
+            self.window("brief-morning-fallback")["missedReason"],
+            "covered_by_receipt",
+            "压住兜底要留下原因：是「已送达所以没发」，不是「漏响」",
+        )
 
     def test_fallback_resends_report_file_without_receipt(self):
         """写好了但没送达（无回执）→ 兜底要把文件内容补发出去，而不是静默判 delivered。"""
@@ -3955,6 +3960,27 @@ class TestMorningFallback(RtcCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("📊 昨日汇报 — 2026-11-16", out)
         self.assertEqual(self.window("brief-morning-fallback")["fireCount"], 1)
+
+    def test_fallback_expired_with_receipt_is_skipped_not_missed(self):
+        """过了点的兜底窗口：有回执 = 无需再响（skipped），不是漏响（missed）。"""
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli(
+            "delivery-record",
+            "--window",
+            "report",
+            "--target",
+            "hermes",
+            "--result",
+            "ok",
+            "--at",
+            "2026-11-17T09:05:00+08:00",
+        )
+        rc, out, err = self.cli("due", now="2026-11-17T12:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        w = self.window("brief-morning-fallback")
+        self.assertEqual(w["state"], "skipped")
+        self.assertEqual(w["missedReason"], "covered_by_receipt")
+        self.assertEqual(out.strip(), "")
 
     def test_fallback_not_counted_in_tally(self):
         """兜底窗口是技术守卫，不该出现在「今日闹钟 N 个窗口」里。"""

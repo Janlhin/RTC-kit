@@ -209,7 +209,7 @@ dueDate+2 ──→ 之后            永不生成（不是「还没到」，是
 - `summary` → 按「总结」版式：已完成 / 未完成 / 备注 / 明日预告，外加自检行
   （`今日闹钟：N 个窗口，响 M 次，确认 A / 漏 B / 未到 C`）
 - `report` → 按「汇报」版式：读 `state/reports/<日期>.md`（模型写的）；读不到就用静态汇报兜底
-- `report-fallback` → **只做兜底**：当天有汇报的**投递回执**（`result=ok`）才静默（判 delivered）；没有回执就有文件补发文件正文、没文件发静态汇报
+- `report-fallback` → **只做兜底**：当天有汇报的**投递回执**（`result=ok`）才静默（记 `skipped`，原因 `covered_by_receipt`）；没有回执就有文件补发文件正文、没文件发静态汇报
 - 数据全在本地：`state/alarms.json` 里响了几次、哪条确认哪条漏；`tasks.md` 的 Today 段
 - 同一份数据算出同一段文字；数据读不出来 → 自动退回普通提醒文案，**照常响**
 - `follow` / `summary` 不新增 cron，仍由 `rtc-due` 命中；不带 `format` 的窗口行为完全不变

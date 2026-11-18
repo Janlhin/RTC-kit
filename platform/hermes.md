@@ -44,7 +44,7 @@ hermes cron create "0 9 * * *"  --name rtc-report --script rtc_report.py \
 | 时间 | 谁 | 做什么 |
 |---|---|---|
 | 09:00 | `rtc-report`（agent 模式） | 读 `rtc_report.py` 吐的素材，写 `state/reports/<日期>.md` 并投递；投完后调 `delivery-record --window report --result ok` 留回执 |
-| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天有 **`result=ok` 的投递回执** → 判 `delivered`、静默；**没有回执** → 有文件补发文件内容，没文件发静态汇报 |
+| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天有 **`result=ok` 的投递回执** → 判 `skipped`（原因 `covered_by_receipt`）、静默；**没有回执** → 有文件补发文件内容，没文件发静态汇报 |
 
 时刻表里**只配一个**兜底窗口：
 
