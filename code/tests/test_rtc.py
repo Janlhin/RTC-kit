@@ -314,6 +314,21 @@ class TestSchema(unittest.TestCase):
         self.assertTrue(errs, "oneOff=true 但 expectFires≠1 必须被契约拒绝")
 
     @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_report_formats_accepted_by_routine_schema(self):
+        """routine.schema 必须接受运行时已支持的两种早报模式，别让规范比实现慢。"""
+        import jsonschema
+
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        validator = jsonschema.Draft202012Validator(
+            schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+        )
+        for fmt in ("report", "report-fallback"):
+            with self.subTest(format=fmt):
+                good = base_routine()
+                good["alarmWindows"][0]["format"] = fmt
+                self.assertEqual(list(validator.iter_errors(good)), [], f"{fmt} 不该被契约拒绝")
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
     def test_new_fields_accepted(self):
         import jsonschema
 

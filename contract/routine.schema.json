@@ -159,8 +159,8 @@
           "description": "该倒计时已被取消。取消=整段停（含复盘日），代码写入；手工改它等于伪造取消，别这么干"
         },
         "format": {
-          "enum": ["follow", "summary"],
-          "description": "摘要窗口：到点由代码用本地数据现算文案（跟进 / 总结版式），不是静态 label。文案不靠模型在线，数据缺失时降级成普通提醒"
+          "enum": ["follow", "summary", "report", "report-fallback"],
+          "description": "摘要/早报窗口类型：follow=跟进、summary=总结、report=早报（due 直接读 state/reports/<日期>.md，缺失时静态兜底）、report-fallback=早报兜底窗口（有 result=ok 回执则静默，否则有文件补发文件、没文件发静态）。report 与 report-fallback 不能同时启用"
         }
       },
       "allOf": [
