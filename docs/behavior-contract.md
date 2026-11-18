@@ -56,7 +56,7 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 |---|---|---|---|
 | `plan` | 空 | 0（含冲突）/ 3（配置非法） | stderr 一行 + `state/conflicts.jsonl` |
 | `due` | 正文或空（**冲突时为空**） | 0 / 3 | stderr + `state/conflicts.jsonl` |
-| `ack` | 空 | 0 / 2（重试耗尽）/ 4（找不到窗口） | stderr + `state/conflicts.jsonl` |
+| `ack` | 空 | 0 / 2（重试耗尽）/ 3（外部回调参数不全）/ 4（找不到窗口或日期不符） | stderr + `state/conflicts.jsonl` |
 | `check` / `cancel` / `postpone` / `complete` / `disable` / `enable` | 空 | 0 / 2 / 3 / 4 | stderr |
 | `history` / `events` / `stats` / `status` | 正文 | 0 / 4 | stderr |
 
@@ -84,6 +84,23 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 3. 3 次耗尽 → 退出 2，stderr 给尝试次数与最后的 `rev`
 
 > `alarm-state.schema.json` 里 `rev` 的描述与本节是同一份契约的两处渲染，改一处必须改另一处。
+
+### 4.1 外部回调 ack（#70）
+
+平台适配器收到「对方回了」时，用带日期与幂等键的方式结束当天窗口：
+
+```bash
+python rtc.py --workspace <dir> ack \
+  --window <id> --date YYYY-MM-DD \
+  --source external --event-id <事件id> --text "<可选>"
+```
+
+- `--source external` 必须同时给 `--date` 与 `--event-id`，否则退出 `3`
+- `--date` 必须等于当前 `state.planDate`，否则退出 `4`，不写任何东西
+- 同一 `--event-id` 重复回调：退出 `0`，不 bump `rev`，不写第二条 history
+- 同一 `--event-id` 指向另一个窗口：退出 `4`（不允许改绑）
+- 幂等键记在窗口的 `ackEventId` 上，和 `ackedAt` / `ackText` 同一次 `atomic_write` 落盘
+- 鉴权在适配器侧完成；RTC 只接收已经验过签的内部调用，不对外暴露无鉴权入口
 
 ## 5. 空日契约
 
