@@ -2303,6 +2303,10 @@ def cmd_add_window(args) -> int:
         print("add-window: validFrom 不能晚于 validUntil", file=sys.stderr)
         return 3
 
+    # 规范要求 ackHints 必填；省略 --ack 时写显式合法默认，别让候选配置带着洞过门。
+    if not w.get("ackHints"):
+        w["ackHints"] = ["知道了"]
+
     active_formats = {
         str(x.get("format"))
         for x in defs

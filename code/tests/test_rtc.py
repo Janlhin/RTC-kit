@@ -2272,6 +2272,27 @@ class TestAddWindow(RtcCase):
         self.assertIsNotNone(win, "生效首日必须进账本")
         self.assertEqual(win["state"], "pending")
 
+    def test_default_ack_hints_keeps_candidate_valid(self):
+        """不传 --ack 也要写显式合法默认，别让候选配置带着洞过门。"""
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "noack",
+            "--label",
+            "无确认词",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+        )
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "noack")
+        self.assertEqual(w["ackHints"], ["知道了"], "schema 要求 ackHints 必填")
+        if HAVE_JSONSCHEMA:
+            jsonschema.validate(self._routine(), json.loads(SCHEMA.read_text(encoding="utf-8")))
+
 
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""
