@@ -2194,6 +2194,40 @@ class TestAddWindow(RtcCase):
         self.assertEqual(rc, 3, "report 与 report-fallback 不能同时启用")
         self.assertIn("二选一", err)
 
+    def test_dry_run_never_repairs_broken_routine(self):
+        """dry-run 是只读预览：坏时刻表直说，不能借自愈顺手改盘。"""
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "routines.program-last.json").write_text(
+            json.dumps(base_routine(), ensure_ascii=False), encoding="utf-8"
+        )
+        routine = self.ws / "rules" / "routines.json"
+        bad = "{ 这不是 JSON"
+        routine.write_text(bad, encoding="utf-8")
+
+        rc, out, err = self.cli(
+            "add-window",
+            "--id",
+            "dry",
+            "--label",
+            "试跑",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+            "--dry-run",
+        )
+        self.assertEqual(rc, 3, "坏时刻表的 dry-run 必须报错，不能靠自愈")
+        self.assertIn("校验失败", err)
+        self.assertEqual(routine.read_text(encoding="utf-8"), bad, "dry-run 绝不能改写时刻表")
+        self.assertEqual(
+            [p.name for p in bdir.iterdir() if p.name.startswith("routines.corrupt-")],
+            [],
+            "dry-run 不该留下「我把坏文件备份了」的痕迹",
+        )
+
 
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""

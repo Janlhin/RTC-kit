@@ -2223,7 +2223,9 @@ def cmd_add_window(args) -> int:
     `--dry-run` 只打印将要写入的窗口，不落盘。
     """
     digest = file_digest(ROUTINE)
-    routine = load_routine()
+    # dry-run 是「预览」，必须是纯只读：时刻表坏了就直说，不能借自愈顺手改文件。
+    # 否则用户以为只是看一眼，磁盘上的 routines.json / 印章 / 备份已经变了。
+    routine = load_routine(read_only=bool(args.dry_run))
     defs = routine.get("alarmWindows") or []
     idx = next((i for i, x in enumerate(defs) if x.get("id") == args.id), None)
 
