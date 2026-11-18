@@ -2293,6 +2293,30 @@ class TestAddWindow(RtcCase):
         if HAVE_JSONSCHEMA:
             jsonschema.validate(self._routine(), json.loads(SCHEMA.read_text(encoding="utf-8")))
 
+    def test_update_oneoff_keeps_single_fire(self):
+        """只改文案时，不按时刻算术重写一次性窗口的响铃次数。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "travel",
+                "label": "旅游",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-18",
+                "validUntil": "2026-11-18",
+            }
+        ]
+        self.write_routine(r)
+        rc, _, err = self.cli("add-window", "--id", "travel", "--update", "--label", "旅游（改）")
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "travel")
+        self.assertEqual(w["label"], "旅游（改）")
+        self.assertEqual(w["expectFires"], 1, "只改文案不该把一次性提醒改成一天五次")
+
 
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""

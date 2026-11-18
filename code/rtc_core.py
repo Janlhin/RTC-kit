@@ -2274,10 +2274,14 @@ def cmd_add_window(args) -> int:
     if interval <= 0:
         print("add-window: --interval 必须是正整数", file=sys.stderr)
         return 3
-    computed = expect_fires(start, end, interval)
+    # 一次性 / 倒计时 / 清单窗口每天只响一次，expectFires 由类型固定为 1；
+    # 只改文案时如果按时刻算术重算，会把「响一次」改写成「响五次」。
+    fixed_once = bool(w.get("oneOff") or w.get("dueDate") or w.get("checklist"))
+    computed = 1 if fixed_once else expect_fires(start, end, interval)
     if args.expect_fires is not None and int(args.expect_fires) != computed:
+        why = "一次性/倒计时/清单窗口固定为 1" if fixed_once else f"应为 {computed}"
         print(
-            f"add-window: --expect-fires={args.expect_fires} 与窗口算术不符（应为 {computed}）",
+            f"add-window: --expect-fires={args.expect_fires} 与窗口类型不符（{why}）",
             file=sys.stderr,
         )
         return 3
