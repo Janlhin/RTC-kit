@@ -4,9 +4,9 @@
 运行：
     python code/tests/test_audit.py
 """
+
 from __future__ import annotations
 
-import os
 import shutil
 import sqlite3
 import sys
@@ -43,9 +43,15 @@ class AuditCase(unittest.TestCase):
 
     def test_new_call_records_actor_source(self):
         """新调用能记下谁改的、从哪来。"""
-        hist.log_event("postpone", "wake", actor="model", source="wechat",
-                       from_date="2026-11-18", to_date="2026-11-20",
-                       note="用户说推迟两天")
+        hist.log_event(
+            "postpone",
+            "wake",
+            actor="model",
+            source="wechat",
+            from_date="2026-11-18",
+            to_date="2026-11-20",
+            note="用户说推迟两天",
+        )
         row = hist.events("wake")[0]
         self.assertEqual(row["actor"], "model")
         self.assertEqual(row["source"], "wechat")
@@ -60,8 +66,10 @@ class AuditCase(unittest.TestCase):
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, date TEXT,
             window_id TEXT NOT NULL, item_id TEXT, kind TEXT NOT NULL,
             from_date TEXT, to_date TEXT, note TEXT)""")
-        con.execute("INSERT INTO events (ts, window_id, kind, note) VALUES (?,?,?,?)",
-                    ("2026-01-01T00:00:00+00:00", "old", "ack", "迁移前的数据"))
+        con.execute(
+            "INSERT INTO events (ts, window_id, kind, note) VALUES (?,?,?,?)",
+            ("2026-01-01T00:00:00+00:00", "old", "ack", "迁移前的数据"),
+        )
         con.commit()
         con.close()
         # 触发建表/迁移
@@ -75,8 +83,9 @@ class AuditCase(unittest.TestCase):
     def test_history_answers_who_changed(self):
         """能回答"谁改的"：同一个窗口的变更序列带不同 actor。"""
         hist.log_event("create", "w1", actor="user", source="cli")
-        hist.log_event("edit", "w1", actor="model", source="wechat",
-                       from_date="2026-11-20", to_date="2026-11-25")
+        hist.log_event(
+            "edit", "w1", actor="model", source="wechat", from_date="2026-11-20", to_date="2026-11-25"
+        )
         hist.log_event("ack", "w1", actor="user", source="cron")
         rows = hist.events("w1")
         self.assertEqual([r["kind"] for r in rows], ["create", "edit", "ack"])

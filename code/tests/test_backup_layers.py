@@ -4,6 +4,7 @@
 运行：
     python code/tests/test_backup_layers.py
 """
+
 from __future__ import annotations
 
 import json
@@ -15,8 +16,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "code"))
-import rtc_core as core  # noqa: E402
 import rtc_archive as archive  # noqa: E402
+import rtc_core as core  # noqa: E402
 
 
 class BackupLayerCase(unittest.TestCase):
@@ -33,8 +34,7 @@ class BackupLayerCase(unittest.TestCase):
         shutil.rmtree(self.ws, ignore_errors=True)
 
     def write_cfg(self, data):
-        (self.ws / "rules" / "backup.json").write_text(
-            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        (self.ws / "rules" / "backup.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def test_legacy_targets_only(self):
         """老格式 targets 数组照常工作。"""
@@ -45,12 +45,14 @@ class BackupLayerCase(unittest.TestCase):
 
     def test_cloud_and_nas_added(self):
         """cloud/nas 填了就加入目标列表。"""
-        self.write_cfg({
-            "targets": ["D:/bk"],
-            "cloud": "C:/Users/me/OneDrive/RTC",
-            "nas": "//nas/share/RTC",
-            "keep": 30,
-        })
+        self.write_cfg(
+            {
+                "targets": ["D:/bk"],
+                "cloud": "C:/Users/me/OneDrive/RTC",
+                "nas": "//nas/share/RTC",
+                "keep": 30,
+            }
+        )
         targets, _ = archive.backup_config()
         paths = [str(t) for t in targets]
         self.assertIn("D:\\bk", paths)

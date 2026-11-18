@@ -291,7 +291,7 @@ def scaffold_workspace(
             {
                 "targets": backup_targets_for(workspace),
                 "cloud": None,  # 可选异地层：云盘挂载目录，填了才启用
-                "nas": None,    # 可选异地层：NAS 挂载目录，填了才启用
+                "nas": None,  # 可选异地层：NAS 挂载目录，填了才启用
                 "keep": 30,
             },
             ensure_ascii=False,

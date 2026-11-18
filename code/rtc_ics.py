@@ -11,11 +11,12 @@
     python rtc_ics.py --workspace <dir>            # 导出到 stdout
     python rtc_ics.py --workspace <dir> -o cal.ics # 写到文件
 """
+
 from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,10 +24,7 @@ import rtc_core as core  # noqa: E402
 
 
 def ics_escape(text: str) -> str:
-    return (str(text).replace("\\", "\\\\")
-                  .replace(";", "\\;")
-                  .replace(",", "\\,")
-                  .replace("\n", "\\n"))
+    return str(text).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
 
 
 def fold(line: str) -> str:
@@ -66,10 +64,7 @@ def rrule_from_window(w: dict) -> str:
 
 
 def export_calendar(workspace: Path) -> str:
-    """读 routine 与今天的状态，产出标准 VCALENDAR。"""
-    # 只读文件，不调 core.load_routine()（那依赖全局 WORKSPACE，测试里没有）
-    rp = workspace / "rules" / "routines.json"
-    routine = json_load(rp) if rp.exists() else None
+    """读当天状态，产出标准 VCALENDAR。源真相仍在 routines.json + alarms.json。"""
     state = None
     sp = workspace / "state" / "alarms.json"
     if sp.exists():
@@ -120,6 +115,7 @@ def export_calendar(workspace: Path) -> str:
 
 def json_load(path: Path):
     import json
+
     return json.loads(path.read_text(encoding="utf-8"))
 
 

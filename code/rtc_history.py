@@ -223,8 +223,9 @@ def log_event(
     stamp = (ts or datetime.now(UTC)).isoformat()
     con = _connect()
     try:
+        cols_sql = "ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source"
         con.execute(
-            """INSERT INTO events (ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source)
+            f"""INSERT INTO events ({cols_sql})
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (stamp, day, window_id, item_id, kind, from_date, to_date, note, actor, source),
         )
@@ -262,8 +263,10 @@ def rows_for_range(start: str, end: str) -> list[dict]:
 
 
 def events(window_id: str | None = None, since: str | None = None, until: str | None = None) -> list[dict]:
-    sql = ("SELECT ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source "
-           "FROM events WHERE 1=1")
+    sql = (
+        "SELECT ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source "
+        "FROM events WHERE 1=1"
+    )
     params: list[str] = []
     if window_id:
         sql += " AND window_id=?"
