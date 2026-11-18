@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
 import rtc_core as core
 import rtc_history as history
@@ -636,6 +637,10 @@ def _window_tally(state: dict) -> dict:
     wins = state.get("windows") or []
     tally: dict = {"windows": len(wins), "fires": 0, "acked": [], "missed": [], "pending": []}
     for w in wins:
+        # 早报兜底窗口是技术性守卫（防模型没交付），不是给人看的提醒，不进统计
+        if w.get("format") == "report-fallback":
+            tally["windows"] -= 1
+            continue
         tally["fires"] += int(w.get("fireCount") or 0)
         st = w.get("state")
         if st in ("acked", "delivered"):
@@ -672,11 +677,118 @@ def _reason_text(w: dict) -> str:
     return _REASON_WORD.get(str(reason), str(reason or "没确认"))
 
 
+def _report_path(day: date) -> Path:
+    return core.WORKSPACE / "state" / "reports" / f"{day.isoformat()}.md"
+
+
+def _read_report(day: date) -> list[str] | None:
+    """读当天模型写的汇报正文。文件不存在 / 空 / 读不动 → None（交给静态兜底）。"""
+    p = _report_path(day)
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        # 坏编码不是「文已写好」：把它当没写，静态兜底照常发。
+        # 以前这里只 catch OSError，一个乱码文件会让 due 每次抛异常，
+        # 连带当天的其它提醒全部不响（外部审计 2026-11 发现的阻塞面）。
+        return None
+    return text.splitlines() if text else None
+
+
+REPORT_EVIDENCE_WINDOW = "report"
+
+
+def report_delivered(day: date) -> bool:
+    """「今天的汇报已经真的送到用户手里」的唯一证据：投递回执 result=ok。
+
+    文件存在只证明模型写完了，不证明用户收到——写完了但投递失败时如果静默，
+    用户就整天没有汇报。所以兜底窗口只认回执，不认文件。
+    """
+    day_iso = day.isoformat()
+    try:
+        rows = core.read_delivery(day_iso)
+    except (OSError, UnicodeDecodeError) as e:
+        # 回执日志读不动（坏编码 / 权限 / IO）时，不能把「没有证据」升级成
+        # 「整个 due 抛异常」：那会同时压住兜底和当天其他提醒。按未送达处理，
+        # 让兜底照常发；诊断留在 stderr。
+        print(f"due: 投递回执读取失败（{e}），按未送达处理", file=sys.stderr)
+        return False
+    for row in rows:
+        if str(row.get("result")) != "ok":
+            continue
+        if str(row.get("window") or "") in {REPORT_EVIDENCE_WINDOW, "rtc-report", "brief-morning"}:
+            return True
+    return False
+
+
+def _static_report(routine: dict, state: dict, now: datetime) -> list[str]:
+    """模型没写出汇报时的静态版本：只说账本里确凿的事，不推测、不编造。
+
+    这是 issue #60 的「零回归」要求——模型失败 / 没写 / 写空，9 点照常有话说。
+    """
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    entries = [h for h in (state.get("history") or []) if str(h.get("date")) == yesterday]
+    done = [h for h in entries if str(h.get("state")) in ("acked", "delivered")]
+    undone = [h for h in entries if str(h.get("state")) == "missed"]
+    tasks = _tasks_today()
+
+    lines = [f"📊 昨日汇报 — {yesterday}"]
+    lines.append("✅ 已完成：")
+    lines.extend(_bullets([str(h.get("label") or h.get("id") or "") for h in done], "（昨天没有确认的）"))
+    lines.append("❌ 未完成：")
+    lines.extend(
+        _bullets(
+            [f"{h.get('label') or h.get('id') or ''}（{_reason_text(h)}）" for h in undone],
+            "（昨天没有漏的）",
+        )
+    )
+    lines.append("📝 备注：")
+    notes = _read_notes(now.date() - timedelta(days=1))
+    if notes:
+        lines.extend(f"- {x}" for x in notes[:5])
+    elif tasks:
+        lines.append(f"tasks.md 今天还剩 {len(tasks)} 条待办")
+    else:
+        lines.append("（无）")
+    lines.append("💬 遗留建议：")
+    lines.extend(_bullets(tasks, "（今天没有要顺延的）"))
+    return lines
+
+
+def _read_notes(day: date) -> list[str]:
+    """读用户口述（state/notes/<日期>.md）。缺失 = 空列表，不算错误。"""
+    p = core.WORKSPACE / "state" / "notes" / f"{day.isoformat()}.md"
+    if not p.exists():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    return [ln.strip("- ").strip() for ln in text.splitlines() if ln.strip()]
+
+
 def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[str]:
-    """按 rules/formats.md 的「跟进」/「总结」版式现算文案。只读，不改任何文件。"""
+    """按 rules/formats.md 的「跟进」/「总结」/「汇报」版式现算文案。只读，不改任何文件。"""
     tally = _window_tally(state)
     stamp = _hhmm(hit.get("start")) or now.strftime("%H:%M")
     tasks = _tasks_today()
+
+    if hit["format"] == "report":
+        # 单窗口模式：due 直接出稿，模型文件优先，读不到用静态汇报兜底（绝不允许因此不响）。
+        written = _read_report(now.date())
+        if written is not None:
+            return written
+        return _static_report(routine, state, now)
+
+    if hit["format"] == "report-fallback":
+        # 双窗口模式里的最后一棒：只在「没有投递回执」时开口。
+        # 模型写好了但投递失败 / 根本没写 → 有文件就补发文件内容，没文件就发静态版。
+        # 两者都失败时，用户至少还能收到静态汇报，而不是一片安静。
+        written = _read_report(now.date())
+        if written is not None:
+            return written
+        return _static_report(routine, state, now)
 
     if hit["format"] == "follow":
         lines = [f"🔔 {_label_plain(hit, '🔔')} — {now.date().isoformat()} {stamp}"]

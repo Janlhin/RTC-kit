@@ -420,7 +420,10 @@ def run_smoke(scripts_dir: Path, workspace: Path, wait_sec: int = SMOKE_DEFAULT_
     print(f"[install] 自检超时：{wait_sec} 秒内没等到触发。", file=sys.stderr)
     print("[install] 接下来的排查顺序（不是装坏了，多半是宿主没在跑）：", file=sys.stderr)
     print("  1) 宿主网关在跑吗：hermes gateway status", file=sys.stderr)
-    print("  2) 两条 cron 建了吗：hermes cron list（应有 rtc-plan / rtc-due）", file=sys.stderr)
+    print(
+        "  2) cron 建了吗：hermes cron list（应有 rtc-plan / rtc-due，启用早报后另有 rtc-report）",
+        file=sys.stderr,
+    )
     print(
         "  3) 直接手跑一次判断：python " + str(rtc) + " --workspace " + str(workspace) + " due",
         file=sys.stderr,
@@ -490,6 +493,7 @@ def run(args: argparse.Namespace) -> int:
         "rtc_plan.py",
         "rtc_due.py",
         "rtc_once.py",
+        "rtc_report.py",  # 早报素材（agent 模式 cron 注入 prompt，issue #60 方案 B）
         "metrics.mjs",  # 可选旁路统计；不拷会让技能里的 node metrics.mjs 调用摸空
     ]
     for fname in to_copy:
@@ -573,7 +577,11 @@ def run(args: argparse.Namespace) -> int:
         print("\n[install] 5/5 链路自检：未要求（加 --smoke 可当场验证提醒真的会响）")
 
     # cron 命令
-    print("\n[install] 两条 cron（网关运行时执行；或加 --setup-cron 让本脚本执行）：")
+    print(
+        "\n[install] 三条 cron（网关运行时执行；或加 --setup-cron 让本脚本执行）：\n"
+        "  前两条是确定性链路（不调模型）；第三条是早报的模型生成，"
+        "会突破「cron 恒定两条」的既有约束（issue #60 方案 B，需用户批准）。"
+    )
     cmd_plan = (
         f'hermes cron create "0 6 * * *" --name rtc-plan --no-agent '
         f"--script rtc_plan.py --deliver <target> --failure-deliver <target> "
@@ -584,12 +592,25 @@ def run(args: argparse.Namespace) -> int:
         f"--script rtc_due.py --deliver <target> --failure-deliver <target> "
         f"--catch-up off --timezone {args.tz_offset}"
     )
+    cmd_report = (
+        f'hermes cron create "0 9 * * *" --name rtc-report '
+        f"--script rtc_report.py --skill alarm-clock "
+        f"--deliver <target> --failure-deliver <target> "
+        f"--catch-up off --timezone {args.tz_offset}"
+    )
     print(f"  {cmd_plan}")
     print(f"  {cmd_due}")
+    print(f"  {cmd_report}")
     print("  说明：<target> 换成你的投递渠道（如微信 iLink bot）；首次部署先 --deliver local 观察两天。")
+    print(
+        "  早报兜底：时刻表里配 09:10 的 `brief-morning-fallback` 窗口（format: report-fallback），"
+        "别再配 09:00 的 format=report 窗口（plan 会拒绝同时启用）。"
+        "09:00 模型写完并投递后记一条 `delivery-record --window report --result ok`；"
+        "有回执兜底静默，没回执就补发（有文件发文件正文，没文件发静态汇报）。"
+    )
 
     if getattr(args, "setup_cron", False) and not dry_run:
-        for cmd in (cmd_plan, cmd_due):
+        for cmd in (cmd_plan, cmd_due, cmd_report):
             print(f"[install] 执行：{cmd}")
             rc = subprocess.run(cmd, shell=True).returncode
             if rc != 0:

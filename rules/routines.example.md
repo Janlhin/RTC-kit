@@ -208,9 +208,31 @@ dueDate+2 ──→ 之后            永不生成（不是「还没到」，是
 - `follow` → 按 `rules/formats.md` 的「跟进」版式：今日待办 / 进展 / 需要做什么
 - `summary` → 按「总结」版式：已完成 / 未完成 / 备注 / 明日预告，外加自检行
   （`今日闹钟：N 个窗口，响 M 次，确认 A / 漏 B / 未到 C`）
+- `report` → 按「汇报」版式：读 `state/reports/<日期>.md`（模型写的）；读不到就用静态汇报兜底
+- `report-fallback` → **只做兜底**：当天有汇报的**投递回执**（`result=ok`）才静默（记 `skipped`，原因 `covered_by_receipt`）；没有回执就有文件补发文件正文、没文件发静态汇报
 - 数据全在本地：`state/alarms.json` 里响了几次、哪条确认哪条漏；`tasks.md` 的 Today 段
 - 同一份数据算出同一段文字；数据读不出来 → 自动退回普通提醒文案，**照常响**
-- 不新增 cron，仍由 `rtc-due` 命中；不带 `format` 的窗口行为完全不变
+- `follow` / `summary` 不新增 cron，仍由 `rtc-due` 命中；不带 `format` 的窗口行为完全不变
+- `report` / `report-fallback` 配合一条 09:00 的 agent cron 使用（见 `platform/hermes.md`），
+  这是唯一突破「cron 恒定两条」的配置，需要显式批准
+
+**早报两种模式二选一**（`plan` 会拒绝同时启用，否则同一份汇报会发两遍）：
+
+模式 A：不跑 agent cron，`due` 自己出稿：
+
+```
+{ "id": "brief-morning", "label": "☀️早报", "start": "09:00", "end": "09:04",
+  "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "format": "report" }
+```
+
+模式 B：09:00 模型写 + 投递并留回执，09:10 兜底只在没有回执时接管：
+
+```
+{ "id": "brief-morning-fallback", "label": "早报兜底", "start": "09:10", "end": "09:14",
+  "intervalMin": 5, "expectFires": 1, "ackHints": ["知道了"], "format": "report-fallback" }
+```
+
+兜底窗口不计入「今日闹钟 N 个窗口」的统计。
 
 ### 带清单的提醒（逐项打勾）
 

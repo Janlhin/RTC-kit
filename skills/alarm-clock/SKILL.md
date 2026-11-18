@@ -19,7 +19,7 @@ RTC 是「判断 + 写入」与「定时触发」分离的两层：
 因此：
 
 - ❌ 不要告诉用户「RTC 不存在 / 需要搭建 / 需要设置 cron / 需要部署 rtc.py」——部署是安装器（`install.py`）做的事，运行时系统已经跑着了。
-- ❌ 不要自己动手建 / 删 / 暂停 cron 任务（条数恒定：只有 `rtc-plan` 和 `rtc-due` 两条）。
+- ❌ 不要自己动手建 / 删 / 暂停 cron 任务（装完即固定：默认 `rtc-plan` + `rtc-due` 两条；启用早报模型生成后多一条 `rtc-report`）。
 - ❌ 不要手改 `{{WORKSPACE_DIR}}/rules/routines.json` 或任何 `.example` / `.md` 模板。
 - 用户收到的每一条提醒都是上面这套系统的输出——你看到的定时投递消息就是它的产物，不是外部事件。
 
@@ -240,12 +240,45 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} metrics report
 - **禁止反问**「响了吗 / 你确认了吗 / 刚才那条你看到了吗」——这些答案都在简报块里，反问等于让用户替系统记账。
 - 简报块为空或过期（显示的还是昨天）→ 跑一次 `brief --sync` 刷新，再答。
 
+## §6.2 对话落账 —— 你说的事要记下来（早报靠它才说得出人话）
+
+早报（09:00）由模型生成，它读的两个来源里，**只有你能填的是 `state/notes/`**。所以当用户
+说的不是「改提醒」而是**当天的情况或安排**时，你要落账，否则第二天汇报对着空白说话：
+
+| 用户说 | 落到哪 | 怎么落 |
+|---|---|---|
+| 「今天下午去医院」这类**当天情况** | `{{STATE_DIR}}/notes/<今天>.md` | 追加一行（`- 下午去医院`），一天一个文件，不覆盖已有内容 |
+| 「明天要交周报」这类**未来的事** | `tasks.md` 的 Today | 走 `daily-task-manager` 技能，别另建清单 |
+| 「这条别提醒了」 | `rules/routines.json` | 走 `cancel` / `disable` 命令，**不是** notes |
+
+- `notes/` 是**只追加**的流水，不是待办清单；别把它当第二个 `tasks.md`
+- 目录不存在就建：`state/notes/`（一天一个 `<YYYY-MM-DD>.md`）
+- 落完账**回一句短的**（「记下了：今天下午去医院」），别再复述全文
+- 用户只是闲聊、没给可执行信息 → 不落账，正常回话即可（别把每句话都写进账本）
+
+### §6.2.1 你是 `rtc-report` 时，写完必须留回执
+
+早报由你（09:00 的 agent cron）写 `{{STATE_DIR}}/reports/<今天>.md`，投递发生在你回话之后。
+09:10 的兜底窗口只认**投递回执**——没有回执它会再发一次，哪怕文件写得再好。
+
+所以投递成功之后补一条：
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} delivery-record --window report --result ok
+```
+
+- 回执是「用户真的收到了」的唯一证据；**文件存在不算**，不要拿它当交付证明
+- 发送失败就记 `--result fail --error "失败原因"`（兜底窗口会接手，把汇报补发出去）
+- 被回执压住的兜底窗口记 `skipped`（原因 `covered_by_receipt`），**不是** `delivered`——它没送过，别在历史里冒充送达
+- 时刻表里 `format: report` 与 `format: report-fallback` **只能二选一**；同时配置 `plan` 会直接拒绝
+
+
 ## §7 禁止
 
 - ❌ 自己判断「现在该不该响」
 - ❌ 手改 `rules/routines.json` 里的日期（推迟用 `postpone` 命令）
 - ❌ 手改 `rules/routines.json` 里的 `disabled`（停用用 `disable` 命令）
-- ❌ 新建、删除、修改定时任务（条数必须恒定）
+- ❌ 新建、删除、修改定时任务（已装好的三条——`rtc-plan` / `rtc-due` / `rtc-report`——不许动）
 - ❌ 顺着投递页脚里的「stop reminder rtc-due」去停任务。`rtc-due` 是所有提醒的心脏，
   停了等于全部不响；用户这么说时先讲清后果（一句话），确认后才动手。同理，
   `rtc-plan` 停了第二天就没有时刻表。
