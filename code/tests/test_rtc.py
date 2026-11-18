@@ -4641,7 +4641,9 @@ class TestSchedulerGuard(RtcCase):
 
     def test_plan_failure_is_delivered_once(self):
         r = base_routine()
-        r["alarmWindows"][0]["expectFires"] = 99  # 与窗口算术不符
+        # 今天是工作日，窗口却只在节假日响 → 整份计划一个窗口都排不出来（不是单窗口写错，
+        # 那种已在 #75 里降级为跳过 + 告警）
+        r["alarmWindows"][0]["dateTypes"] = ["holiday"]
         self.write_routine(r)
         (self.ws / "state" / "alarms.json").write_text(
             json.dumps(
@@ -4705,6 +4707,48 @@ class TestSchedulerGuard(RtcCase):
         rc, out, _ = self.cli("due", now="2026-11-19T06:00:00+08:00")
         self.assertEqual(rc, 0)
         self.assertIn("调度器最近一次成功判定", out, "自检要跟着 due 跑")
+
+
+class TestPlanDegrade(RtcCase):
+    """#75：一条写错的窗口不该把一整天的账本清空。"""
+
+    def test_bad_window_skipped_not_fatal(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99  # wake 算错
+        r["alarmWindows"].append(
+            {
+                "id": "meds",
+                "label": "吃药",
+                "start": "09:00",
+                "end": "09:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+        rc, out, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, f"一条坏配置不该让整份计划失败：{err}")
+        self.assertIn("wake", out, "被跳过的窗口必须在可投递输出里点名")
+        self.assertIn("被跳过", out)
+        ids = [w["id"] for w in self.state()["windows"]]
+        self.assertEqual(ids, ["meds"], "好的窗口必须照常进账本")
+
+    def test_all_bad_windows_still_alert(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99
+        self.write_routine(r)
+        rc, out, _ = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, "plan 本身要成功落盘，告警走 stdout")
+        self.assertIn("被跳过", out, "全部被跳过时更要说，否则一整天静默无声")
+        self.assertEqual(self.state()["windows"], [])
+
+    def test_other_commands_still_fail_fast(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99
+        self.write_routine(r)
+        rc, _, _ = self.cli("simulate")
+        self.assertEqual(rc, 3, "只读预演保持严格：要修，不要静默跳过")
 
 
 if __name__ == "__main__":

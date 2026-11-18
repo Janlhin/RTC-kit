@@ -373,3 +373,14 @@ python rtc.py enable   --window tea                  # 又想起来了
 | 有效期内没有窗口（还没开始 / 已结束） | **合法空日**：静默，照常落盘 state |
 | `weekendAlarms` / `holidayAlarms` 为 `false` | **合法空日**：静默 |
 | 有窗口在有效期内，却被 `dateTypes` 全部排除 | **配置错误**：退出码 `3`，提示检查 `dateTypes` |
+
+### 单个窗口写错：跳过它，别拖垮整天
+
+`plan` 生成账本前逐个窗口核算（`start` / `end` / `intervalMin` 与 `expectFires`）。
+某个窗口算不出来时**只跳过这一个**，在可投递输出里点名它的 `id` 和原因，
+其余窗口照常进账本——一条写错的提醒不该让一整天的提醒全部消失。
+
+修好后跑 `plan --force` 补进今天的账本（`planDate` 已是今天时 `plan` 默认幂等跳过、不会重算）。
+
+`simulate` / `expected_today_ids` 这类只读预演**保持严格**（退出码 `3`）：
+预演的意义就是「先在这里看清问题」，静默跳过等于把问题藏起来。

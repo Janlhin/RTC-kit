@@ -787,7 +787,35 @@ def countdown_review_day(defn: dict) -> str | None:
     return review
 
 
-def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool = True) -> list[dict]:
+def _check_window_arithmetic(w: dict) -> None:
+    """单窗口的数值校验：只拦「算错」这类，避免一条坏配置拖垮整天。"""
+    if w.get("oneOff") or w.get("dueDate") or (w.get("checklist") or []):
+        return
+    try:
+        sh, sm = (int(x) for x in w["start"].split(":"))
+        eh, em = (int(x) for x in w["end"].split(":"))
+        interval = int(w["intervalMin"])
+    except (KeyError, ValueError, TypeError) as e:
+        raise Validation(f"start/end/intervalMin 格式不对（{e}）") from e
+    exp = expect_fires(time(sh, sm), time(eh, em), interval)
+    if w.get("expectFires") and int(w["expectFires"]) != exp:
+        raise Validation(f"expectFires={w['expectFires']} 与算术值 {exp} 不符")
+
+
+def build_windows(
+    routine: dict,
+    d: date,
+    kind: str,
+    now: datetime,
+    strict: bool = True,
+    errors: list[str] | None = None,
+) -> list[dict]:
+    """按时刻表生成某天的窗口。
+
+    `errors` 传给「必须继续跑」的调用方（plan）：单个窗口的数值错误降级为
+    「跳过该窗口 + 记一条告警」，而不是让整份计划校验失败——一条写错的
+    提醒不该把一整天的账本都清空（issue #75）。其他调用方不传，保持 fail fast。
+    """
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
@@ -814,6 +842,12 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
         allowed = w.get("dateTypes") or []
         if allowed and kind not in allowed:
             continue
+        if errors is not None:
+            try:
+                _check_window_arithmetic(w)
+            except Validation as e:
+                errors.append(f"{w.get('id', '?')}：{e}")
+                continue
         sh, sm = (int(x) for x in w["start"].split(":"))
         eh, em = (int(x) for x in w["end"].split(":"))
         start = datetime.combine(d, time(sh, sm), tzinfo=tz)
@@ -866,6 +900,9 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
             }
         )
     if not out:
+        if errors:
+            # 有窗口被跳过：账本为空这件事必须由调用方告警，不能被「空日」掩盖
+            return []
         if not ranged and len(enabled) < len(routine["alarmWindows"]):
             # 所有窗口都被永久停用：合法空日，静默。
             return []
@@ -1413,7 +1450,13 @@ def cmd_plan(args) -> int:
 
     kind = plan_kind(now.date(), routine)
     # 契约里显式禁用的日期类型 → 合法空日：静默，但照常落盘 state
-    fresh = [] if day_disabled(routine, kind) else build_windows(routine, now.date(), kind, now)
+    # 单个窗口算错 → 跳过该窗口 + 记告警，而不是让整份计划失败（issue #75）
+    plan_errors: list[str] = []
+    fresh = (
+        []
+        if day_disabled(routine, kind)
+        else build_windows(routine, now.date(), kind, now, errors=plan_errors)
+    )
 
     if old and old.get("planDate") == today:
         windows = carry_forward(old, fresh)
@@ -1462,6 +1505,9 @@ def cmd_plan(args) -> int:
         + ("（已暂停）" if paused_today else ""),
         file=sys.stderr,
     )
+    # 被跳过的窗口要吼一声：静默少一个提醒，比漏响更难查（issue #75）
+    for msg in plan_errors:
+        print(f"⚠️ 时刻表里有窗口被跳过（{msg}）：修好后跑 plan --force，才会补进今天的账本")
 
     # 表里只剩一次性提醒时，今天的计划会「生成成功但明天不再有日常窗口」——
     # 这类状态最容易被误判成脚本坏了，所以在这里显式报一句（退出码仍为 0）。
