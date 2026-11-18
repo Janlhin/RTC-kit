@@ -63,6 +63,10 @@ class Validation(Exception):
     """生成的计划不满足校验。"""
 
 
+class ContractViolation(Validation):
+    """配置与契约不符（未知字段等），不是文件损坏——不能拿底稿覆盖用户刚写的意图。"""
+
+
 # ---------------------------------------------------------------- 基础设施
 
 
@@ -303,6 +307,46 @@ def atomic_write(path: Path, data: dict, expected_rev: int | None, expected_dige
 
 _ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
 
+# contract/routine.schema.json 的 alarmWindow.properties 全集（additionalProperties: false）。
+# 运行时只认这些键：多出来的字段是「空气开关」——写了不报错、也永远不生效。
+_WINDOW_KEYS = frozenset(
+    {
+        "ackHints",
+        "canceled",
+        "checklist",
+        "dateTypes",
+        "disabled",
+        "dueDate",
+        "end",
+        "expectFires",
+        "format",
+        "id",
+        "intervalMin",
+        "label",
+        "oneOff",
+        "skipDates",
+        "start",
+        "validFrom",
+        "validUntil",
+    }
+)
+
+
+def _check_window_keys(index: int, w: object) -> None:
+    """未知字段一律拒绝：它们不会被排程读取，写了等于没写，比漏响更难查。"""
+    if not isinstance(w, dict):
+        raise ContractViolation(f"alarmWindows[{index}] 应是对象，实际是 {type(w).__name__}")
+    unknown = sorted(set(w) - _WINDOW_KEYS)
+    if not unknown:
+        return
+    raise ContractViolation(
+        f"alarmWindows[{index}]（{w.get('id') or '无 id'}）含契约未定义字段：{', '.join(unknown)}。"
+        "这些字段不会被排程读取——写了等于没写。"
+        "合法字段：" + "、".join(sorted(_WINDOW_KEYS)) + "。"
+        "要停止提醒请用命令：ack（今天结束）/ cancel（取消安排）/ disable（永久停用），不要自造 status 字段。"
+    )
+
+
 # 运行中攒下的「要跟人说一句」的话（自愈、手改），由 plan/due 播一次就清空
 NOTICES: list[str] = []
 
@@ -317,9 +361,14 @@ def load_routine(read_only: bool = False) -> dict:
     `read_only=True` 用于「只读素材」类调用（早报素材生成）：坏文件照常报
     Validation，**绝不写任何文件**——修复时刻表是 plan / 用户交互命令的职责，
     一个被描述为只读的脚本不能顺手改配置。
+
+    契约违规（未知字段）不触发自愈：那不是文件损坏，拿底稿覆盖只会把用户
+    刚写下的意图一起抹掉，而用户还以为自己已经关掉了提醒。
     """
     try:
         return _validate_routine()
+    except ContractViolation:
+        raise
     except Validation:
         if read_only:
             raise
@@ -350,6 +399,8 @@ def _validate_routine() -> dict:
         raise Validation(f"{ROUTINE} 缺字段：{', '.join(missing)}；参考 rules/routines.example.md")
     if not isinstance(routine.get("alarmWindows"), list):
         raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
+    for i, w in enumerate(routine["alarmWindows"]):
+        _check_window_keys(i, w)
     return routine
 
 

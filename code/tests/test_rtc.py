@@ -4567,5 +4567,67 @@ class TestReportMaterial(RtcCase):
         )
 
 
+class TestWindowContract(RtcCase):
+    """未知字段不再当空气：写错字段要报错，且不能拿底稿覆盖用户的意图。"""
+
+    def _routine(self):
+        return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+
+    def test_unknown_field_is_rejected_without_repair(self):
+        r = base_routine()
+        r["alarmWindows"][0]["status"] = "done"
+        self.write_routine(r)
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "routines.program-last.json").write_text(
+            json.dumps(base_routine(), ensure_ascii=False), encoding="utf-8"
+        )
+
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 3, "未知字段必须让 plan 失败，不能静默继续响")
+        self.assertIn("status", err)
+        self.assertIn("未定义字段", err)
+        self.assertIn("disable", err, "报错要点名合法的停机命令")
+        self.assertEqual(
+            self._routine()["alarmWindows"][0].get("status"),
+            "done",
+            "契约违规不是文件损坏：不能拿底稿把用户刚写的配置覆盖掉",
+        )
+        self.assertEqual(
+            [p.name for p in bdir.iterdir() if p.name.startswith("routines.corrupt-")],
+            [],
+            "不该留下「我把坏文件备份了」的痕迹",
+        )
+
+    def test_known_optional_fields_not_flagged(self):
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "legal",
+                "label": "合法字段",
+                "start": "19:00",
+                "end": "19:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-18",
+                "validUntil": "2026-11-18",
+                "disabled": False,
+                "skipDates": [],
+                "dateTypes": ["workday"],
+                "checklist": ["带清单"],
+            }
+        )
+        self.write_routine(r)
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0, f"合法字段不该被误报：{err}")
+
+    def test_whitelist_matches_contract_schema(self):
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        props = set(schema["$defs"]["alarmWindow"]["properties"])
+        self.assertEqual(props, set(rtc._WINDOW_KEYS), "白名单必须与 routine.schema.json 同步")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

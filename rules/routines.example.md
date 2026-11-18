@@ -360,6 +360,12 @@ python rtc.py enable   --window tea                  # 又想起来了
 
 `disabled: true` 是配置里的永久开关。全部窗口都被停用时，那一天是**合法空日**（静默），不是配置错误。
 
+> ⚠️ 别在窗口里自造 `status`、`done`、`acked` 这类字段。契约
+> （`contract/routine.schema.json`）不允许未定义字段，`plan` / `due` 会直接报错点名它们——
+> 这些字段不会被排程读取，写了等于没写；而用户看到「已标记完成」会以为关掉了，实际还在响。
+> 配置里只有 `disabled`、`canceled`、`skipDates` 三种停止语义；
+> 「我回了」「做完了」「以后别提醒」分别对应 `ack` / `complete` / `disable`。
+
 ### 空日的两种含义
 
 | 情况 | 行为 |
