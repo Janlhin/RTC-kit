@@ -307,16 +307,22 @@ _ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
 NOTICES: list[str] = []
 
 
-def load_routine() -> dict:
+def load_routine(read_only: bool = False) -> dict:
     """读时刻表并做最小形状校验；坏了就先想办法自愈。
 
     实机教训：模型把 routines.json 写成了 0 字节，plan/due 双双失败，
     用户一整天收不到任何提醒——而程序手里明明还留着上一份好文件。
     所以校验失败时先尝试从程序底稿恢复，恢复了就在输出里说明一句。
+
+    `read_only=True` 用于「只读素材」类调用（早报素材生成）：坏文件照常报
+    Validation，**绝不写任何文件**——修复时刻表是 plan / 用户交互命令的职责，
+    一个被描述为只读的脚本不能顺手改配置。
     """
     try:
         return _validate_routine()
     except Validation:
+        if read_only:
+            raise
         notice = _restore_from_last_backup()
         if not notice:
             raise
@@ -1262,6 +1268,14 @@ def cmd_delivery_record(args) -> int:
 
 def cmd_plan(args) -> int:
     routine = load_routine()
+    # 早报只能选一种输出方式：单窗口（due 直接出稿）或双窗口（模型先写 + 兜底）。
+    # 两种同时启用会让 9:00 和 9:10 各发一次同一份汇报——外部审计实测到过重复输出。
+    fmts = {w.get("format") for w in routine["alarmWindows"] if not w.get("disabled")}
+    if "report" in fmts and "report-fallback" in fmts:
+        raise Validation(
+            "早报只能启用一种输出方式：format=report（due 直接出稿）或 "
+            "format=report-fallback（模型先写 + 回执兜底），不能同时配置"
+        )
     hand_edit = audit_routine(routine)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
@@ -1460,12 +1474,13 @@ def _due_eval(args, routine, tz, now) -> int:
     changed = False
 
     # 1) 过期未确认 → missed
-    # 兜底窗口例外：过了点的兜底窗口，只要当天 reports 文件在，就算交付完成
-    # （9:00 的 agent cron 已经把汇报发出去了），不该记成「漏响」。
+    # 兜底窗口例外：过了点的兜底窗口，只要当天有「汇报已送达」的投递回执，
+    # 就算交付完成（9:00 的 agent cron 已经把汇报发出去了），不该记成「漏响」。
+    # 只认回执，不认文件存在——文件只能证明模型写了，不能证明用户收到了。
     for w in state["windows"]:
         end = datetime.fromisoformat(w["end"])
         if now > end and w["state"] in {"pending", "ringing"}:
-            if w.get("format") == "report-fallback" and brief.report_exists(now.date()):
+            if w.get("format") == "report-fallback" and brief.report_delivered(now.date()):
                 w["state"] = "delivered"
                 w["lastFiredAt"] = now.isoformat()
             else:
@@ -1475,14 +1490,15 @@ def _due_eval(args, routine, tz, now) -> int:
             changed = True
 
     # 2) 找命中窗口
-    # 早报兜底窗口（format=report-fallback）：当天 model 已写出 reports 文件时，
+    # 早报兜底窗口（format=report-fallback）：当天已有「汇报送达」的回执时，
     # 这一窗不响、直接判 delivered（不是 skipped——它的任务确实完成了，只是由
     # 9:00 的 agent cron 完成）。必须在选 hit 之前处理，否则会重复投递。
+    # 没有回执（写好了但没发出去 / 根本没写）→ 照常投递，内容见 build_digest。
     hit = None
     for w in state["windows"]:
         start, end = datetime.fromisoformat(w["start"]), datetime.fromisoformat(w["end"])
         if start <= now <= end and w["state"] in {"pending", "ringing"}:
-            if w.get("format") == "report-fallback" and brief.report_exists(now.date()):
+            if w.get("format") == "report-fallback" and brief.report_delivered(now.date()):
                 w["state"] = "delivered"
                 w["lastFiredAt"] = now.isoformat()
                 changed = True

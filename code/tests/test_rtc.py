@@ -3791,7 +3791,7 @@ class TestHeartbeatOk(RtcCase):
 
 
 class TestMorningReport(RtcCase):
-    """早报由模型生成（issue #60 方案 B）：09:00 模型写文件，09:10 兜底窗口。"""
+    """单窗口模式（format=report）：due 直接出稿，模型文件优先，读不到就静态兜底。"""
 
     def setUp(self):
         super().setUp()
@@ -3806,17 +3806,7 @@ class TestMorningReport(RtcCase):
                 "expectFires": 1,
                 "ackHints": ["知道了"],
                 "format": "report",
-            },
-            {
-                "id": "brief-morning-fallback",
-                "label": "早报兜底",
-                "start": "09:10",
-                "end": "09:14",
-                "intervalMin": 5,
-                "expectFires": 1,
-                "ackHints": ["知道了"],
-                "format": "report-fallback",
-            },
+            }
         ]
         self.write_routine(r)
         self.reports = self.ws / "state" / "reports"
@@ -3851,21 +3841,116 @@ class TestMorningReport(RtcCase):
         self.assertIn("✅ 已完成", out)
         self.assertIn("📝 备注", out)
 
-    def test_fallback_window_silent_when_report_exists(self):
-        """兜底窗口：模型已写文件 → 9:10 静默，不重复发。"""
+    def test_empty_report_file_falls_back(self):
+        """模型写了空文件 = 没写成功，仍要静态兜底。"""
+        self.write_report("2026-11-17", "   \n  ")
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-17T09:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out)
+
+    def test_invalid_utf8_report_does_not_block_other_windows(self):
+        """乱码文件只让这一窗退回静态，不能让整天的提醒全挂（审计 2026-11）。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "brief-morning",
+                "label": "☀️早报",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report",
+            },
+            {
+                "id": "tea",
+                "label": "泡茶",
+                "start": "20:00",
+                "end": "20:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+            },
+        ]
+        self.write_routine(r)
+        (self.reports / "2026-11-17.md").write_bytes(b"\xff\xfe\x00bad")
+        rc, out, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.cli("due", now="2026-11-17T09:01:00+08:00")
+        self.assertEqual(rc, 0, f"乱码不该让 due 退出非 0：{err}")
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out, "读不动就发静态，不能失声")
+        rc, out, err = self.cli("due", now="2026-11-17T20:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("泡茶", out, "其它窗口照常响")
+
+
+class TestMorningFallback(RtcCase):
+    """双窗口模式（format=report-fallback）：只有「送达回执」能压住兜底。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "brief-morning-fallback",
+                "label": "早报兜底",
+                "start": "09:10",
+                "end": "09:14",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report-fallback",
+            }
+        ]
+        self.write_routine(r)
+        self.reports = self.ws / "state" / "reports"
+        self.reports.mkdir(parents=True, exist_ok=True)
+
+    def write_report(self, day: str, text: str):
+        (self.reports / f"{day}.md").write_text(text, encoding="utf-8")
+
+    def test_fallback_silent_only_with_delivery_receipt(self):
+        """回执 result=ok 才是「已送达」；文件存在不算。"""
         self.write_report("2026-11-17", "📊 昨日汇报 — 2026-11-16\n模型写的")
         self.cli("plan", now="2026-11-17T06:00:00+08:00")
-        self.cli("due", now="2026-11-17T09:01:00+08:00")  # 9:00 窗口已响
+        self.cli(
+            "delivery-record",
+            "--window",
+            "report",
+            "--target",
+            "hermes",
+            "--result",
+            "ok",
+            "--at",
+            "2026-11-17T09:05:00+08:00",
+        )
         rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(out.strip(), "", f"兜底窗口不该再发一次：{out}")
-        w = self.window("brief-morning-fallback")
-        self.assertEqual(w["state"], "delivered")
+        self.assertEqual(out.strip(), "", f"有回执就不该再发：{out}")
+        self.assertEqual(self.window("brief-morning-fallback")["state"], "delivered")
 
-    def test_fallback_window_fires_when_report_missing(self):
-        """兜底窗口：模型没写文件 → 9:10 补发静态汇报，保证有声音。"""
+    def test_fallback_resends_report_file_without_receipt(self):
+        """写好了但没送达（无回执）→ 兜底要把文件内容补发出去，而不是静默判 delivered。"""
+        self.write_report("2026-11-17", "📊 昨日汇报 — 2026-11-16\n模型写的")
         self.cli("plan", now="2026-11-17T06:00:00+08:00")
-        self.cli("due", now="2026-11-17T09:01:00+08:00")  # 9:00 窗口发静态
+        rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("模型写的", out, "没回执就必须补发，内容用模型写的正文")
+        self.assertFalse((self.ws / "state" / "delivery.log").exists())
+
+    def test_fallback_static_when_nothing_written(self):
+        """模型没写 → 静态汇报，保证有声音。"""
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
         rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertIn("📊 昨日汇报 — 2026-11-16", out)
@@ -3874,26 +3959,41 @@ class TestMorningReport(RtcCase):
     def test_fallback_not_counted_in_tally(self):
         """兜底窗口是技术守卫，不该出现在「今日闹钟 N 个窗口」里。"""
         self.cli("plan", now="2026-11-17T06:00:00+08:00")
-        state = self.state()
-        # 直接验统计口径：两个窗口，但兜底不计入
-        self.assertEqual(len(state["windows"]), 2)
         from rtc_brief import _window_tally
 
-        tally = _window_tally(state)
-        self.assertEqual(tally["windows"], 1, "兜底窗口不该计入「N 个窗口」")
-        self.assertNotIn(
-            "brief-morning-fallback",
-            [w["id"] for w in tally["pending"]],
-            "兜底窗口不该出现在待办统计里",
-        )
+        tally = _window_tally(self.state())
+        self.assertEqual(tally["windows"], 0)
 
-    def test_empty_report_file_falls_back(self):
-        """模型写了空文件 = 没写成功，仍要静态兜底。"""
-        self.write_report("2026-11-17", "   \n  ")
-        self.cli("plan", now="2026-11-17T06:00:00+08:00")
-        rc, out, err = self.cli("due", now="2026-11-17T09:01:00+08:00")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("📊 昨日汇报 — 2026-11-16", out)
+    def test_both_report_formats_are_rejected(self):
+        """两种输出方式同时启用会让同一份汇报发两次——plan 直接拒绝。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "brief-morning",
+                "label": "早报",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report",
+            },
+            {
+                "id": "brief-morning-fallback",
+                "label": "早报兜底",
+                "start": "09:10",
+                "end": "09:14",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report-fallback",
+            },
+        ]
+        self.write_routine(r)
+        rc, out, err = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.assertEqual(rc, 3, "同时配置两种早报输出方式必须被拒")
+        self.assertIn("不能同时配置", err)
+        self.assertEqual(out, "")
 
 
 class TestReportMaterial(RtcCase):
@@ -3943,6 +4043,28 @@ class TestReportMaterial(RtcCase):
         self.run_material()
         after = {p.name for p in (self.ws / "state").iterdir()}
         self.assertEqual(before, after, f"素材脚本不该写文件，却多了：{after - before}")
+
+    def test_material_does_not_repair_broken_routine(self):
+        """坏时刻表只报错，不顺手恢复：修复是 plan / 用户命令的职责（审计 2026-11）。"""
+        self.write_routine(base_routine())
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "routines.program-last.json").write_text(
+            json.dumps(base_routine(), ensure_ascii=False), encoding="utf-8"
+        )
+        routine = self.ws / "rules" / "routines.json"
+        bad = "{ 这不是 JSON"
+        routine.write_text(bad, encoding="utf-8")
+
+        rc, out, err = self.run_material()
+        self.assertEqual(rc, 3, "坏时刻表要报错退出")
+        self.assertIn("校验失败", err)
+        self.assertEqual(routine.read_text(encoding="utf-8"), bad, "素材脚本绝不能改写时刻表")
+        self.assertEqual(
+            [p.name for p in bdir.iterdir() if p.name.startswith("routines.corrupt-")],
+            [],
+            "素材脚本不该留下「我把坏文件备份了」的痕迹",
+        )
 
 
 if __name__ == "__main__":

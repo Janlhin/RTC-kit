@@ -684,18 +684,34 @@ def _report_path(day: date) -> Path:
 def _read_report(day: date) -> list[str] | None:
     """读当天模型写的汇报正文。文件不存在 / 空 / 读不动 → None（交给静态兜底）。"""
     p = _report_path(day)
-    if not p.exists():
+    if not p.is_file():
         return None
     try:
         text = p.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # 坏编码不是「文已写好」：把它当没写，静态兜底照常发。
+        # 以前这里只 catch OSError，一个乱码文件会让 due 每次抛异常，
+        # 连带当天的其它提醒全部不响（外部审计 2026-11 发现的阻塞面）。
         return None
     return text.splitlines() if text else None
 
 
-def report_exists(day: date) -> bool:
-    """兜底窗口据此判断「今天是否已有模型写的汇报」——有就静默，别重复发。"""
-    return _read_report(day) is not None
+REPORT_EVIDENCE_WINDOW = "report"
+
+
+def report_delivered(day: date) -> bool:
+    """「今天的汇报已经真的送到用户手里」的唯一证据：投递回执 result=ok。
+
+    文件存在只证明模型写完了，不证明用户收到——写完了但投递失败时如果静默，
+    用户就整天没有汇报。所以兜底窗口只认回执，不认文件。
+    """
+    day_iso = day.isoformat()
+    for row in core.read_delivery(day_iso):
+        if str(row.get("result")) != "ok":
+            continue
+        if str(row.get("window") or "") in {REPORT_EVIDENCE_WINDOW, "rtc-report", "brief-morning"}:
+            return True
+    return False
 
 
 def _static_report(routine: dict, state: dict, now: datetime) -> list[str]:
@@ -751,15 +767,19 @@ def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[s
     tasks = _tasks_today()
 
     if hit["format"] == "report":
-        # 早报：优先读模型写的文件；读不到就用静态汇报兜底（绝不允许因此不响）。
+        # 单窗口模式：due 直接出稿，模型文件优先，读不到用静态汇报兜底（绝不允许因此不响）。
         written = _read_report(now.date())
         if written is not None:
             return written
         return _static_report(routine, state, now)
 
     if hit["format"] == "report-fallback":
-        # 兜底窗口只负责「模型没交付」这一种情形：cmd_due 在文件已存在时会把本窗口
-        # 直接判 skipped、根本不进来。所以到这里一定是静态汇报。
+        # 双窗口模式里的最后一棒：只在「没有投递回执」时开口。
+        # 模型写好了但投递失败 / 根本没写 → 有文件就补发文件内容，没文件就发静态版。
+        # 两者都失败时，用户至少还能收到静态汇报，而不是一片安静。
+        written = _read_report(now.date())
+        if written is not None:
+            return written
         return _static_report(routine, state, now)
 
     if hit["format"] == "follow":

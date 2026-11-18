@@ -49,7 +49,7 @@
         "ackHint": { "type": "string" },
         "format": {
           "enum": ["follow", "summary", "report", "report-fallback", null],
-          "description": "摘要窗口类型：follow=跟进、summary=总结、report=早报（读 state/reports/<日期>.md，缺失时用静态汇报兜底）、report-fallback=早报兜底窗口（当日 reports 文件已存在则静默，否则发静态汇报）；null = 普通静态提醒"
+          "description": "摘要窗口类型：follow=跟进、summary=总结、report=早报（读 state/reports/<日期>.md，缺失时用静态汇报兜底）、report-fallback=早报兜底窗口（当日有 result=ok 的投递回执才静默，否则有文件补发文件正文、没文件发静态汇报）；null = 普通静态提醒"
         },
         "oneOff": { "type": "boolean", "description": "是否一次性提醒（送达即完成）" },
         "type": {

@@ -50,7 +50,7 @@ def _render_entries(entries: list[dict]) -> list[str]:
 def build_material(workspace: Path, day: date) -> list[str]:
     """产出注入模型 prompt 的素材。只读，绝不写任何文件。"""
     core.set_workspace(Path(workspace))
-    core.load_routine()  # 先校验时刻表可读：坏文件要在这里报 Validation，而不是写出半份素材
+    core.load_routine(read_only=True)  # 只校验可读：坏文件在这里报 Validation，且绝不写盘自愈
     state = core.load_state() or {}
     yesterday = (day - timedelta(days=1)).isoformat()
 
@@ -87,6 +87,11 @@ def build_material(workspace: Path, day: date) -> list[str]:
     lines.append(f"  把「汇报」正文写到 state/reports/{day.isoformat()}.md，正文首行为")
     lines.append(f"  `📊 昨日汇报 — {yesterday}`；段序固定：✅ 已完成 / ❌ 未完成 / 📝 备注 / 💬 遗留建议。")
     lines.append("  写不出就什么都别写——9:10 的兜底窗口会发静态汇报，绝不影响你收到。")
+    lines.append("")
+    lines.append("## 投递回执（必须）")
+    lines.append("  投出去之后记一条回执，9:10 的兜底窗口只认它：")
+    lines.append("  `python rtc.py --workspace <WORKSPACE> delivery-record --window report --result ok`")
+    lines.append('  失败就记 `--result fail --error "原因"`，兜底窗口会接手补发。')
     return lines
 
 
