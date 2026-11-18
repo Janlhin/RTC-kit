@@ -40,7 +40,7 @@ class BackupLayerCase(unittest.TestCase):
         """老格式 targets 数组照常工作。"""
         self.write_cfg({"targets": ["D:/bk", "E:/bk"], "keep": 30})
         targets, keep = archive.backup_config()
-        self.assertEqual([str(t) for t in targets], ["D:\\bk", "E:\\bk"])
+        self.assertEqual(targets, [Path("D:/bk"), Path("E:/bk")])
         self.assertEqual(keep, 30)
 
     def test_cloud_and_nas_added(self):
@@ -54,16 +54,15 @@ class BackupLayerCase(unittest.TestCase):
             }
         )
         targets, _ = archive.backup_config()
-        paths = [str(t) for t in targets]
-        self.assertIn("D:\\bk", paths)
-        self.assertIn("C:\\Users\\me\\OneDrive\\RTC", paths)
-        self.assertTrue(any("nas" in p.lower() for p in paths))
+        self.assertIn(Path("D:/bk"), targets)
+        self.assertIn(Path("C:/Users/me/OneDrive/RTC"), targets)
+        self.assertTrue(any("nas" in str(p).lower() for p in targets))
 
     def test_empty_layers_skipped(self):
         """cloud/nas 为 null 或空串时跳过，不报错。"""
         self.write_cfg({"targets": ["D:/bk"], "cloud": None, "nas": "", "keep": 30})
         targets, _ = archive.backup_config()
-        self.assertEqual([str(t) for t in targets], ["D:\\bk"])
+        self.assertEqual(targets, [Path("D:/bk")])
 
     def test_no_duplicate_path(self):
         """同一路径在 targets 和 cloud 都写了，只保留一份。"""
