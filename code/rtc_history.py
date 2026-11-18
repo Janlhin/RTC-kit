@@ -106,6 +106,13 @@ def _tables(con: sqlite3.Connection) -> None:
              to_date TEXT,
              note TEXT)"""
     )
+    # 跨代归档：补 actor/source 两列（谁改的、从哪来）。老 db 没有这两列，
+    # 用 PRAGMA 检查后 ALTER，幂等——重复建表不会报错。
+    cols = {row[1] for row in con.execute("PRAGMA table_info(events)")}
+    if "actor" not in cols:
+        con.execute("ALTER TABLE events ADD COLUMN actor TEXT NOT NULL DEFAULT 'system'")
+    if "source" not in cols:
+        con.execute("ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'cli'")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_window ON events(window_id, date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_daily_date ON daily(date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_checklist_item ON checklist(item_id, date)")
@@ -205,15 +212,22 @@ def log_event(
     from_date: str | None = None,
     to_date: str | None = None,
     note: str | None = None,
+    actor: str = "system",
+    source: str = "cli",
 ) -> None:
-    """记一条事件。审计不参与判定，写失败也只是少一条轨迹，不该让命令失败。"""
+    """记一条事件。审计不参与判定，写失败也只是少一条轨迹，不该让命令失败。
+
+    actor: 谁做的——user / model / external / system（默认 system，兼容老调用）
+    source: 从哪来——cli / wechat / mcp / cron（默认 cli）
+    """
     stamp = (ts or datetime.now(UTC)).isoformat()
     con = _connect()
     try:
+        cols_sql = "ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source"
         con.execute(
-            """INSERT INTO events (ts, date, window_id, item_id, kind, from_date, to_date, note)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (stamp, day, window_id, item_id, kind, from_date, to_date, note),
+            f"""INSERT INTO events ({cols_sql})
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (stamp, day, window_id, item_id, kind, from_date, to_date, note, actor, source),
         )
         con.commit()
     finally:
@@ -249,7 +263,10 @@ def rows_for_range(start: str, end: str) -> list[dict]:
 
 
 def events(window_id: str | None = None, since: str | None = None, until: str | None = None) -> list[dict]:
-    sql = "SELECT ts, date, window_id, item_id, kind, from_date, to_date, note FROM events WHERE 1=1"
+    sql = (
+        "SELECT ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source "
+        "FROM events WHERE 1=1"
+    )
     params: list[str] = []
     if window_id:
         sql += " AND window_id=?"

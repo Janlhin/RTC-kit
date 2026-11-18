@@ -288,7 +288,14 @@ def scaffold_workspace(
     files = {
         "rules/routines.json": json.dumps(default_routine(), ensure_ascii=False, indent=2) + "\n",
         "rules/backup.json": json.dumps(
-            {"targets": backup_targets_for(workspace), "keep": 30}, ensure_ascii=False, indent=2
+            {
+                "targets": backup_targets_for(workspace),
+                "cloud": None,  # 可选异地层：云盘挂载目录，填了才启用
+                "nas": None,  # 可选异地层：NAS 挂载目录，填了才启用
+                "keep": 30,
+            },
+            ensure_ascii=False,
+            indent=2,
         )
         + "\n",
         "errors.md": ERRORS_HEADER,

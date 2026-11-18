@@ -70,6 +70,14 @@ def backup_config() -> tuple[list[Path], int]:
                 raw = data.get("targets") or []
                 if isinstance(raw, list):
                     targets = [Path(str(t)) for t in raw if str(t).strip()]
+                # 可选异地层：cloud / nas 是单个路径（本地挂载点），填了才加。
+                # 不绑定厂商——云盘/NAS 在你机器上就是个目录，主流程一视同仁。
+                for layer in ("cloud", "nas"):
+                    val = data.get(layer)
+                    if isinstance(val, str) and val.strip():
+                        p = Path(val.strip())
+                        if p not in targets:
+                            targets.append(p)
                 if isinstance(data.get("keep"), int) and data["keep"] > 0:
                     keep = int(data["keep"])
         except (core.Validation, ValueError, TypeError, OSError):
