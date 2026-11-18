@@ -2228,6 +2228,50 @@ class TestAddWindow(RtcCase):
             "dry-run 不该留下「我把坏文件备份了」的痕迹",
         )
 
+    def test_rejects_compact_date(self):
+        """紧凑日期 20261118 能过 fromisoformat，但排程按字符串比会认不出来。"""
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "cd",
+            "--label",
+            "紧凑",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+            "--valid-from",
+            "20261118",
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertIn("YYYY-MM-DD", err)
+        self.assertFalse(any(x["id"] == "cd" for x in self._routine()["alarmWindows"]), "被拒的窗口不该落盘")
+
+    def test_valid_from_window_appears_on_first_day(self):
+        """规范日期写的窗口，必须在生效第一天真的进账本。"""
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "vf",
+            "--label",
+            "生效首日",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+            "--valid-from",
+            "2026-11-18",
+        )
+        self.assertEqual(rc, 0, err)
+        self.cli("plan", "--force", now="2026-11-18T06:00:00+08:00")
+        win = next((x for x in self.state()["windows"] if x["id"] == "vf"), None)
+        self.assertIsNotNone(win, "生效首日必须进账本")
+        self.assertEqual(win["state"], "pending")
+
 
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""

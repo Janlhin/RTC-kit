@@ -2285,11 +2285,20 @@ def cmd_add_window(args) -> int:
 
     for key in ("validFrom", "validUntil"):
         if w.get(key):
-            try:
-                date.fromisoformat(str(w[key]))
-            except ValueError:
-                print(f"add-window: --{key} 应为 YYYY-MM-DD，收到 {w[key]}", file=sys.stderr)
+            text = str(w[key]).strip()
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+                print(
+                    f"add-window: --{key} 必须是 YYYY-MM-DD（带短横线）；"
+                    f"紧凑写法 {text} 存进去后排程按字符串比较，窗口会认不出来",
+                    file=sys.stderr,
+                )
                 return 3
+            try:
+                date.fromisoformat(text)
+            except ValueError:
+                print(f"add-window: --{key} 不是有效日期：{text}", file=sys.stderr)
+                return 3
+            w[key] = text
     if w.get("validFrom") and w.get("validUntil") and w["validFrom"] > w["validUntil"]:
         print("add-window: validFrom 不能晚于 validUntil", file=sys.stderr)
         return 3
