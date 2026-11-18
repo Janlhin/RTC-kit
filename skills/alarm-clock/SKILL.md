@@ -89,6 +89,19 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 2. 回一句：`改成 13:00 了，明天生效。`
    `set-time` 只写时刻表，下次 `plan` 生效；今天已生成的窗口不变。
 
+**新增/修改周期窗口用 `add-window` 命令，不要手改 JSON：**
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} add-window \
+  --id <id> --label "<文案>" --start HH:MM --end HH:MM --interval <分钟> \
+  [--ack "<确认词>"] [--valid-from YYYY-MM-DD] [--valid-until YYYY-MM-DD] [--update] [--dry-run]
+```
+
+- 不带 `--update` 时，同 id 已存在会以退出码 `4` 拒绝；要改就加 `--update`（字段级合并，没提到的字段保留）
+- `--dry-run` 只打印将写入的窗口，不落盘
+- `--format report` 与 `--format report-fallback` 不能同时启用（退出码 `3`）
+- 写入走统一印章，下次 `plan` 生效；当天 `alarms.json` 不动
+
 **改期（挪到别的日子）用 `postpone` 命令，不要手改 JSON：**
 
 ```bash
@@ -137,7 +150,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} enable   --window <id>
 
 一次性窗口的「改期」= 改 `validFrom` / `validUntil`；窗口本身已经只存在于那一天。
 
-修改时刻表**只能由 `rtc.py` 的命令完成**（`set-time` / `postpone` / `disable` / `enable`）。`rules/routines.json` 是唯一可改的文件，**模型绝不手改**它，也不碰任何 `*.example` / `*.md` 模板。
+修改时刻表**只能由 `rtc.py` 的命令完成**（`set-time` / `add-window` / `postpone` / `disable` / `enable`）。`rules/routines.json` 是唯一可改的文件，**模型绝不手改**它，也不碰任何 `*.example` / `*.md` 模板。
 但用户若明确要求过「改之前先问我」，那就照做：那是用户的边界，不是契约的规定。
 
 ## §3 一次性提醒

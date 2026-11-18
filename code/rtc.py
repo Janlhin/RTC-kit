@@ -18,6 +18,8 @@
   python rtc.py --workspace <dir> complete --window <ID> [--text TXT]
   python rtc.py --workspace <dir> disable  --window <ID>
   python rtc.py --workspace <dir> enable   --window <ID>
+  python rtc.py --workspace <dir> add-window --id ID --label TXT
+      --start HH:MM --end HH:MM --interval N [--update] [--dry-run]
   python rtc.py --workspace <dir> metrics sync|report|schedule [--date YYYY-MM-DD]
 
 `import rtc` 拿到的是 rtc_core 这个模块对象——`rtc_due.py` / `rtc_plan.py` 调 `rtc.main()`
