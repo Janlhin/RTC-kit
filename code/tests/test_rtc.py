@@ -1141,7 +1141,9 @@ class TestCancelCompleteDisable(RtcCase):
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
         self.assertNotIn("tea", [w["id"] for w in self.state().get("windows", [])])
         rc, out, _ = self.cli("due", now="2026-11-14T15:00:00+08:00")
-        self.assertEqual(out, "")
+        # 自检告警（⚠️ 开头）不是提醒本身：这条用例只关心窗口静默
+        body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+        self.assertEqual(body.strip(), "")
 
     def test_disable_marks_today_occurrence_cancelled(self):
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
@@ -1299,7 +1301,9 @@ class TestSevenOpsSameDay(RtcCase):
             if want:
                 self.assertIn(want, out, t)
             else:
-                self.assertEqual(out, "", f"{t} 应静默")
+                # 自检告警（⚠️ 开头）不是提醒本身：这里只验证窗口不响
+                body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+                self.assertEqual(body.strip(), "", f"{t} 应静默")
 
         # 次日：只有取件（推迟过来的）与倒计时
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
@@ -1342,7 +1346,8 @@ class TestSevenOpsSameDay(RtcCase):
         self.cli("plan", now=f"{T}T06:00:00+08:00")
         self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
-        rc, out, _ = self.cli("plan", "--force", now="2026-11-14T06:00:00+08:00")
+        # 自检已随 #78 移到 due：这里要的是 due 的那条「整段没响」告警
+        rc, out, _ = self.cli("due", now="2026-11-14T08:00:00+08:00")
         self.assertNotIn("cancel-me", out, "取消 ≠ 漏响，不该触发「整段没响」告警")
         self.assertIn("travel", out, "确实整段没响过的窗口仍要报出来——否则真漏了就没人知道")
 
@@ -3738,7 +3743,8 @@ class TestOneOffNoRegen(RtcCase):
         self.cli("plan", now="2026-11-18T06:00:00+08:00")
         self.assertEqual(self.state().get("windows"), [], "没确认也不许次日重生")
         rc, out, _ = self.cli("due", now="2026-11-18T20:00:00+08:00")
-        self.assertEqual(out, "")
+        body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+        self.assertEqual(body.strip(), "")
         routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
         self.assertNotIn("thermos", [w["id"] for w in routine["alarmWindows"]], "过期的一次性条目要清理掉")
 
@@ -4179,7 +4185,8 @@ class TestHeartbeatOk(RtcCase):
             encoding="utf-8",
         )
         self.cli("plan", now="2026-11-16T06:00:00+08:00")
-        rc, out, _ = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        # 自检已随 #78 移到 due，并用「本次刷新前」的心跳判定
+        rc, out, _ = self.cli("due", now="2026-11-17T06:00:00+08:00")
         self.assertIn("没有成功判定心跳", out)
 
     def test_self_check_silence_on_healthy_day(self):
@@ -4627,6 +4634,77 @@ class TestWindowContract(RtcCase):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         props = set(schema["$defs"]["alarmWindow"]["properties"])
         self.assertEqual(props, set(rtc._WINDOW_KEYS), "白名单必须与 routine.schema.json 同步")
+
+
+class TestSchedulerGuard(RtcCase):
+    """#78：心跳不能替账本撒谎，自检要跟着 due 走。"""
+
+    def test_plan_failure_is_delivered_once(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99  # 与窗口算术不符
+        self.write_routine(r)
+        (self.ws / "state" / "alarms.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "rev": 5,
+                    "timezone": "Asia/Shanghai",
+                    "planDate": "2026-11-18",
+                    "planKind": "workday",
+                    "generatedBy": "rtc-plan",
+                    "generatedAt": "2026-11-18T06:00:00+08:00",
+                    "windows": [],
+                    "history": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        rc, out, _ = self.cli("due", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, "due 自己不能崩")
+        self.assertIn("计划没生成", out, "计划失败必须投递，不能静默空跑")
+        rc2, out2, _ = self.cli("due", now="2026-11-19T06:05:00+08:00")
+        self.assertEqual(rc2, 0)
+        self.assertEqual(out2, "", "同一问题同一天只投一次")
+
+    def test_missing_window_visible_in_due_and_status(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "night",
+                "label": "夜间",
+                "start": "22:00",
+                "end": "22:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+        rc, out, _ = self.cli("due", now="2026-11-19T12:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("night", out, "时刻表有、账本没有，必须告警")
+        data = json.loads(self.cli("status", "--json")[1])
+        self.assertIn("night", data["missing_window_ids"])
+
+    def test_heartbeat_check_moves_to_due(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        (self.ws / "state" / "heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "attemptAt": "2026-11-19T03:00:00+08:00",
+                    "lastOkAt": "2026-11-19T03:00:00+08:00",
+                    "at": "2026-11-19T03:00:00+08:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        rc, out, _ = self.cli("due", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("调度器最近一次成功判定", out, "自检要跟着 due 跑")
 
 
 if __name__ == "__main__":

@@ -530,22 +530,33 @@ def read_heartbeat_attempt() -> datetime | None:
         return None
 
 
-def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]:
-    """只报告「任务在跑但可能没送达」的信号，正常时不输出任何东西。"""
+def self_check(
+    state: dict,
+    now: datetime,
+    first_run: bool = False,
+    heartbeat: tuple[datetime | None, datetime | None] | None = None,
+) -> list[str]:
+    """只报告「任务在跑但可能没送达」的信号，正常时不输出任何东西。
+
+    `heartbeat` 用于在 due 内部调用时传入「本次刷新之前」的心跳——否则
+    due 刚写下的 attemptAt 会让「从没成功判定」这条检查永远看不到问题。
+    """
     probs: list[str] = []
-    hb = read_heartbeat()
-    hb_attempt = read_heartbeat_attempt()
+    if heartbeat is None:
+        hb, hb_attempt = read_heartbeat(), read_heartbeat_attempt()
+    else:
+        hb, hb_attempt = heartbeat
 
     if hb is None:
         # attempt 新鲜 = due 正在判定中（它会在出口补写 lastOkAt）或持续被调用，
         # 此时不报——pause 期 due 每 tick 都在跑、只是判为静默，属健康。
         # 若 due 因状态损坏失败退出，lastOkAt 永远不写，attemptAt 会随时间变旧，
         # 次日这里就会告警——这正是要抓的场景。
-        attempt_fresh = (
-            hb_attempt is not None and 0 <= (now - hb_attempt).total_seconds() / 60 <= HEARTBEAT_STALE_MIN
-        )
-        if not first_run and not attempt_fresh:
-            probs.append("⚠️ 没有成功判定心跳：rtc-due 可能从未完整跑完一次判定")
+        # attempt 也是空 = 全新部署的第一次运行：还没机会成功，不报噪音。
+        if hb_attempt is not None:
+            attempt_fresh = 0 <= (now - hb_attempt).total_seconds() / 60 <= HEARTBEAT_STALE_MIN
+            if not first_run and not attempt_fresh:
+                probs.append("⚠️ 没有成功判定心跳：rtc-due 可能从未完整跑完一次判定")
     else:
         gap_min = (now - hb).total_seconds() / 60
         if gap_min > HEARTBEAT_STALE_MIN:
@@ -558,6 +569,44 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
         if h.get("state") == "missed" and int(h.get("fires", 0)) == 0:
             probs.append(f"⚠️ 昨天「{h.get('id')}」一次都没响过，当时调度器可能没在跑")
     return probs
+
+
+def alerts_path() -> Path:
+    return WORKSPACE / "state" / "guard.json"
+
+
+def emit_alert_once(key: str, line: str, now: datetime) -> bool:
+    """同一问题同一天只投递一次。
+
+    due 每 5 分钟跑一趟：同一个毛病反复刷屏，用户会把它当噪音关掉，
+    然后真的坏掉那次也看不见了。guard.json 写失败时按「不投递」处理——
+    宁可少一条告警，也不在坏盘上反复尝试。
+    """
+    p = alerts_path()
+    today = now.date().isoformat()
+    keys: list[str] = []
+    try:
+        if p.exists():
+            data = load_json(p)
+            if isinstance(data, dict) and data.get("date") == today and isinstance(data.get("keys"), list):
+                keys = [str(k) for k in data["keys"]]
+    except (Validation, ValueError, TypeError, OSError):
+        keys = []
+    fp = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    if fp in keys:
+        return False
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"date": today, "keys": (keys + [fp])[-200:]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, p)
+    except OSError:
+        return False
+    print(line)
+    return True
 
 
 # ---------------------------------------------------------------- 日程快照
@@ -831,6 +880,20 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
             raise Validation("今天没有任何窗口：检查 routines.json 的 dateTypes")
         return []
     return out
+
+
+def expected_today_ids(routine: dict, now: datetime) -> set[str] | None:
+    """今天按时刻表应该出现在账本里的窗口 id；配置算不出来时返回 None。
+
+    这是「设了提醒却没响」的入口检查：时刻表有、账本没有，due 就不可能响它。
+    """
+    try:
+        kind = plan_kind(now.date(), routine)
+        if day_disabled(routine, kind):
+            return set()
+        return {w["id"] for w in build_windows(routine, now.date(), kind, now, strict=False)}
+    except (Validation, KeyError, ValueError, TypeError):
+        return None
 
 
 TERMINAL = {"acked", "missed", "skipped", "cancelled", "delivered"}
@@ -1468,8 +1531,9 @@ def cmd_plan(args) -> int:
     except Exception as e:  # 备份失败绝不能拖垮提醒本身
         print(f"backup: 备份异常 {type(e).__name__}: {e}")
 
-    # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
-    for line in take_notices() + hand_edit + self_check(state, now, first_run=(old is None)):
+    # 自检已随 #78 移到 due（plan 一天一次，崩了没人看；due 每 5 分钟活着）。
+    # 这里只播自愈与手改的提示。
+    for line in take_notices() + hand_edit:
         print(line)
 
     # 行程推到会话入口：模型不跑命令也知道今天排了什么
@@ -1502,9 +1566,19 @@ def cmd_due(args) -> int:
         print(line)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    # 先记下「本次刷新之前」的心跳：自检要看的是上一次到底有没有判完，
+    # 不能拿自己刚写的 attemptAt 冒充证据。
+    hb_before = read_heartbeat()
+    hb_attempt_before = read_heartbeat_attempt()
     touch_heartbeat(now)  # attemptAt：进入即记，失败也留痕
     rc = _due_eval(args, routine, tz, now)
     if rc == 0:
+        # 自检跟着 due 走：plan 一天只跑一次，崩了 due 还活着。
+        # 同一问题每天只投一次，不刷屏。
+        state = load_state()
+        if state is not None:
+            for line in self_check(state, now, heartbeat=(hb_before, hb_attempt_before)):
+                emit_alert_once("self:" + line, line, now)
         touch_heartbeat(now, ok=True)  # lastOkAt：判定完整走完（含静默）
     return rc
 
@@ -1512,14 +1586,45 @@ def cmd_due(args) -> int:
 def _due_eval(args, routine, tz, now) -> int:
     """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
-    if not state or state.get("planDate") != now.date().isoformat():
-        rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))
+    today = now.date().isoformat()
+    if not state or state.get("planDate") != today:
+        try:
+            rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))
+        except Validation as e:
+            # 配置坏了 → plan 抛错。due 不能跟着静默：今天一条都不会响，
+            # 用户必须收到一条可投递的告警（每天一次，诊断细节在 stderr）。
+            print(f"due: 今日计划生成失败：{e}", file=sys.stderr)
+            rc = 3
         if rc != 0:
-            return rc
+            emit_alert_once(
+                "plan-failed",
+                f"⚠️ 今天（{today}）的计划没生成，所有提醒都不会响；先按诊断修配置，再跑一次 plan",
+                now,
+            )
+            return 0
         state = load_state()
     if state is None:
         print("due: 计划生成后仍没有状态文件，本 tick 放弃", file=sys.stderr)
+        emit_alert_once(
+            "no-state",
+            "⚠️ 今天的计划没有落盘，所有提醒都不会响；检查 state/alarms.json 与磁盘权限",
+            now,
+        )
         return 3
+
+    # 对账：时刻表有、账本没有 → 这些提醒今天物理上不可能响
+    if not pause_covers(load_pause(), now.date()):
+        expected = expected_today_ids(routine, now)
+        if expected is not None:
+            ledger_ids = {w["id"] for w in state.get("windows", [])}
+            missing = sorted(expected - ledger_ids)
+            if missing:
+                emit_alert_once(
+                    "missing-" + ",".join(missing),
+                    f"⚠️ 时刻表有 {'、'.join(missing)}，但今天账本里没有：这些提醒不会响；"
+                    "检查 validFrom / dateTypes，或重建 plan",
+                    now,
+                )
 
     rev = int(state["rev"])
     changed = False

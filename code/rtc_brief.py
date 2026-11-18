@@ -355,11 +355,22 @@ def cmd_status(args) -> int:
     backup = _backup_status()
     paused = core.load_pause()
     delivery = core.delivery_summary(state["planDate"])
+    now = core.now_tz(routine["tzOffset"])
+    ledger_date = state["planDate"]
+    ledger_stale = ledger_date != now.date().isoformat()
+    missing: list[str] = []
+    if not core.pause_covers(paused, now.date()):
+        expected = core.expected_today_ids(routine, now)
+        if expected is not None:
+            missing = sorted(expected - {w.get("id") for w in state.get("windows", [])})
     if args.json:
         print(
             json.dumps(
                 {
                     "planDate": state["planDate"],
+                    "ledger_date": ledger_date,
+                    "ledger_stale": ledger_stale,
+                    "missing_window_ids": missing,
                     "rev": state["rev"],
                     "timetable": timetable,
                     "backup": backup,
@@ -373,6 +384,10 @@ def cmd_status(args) -> int:
         )
         return 0
     print(f"{state['planDate']}  {state['planKind']}  rev={state['rev']}")
+    if ledger_stale:
+        print(f"  ⚠ 账本是 {ledger_date} 的、不是今天——今天不会响；先跑一次 plan")
+    if missing:
+        print(f"  ⚠ 时刻表有 {'、'.join(missing)} 但账本里没有——这些提醒今天不会响")
     if paused:
         print(f"  ⏸ 已暂停至 {paused['until']}（期间不会响；恢复用 resume）")
     if timetable["recurring"] == 0:
@@ -382,7 +397,6 @@ def cmd_status(args) -> int:
         )
     hb = core.read_heartbeat()
     hb_attempt = core.read_heartbeat_attempt()
-    now = core.now_tz(routine["tzOffset"])
     if hb is None:
         extra = (
             f"（{int((now - hb_attempt).total_seconds() // 60)} 分钟前调过，但没判完）"
