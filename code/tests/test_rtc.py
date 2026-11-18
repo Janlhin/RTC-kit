@@ -4005,6 +4005,69 @@ class TestMorningFallback(RtcCase):
         tally = _window_tally(self.state())
         self.assertEqual(tally["windows"], 0)
 
+    def test_bad_encoding_receipt_log_does_not_block_other_reminders(self):
+        """回执日志读不动 → 按未送达处理：兜底照发，10:00 的无关提醒也照响。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "brief-morning-fallback",
+                "label": "早报兜底",
+                "start": "09:10",
+                "end": "09:14",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report-fallback",
+            },
+            {
+                "id": "ten",
+                "label": "十点提醒",
+                "start": "10:00",
+                "end": "10:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+            },
+        ]
+        self.write_routine(r)
+        (self.ws / "state" / "delivery.log").write_bytes(b"\xff\xfe\x00broken")
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+
+        rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out, "坏日志不能让兜底失声")
+        self.assertIn("投递回执读取失败", err, "读取失败要留诊断")
+
+        rc, out, err = self.cli("due", now="2026-11-17T10:01:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("十点提醒", out, "坏日志不能连带压住无关提醒")
+
+    def test_late_receipt_does_not_relabel_emitted_fallback(self):
+        """兜底已经响过（fireCount>0），迟到回执只能止损，不能把它改成 skipped。"""
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-17T09:11:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("📊 昨日汇报 — 2026-11-16", out)
+        self.assertEqual(self.window("brief-morning-fallback")["fireCount"], 1)
+
+        self.cli(
+            "delivery-record",
+            "--window",
+            "report",
+            "--target",
+            "hermes",
+            "--result",
+            "ok",
+            "--at",
+            "2026-11-17T09:12:00+08:00",
+        )
+        rc, out, err = self.cli("due", now="2026-11-17T09:13:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.strip(), "", "回执到了就不要再发第二条")
+        w = self.window("brief-morning-fallback")
+        self.assertEqual(w["state"], "delivered", "已经响过的兜底不能记成 skipped")
+        self.assertNotEqual(w.get("missedReason"), "covered_by_receipt")
+
     def test_both_report_formats_are_rejected(self):
         """两种输出方式同时启用会让同一份汇报发两次——plan 直接拒绝。"""
         r = base_routine()

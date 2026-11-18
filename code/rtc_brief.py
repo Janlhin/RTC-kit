@@ -706,7 +706,15 @@ def report_delivered(day: date) -> bool:
     用户就整天没有汇报。所以兜底窗口只认回执，不认文件。
     """
     day_iso = day.isoformat()
-    for row in core.read_delivery(day_iso):
+    try:
+        rows = core.read_delivery(day_iso)
+    except (OSError, UnicodeDecodeError) as e:
+        # 回执日志读不动（坏编码 / 权限 / IO）时，不能把「没有证据」升级成
+        # 「整个 due 抛异常」：那会同时压住兜底和当天其他提醒。按未送达处理，
+        # 让兜底照常发；诊断留在 stderr。
+        print(f"due: 投递回执读取失败（{e}），按未送达处理", file=sys.stderr)
+        return False
+    for row in rows:
         if str(row.get("result")) != "ok":
             continue
         if str(row.get("window") or "") in {REPORT_EVIDENCE_WINDOW, "rtc-report", "brief-morning"}:

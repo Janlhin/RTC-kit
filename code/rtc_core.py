@@ -1481,10 +1481,14 @@ def _due_eval(args, routine, tz, now) -> int:
         end = datetime.fromisoformat(w["end"])
         if now > end and w["state"] in {"pending", "ringing"}:
             if w.get("format") == "report-fallback" and brief.report_delivered(now.date()):
-                # 不是 delivered：这一窗从未投递，只是「已经有回执，本轮无需再响」。
-                # 记 skipped + 原因，历史里才不会被算成「送过一次」。
-                w["state"] = "skipped"
-                w["missedReason"] = "covered_by_receipt"
+                # 没响过才叫 skipped；已经响过（fireCount>0）的兜底不能因为
+                # 回执晚到就被抹成「从未投递」，否则历史会失真。
+                if int(w.get("fireCount", 0)) > 0:
+                    w["state"] = "delivered"
+                    w.pop("missedReason", None)
+                else:
+                    w["state"] = "skipped"
+                    w["missedReason"] = "covered_by_receipt"
             else:
                 w["state"] = "missed"
                 w["missedAt"] = now.isoformat()
@@ -1501,10 +1505,14 @@ def _due_eval(args, routine, tz, now) -> int:
         start, end = datetime.fromisoformat(w["start"]), datetime.fromisoformat(w["end"])
         if start <= now <= end and w["state"] in {"pending", "ringing"}:
             if w.get("format") == "report-fallback" and brief.report_delivered(now.date()):
-                # 不是 delivered：这一窗从未投递，只是「已经有回执，本轮无需再响」。
-                # 记 skipped + 原因，历史里才不会被算成「送过一次」。
-                w["state"] = "skipped"
-                w["missedReason"] = "covered_by_receipt"
+                # 没响过才叫 skipped；已经响过（fireCount>0）的兜底不能因为
+                # 回执晚到就被抹成「从未投递」，否则历史会失真。
+                if int(w.get("fireCount", 0)) > 0:
+                    w["state"] = "delivered"
+                    w.pop("missedReason", None)
+                else:
+                    w["state"] = "skipped"
+                    w["missedReason"] = "covered_by_receipt"
                 changed = True
                 continue
             hit = w
