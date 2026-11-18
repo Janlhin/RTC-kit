@@ -603,9 +603,10 @@ def run(args: argparse.Namespace) -> int:
     print(f"  {cmd_report}")
     print("  说明：<target> 换成你的投递渠道（如微信 iLink bot）；首次部署先 --deliver local 观察两天。")
     print(
-        "  早报兜底：时刻表里另加一个 09:10 的 `brief-morning-fallback` 窗口"
-        "（format: report-fallback）。模型没写出 state/reports/<日期>.md 时，它补发静态汇报；"
-        "写出则静默。这样「9:00 现场叫模型」与「模型失败也不能不响」两条同时成立。"
+        "  早报兜底：时刻表里配 09:10 的 `brief-morning-fallback` 窗口（format: report-fallback），"
+        "别再配 09:00 的 format=report 窗口（plan 会拒绝同时启用）。"
+        "09:00 模型写完并投递后记一条 `delivery-record --window report --result ok`；"
+        "有回执兜底静默，没回执就补发（有文件发文件正文，没文件发静态汇报）。"
     )
 
     if getattr(args, "setup_cron", False) and not dry_run:

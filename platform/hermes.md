@@ -43,15 +43,23 @@ hermes cron create "0 9 * * *"  --name rtc-report --script rtc_report.py \
 
 | 时间 | 谁 | 做什么 |
 |---|---|---|
-| 09:00 | `rtc-report`（agent 模式） | 读 `rtc_report.py` 吐的素材，写 `state/reports/<日期>.md` 并投递 |
-| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天文件**存在** → 判 `delivered`、静默；**缺失** → 发静态汇报 |
+| 09:00 | `rtc-report`（agent 模式） | 读 `rtc_report.py` 吐的素材，写 `state/reports/<日期>.md` 并投递；投完后调 `delivery-record --window report --result ok` 留回执 |
+| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天有 **`result=ok` 的投递回执** → 判 `delivered`、静默；**没有回执** → 有文件补发文件内容，没文件发静态汇报 |
 
-所以时刻表里要配两个窗口：
+时刻表里**只配一个**兜底窗口：
 
 ```jsonc
-{ "id": "brief-morning",          "format": "report",          "start": "09:00", "end": "09:04", ... }
 { "id": "brief-morning-fallback", "format": "report-fallback", "start": "09:10", "end": "09:14", ... }
 ```
+
+**不要**同时再配一个 `format: report` 的 9:00 窗口——`plan` 会直接拒绝，因为两个窗口各发一次会让同一份汇报出现两遍（外部审计 2026-11 实测到过）。两种模式二选一：
+
+| 模式 | 时刻表窗口 | 谁出稿 |
+|---|---|---|
+| 单窗口（不跑 agent cron） | `format: report` | `due` 直接读文件或拼静态版，一次搞定 |
+| 双窗口（跑 `rtc-report`） | `format: report-fallback` | 09:00 模型写 + 投递、09:10 只在没回执时补一枪 |
+
+**压住兜底的唯一证据是投递回执，不是文件存在。** 文件只能证明模型写完了，不能证明用户收到了；写完了但发送失败时若静默，用户会整天没有汇报。
 
 兜底窗口是技术性守卫，**不计入**「今日闹钟 N 个窗口」的统计（`_window_tally` 会跳过它）。
 - 任务条数**装完就固定**（默认两条；启用早报模型生成后三条），任何流程只 `edit`，不重新 `create`

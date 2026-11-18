@@ -141,6 +141,8 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 - **允许**一条 09:00 的 agent 模式 cron（`rtc-report`）调模型写汇报
 - 该 cron **不参与任何判定**：不算火点、不改 `alarms.json`、不碰 `routines.json`，只写 `state/reports/<日期>.md`
 - **模型不在线不能导致不响**：09:10 的 `report-fallback` 窗口用同一批账本数据发静态汇报
+- **兜底只被投递回执压住，不被文件存在压住**：09:00 的 cron 投完要记一条 `--window report --result ok`；没有回执时，兜底窗口必须再发一次（有文件发文件正文，没文件发静态版）。文件存在只说明模型写了，不说明用户收到了
+- **单一输出所有者**：`format: report`（due 直接出稿）与 `format: report-fallback`（模型先写 + 回执兜底）只能二选一，`plan` 同时看到两者直接拒绝——否则同一份汇报会在 09:00 与 09:10 各发一遍
 - 因此「cron 恒定两条」的旧约束在此处放宽为三条，且仅此一处
 
 ## 9. 这份文档怎么维护

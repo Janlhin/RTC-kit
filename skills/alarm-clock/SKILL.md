@@ -256,6 +256,22 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} metrics report
 - 落完账**回一句短的**（「记下了：今天下午去医院」），别再复述全文
 - 用户只是闲聊、没给可执行信息 → 不落账，正常回话即可（别把每句话都写进账本）
 
+### §6.2.1 你是 `rtc-report` 时，写完必须留回执
+
+早报由你（09:00 的 agent cron）写 `{{STATE_DIR}}/reports/<今天>.md`，投递发生在你回话之后。
+09:10 的兜底窗口只认**投递回执**——没有回执它会再发一次，哪怕文件写得再好。
+
+所以投递成功之后补一条：
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} delivery-record --window report --result ok
+```
+
+- 回执是「用户真的收到了」的唯一证据；**文件存在不算**，不要拿它当交付证明
+- 发送失败就记 `--result fail --error "失败原因"`（兜底窗口会接手，把汇报补发出去）
+- 时刻表里 `format: report` 与 `format: report-fallback` **只能二选一**；同时配置 `plan` 会直接拒绝
+
+
 ## §7 禁止
 
 - ❌ 自己判断「现在该不该响」
