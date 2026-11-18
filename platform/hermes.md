@@ -44,9 +44,11 @@ hermes cron create "0 9 * * *"  --name rtc-report --script rtc_report.py \
 | 时间 | 谁 | 做什么 |
 |---|---|---|
 | 09:00 | `rtc-report`（agent 模式） | 读 `rtc_report.py` 吐的素材，写 `state/reports/<日期>.md` 并投递；投完后调 `delivery-record --window report --result ok` 留回执 |
-| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天有 **`result=ok` 的投递回执** → 判 `skipped`（原因 `covered_by_receipt`）、静默；**没有回执** → 有文件补发文件内容，没文件发静态汇报 |
+| 09:10 | `brief-morning-fallback` 窗口（`format: report-fallback`） | 当天有 **`result=ok` 的投递回执** → 没响过记 `skipped`（原因 `covered_by_receipt`）；已经响过则记 `delivered`（迟到回执只能止损，不能抹掉已发文本）；静默。**没有回执** → 有文件补发文件内容，没文件发静态汇报 |
 
 时刻表里**只配一个**兜底窗口：
+
+> 截止点以**第一次实际兜底判定**为准：09:10 是窗口起点，不是墙钟硬截止。09:10:30 写好的汇报会被 09:11 的第一次 tick 使用；之后再写的，当天不再采用。
 
 ```jsonc
 { "id": "brief-morning-fallback", "format": "report-fallback", "start": "09:10", "end": "09:14", ... }
