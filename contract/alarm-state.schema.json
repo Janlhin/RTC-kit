@@ -42,6 +42,15 @@
         "lastFiredAt": { "type": ["string", "null"], "format": "date-time" },
         "ackedAt": { "type": ["string", "null"], "format": "date-time" },
         "ackText": { "type": ["string", "null"] },
+        "ackSource": {
+          "type": ["string", "null"],
+          "enum": ["external", null],
+          "description": "确认来源；external = 外部平台适配器回调"
+        },
+        "ackEventId": {
+          "type": ["string", "null"],
+          "description": "外部回调的幂等键；同一事件重复回调只写一次"
+        },
         "missedAt": { "type": ["string", "null"], "format": "date-time" },
         "cancelledAt": { "type": ["string", "null"], "format": "date-time", "description": "被取消的时刻" },
         "disabled": { "type": "boolean", "description": "这个窗口已被永久停用（完成 / 永不提醒）" },

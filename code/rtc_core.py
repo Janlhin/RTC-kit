@@ -1630,6 +1630,46 @@ def cmd_ack(args) -> int:
         print("ack: 今天还没有计划", file=sys.stderr)
         return 4
 
+    if args.source == "external":
+        if not args.date:
+            print("ack: 外部回调必须带 --date（只允许结束当天该窗口）", file=sys.stderr)
+            return 3
+        if not args.event_id:
+            print("ack: 外部回调必须带 --event-id（重复回调要幂等）", file=sys.stderr)
+            return 3
+    elif args.event_id:
+        print("ack: --event-id 只能配合 --source external", file=sys.stderr)
+        return 3
+
+    if args.date:
+        if not args.window:
+            print("ack: --date 需要配合 --window", file=sys.stderr)
+            return 3
+        try:
+            date.fromisoformat(args.date)
+        except ValueError:
+            print(f"ack: --date 应为 YYYY-MM-DD，收到 {args.date}", file=sys.stderr)
+            return 3
+        if state.get("planDate") != args.date:
+            print(
+                f"ack: 当前计划日期是 {state.get('planDate')}，不能按 {args.date} 结束窗口",
+                file=sys.stderr,
+            )
+            return 4
+
+    if args.event_id:
+        for w in state["windows"]:
+            if w.get("ackEventId") != args.event_id:
+                continue
+            if args.window and w["id"] != args.window:
+                print(
+                    f"ack: 事件 {args.event_id} 已绑定到窗口 {w['id']}，不能改绑到 {args.window}",
+                    file=sys.stderr,
+                )
+                return 4
+            print(f"ack: 事件 {args.event_id} 已处理，跳过", file=sys.stderr)
+            return 0
+
     rev = int(state["rev"])
     cands = []
     for w in state["windows"]:
@@ -1661,6 +1701,10 @@ def cmd_ack(args) -> int:
     hit["state"] = "acked"
     hit["ackedAt"] = now.isoformat()
     hit["ackText"] = args.text or ""
+    if args.source:
+        hit["ackSource"] = args.source
+    if args.event_id:
+        hit["ackEventId"] = args.event_id
     state["rev"] = rev + 1
     try:
         atomic_write(STATE, state, expected_rev=rev)
@@ -2428,6 +2472,9 @@ def main(argv=None) -> int:
     sa.add_argument("--window")
     sa.add_argument("--text")
     sa.add_argument("--now")
+    sa.add_argument("--date", help="只结束 YYYY-MM-DD 这一天的窗口（外部回调必填）")
+    sa.add_argument("--source", choices=["external"], help="来源；外部平台适配器用 external")
+    sa.add_argument("--event-id", dest="event_id", help="幂等键；同一事件重复回调只写一次")
     sa.set_defaults(func=cmd_ack)
 
     schk = sub.add_parser("check")

@@ -1955,6 +1955,95 @@ class TestSetTime(RtcCase):
         self.assertEqual(rc, 3, "非法 HH:MM 应返回 3")
 
 
+class TestExternalAck(RtcCase):
+    """外部回调：日期绑定 + 来源 + 幂等键，重复回调不重复写。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "noon",
+                "label": "午间",
+                "start": "12:00",
+                "end": "12:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            },
+            {
+                "id": "afternoon",
+                "label": "下午",
+                "start": "13:00",
+                "end": "13:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            },
+        ]
+        self.write_routine(r)
+        self.cli("plan", now="2026-05-10T11:59:00+08:00")
+
+    def _ack(self, *args, now="2026-05-10T12:01:00+08:00"):
+        return self.cli("ack", *args, now=now)
+
+    def test_external_ack_binds_date_and_event(self):
+        rc, out, err = self._ack(
+            "--window",
+            "noon",
+            "--date",
+            "2026-05-10",
+            "--source",
+            "external",
+            "--event-id",
+            "evt-1",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        w = next(x for x in self.state()["windows"] if x["id"] == "noon")
+        self.assertEqual(w["state"], "acked")
+        self.assertEqual(w["ackSource"], "external")
+        self.assertEqual(w["ackEventId"], "evt-1")
+
+    def test_duplicate_event_is_noop(self):
+        args = ("--window", "noon", "--date", "2026-05-10", "--source", "external", "--event-id", "evt-1")
+        self.assertEqual(self._ack(*args)[0], 0)
+        rev = self.state()["rev"]
+        rc, out, err = self._ack(*args)
+        self.assertEqual(rc, 0, "同一事件重复回调应成功")
+        self.assertIn("已处理", err)
+        self.assertEqual(self.state()["rev"], rev, "重复回调不应再写 rev")
+
+    def test_wrong_date_rejected_before_write(self):
+        rc, _, err = self._ack(
+            "--window", "noon", "--date", "2026-05-09", "--source", "external", "--event-id", "evt-1"
+        )
+        self.assertEqual(rc, 4, err)
+        w = next(x for x in self.state()["windows"] if x["id"] == "noon")
+        self.assertEqual(w["state"], "pending")
+
+    def test_same_event_cannot_move_to_another_window(self):
+        self.assertEqual(
+            self._ack(
+                "--window", "noon", "--date", "2026-05-10", "--source", "external", "--event-id", "evt-1"
+            )[0],
+            0,
+        )
+        rc, _, err = self._ack(
+            "--window", "afternoon", "--date", "2026-05-10", "--source", "external", "--event-id", "evt-1"
+        )
+        self.assertEqual(rc, 4, err)
+        self.assertIn("已绑定", err)
+
+    def test_external_requires_date_and_event_id(self):
+        rc, _, err = self._ack("--window", "noon", "--source", "external")
+        self.assertEqual(rc, 3)
+        self.assertIn("--date", err)
+        rc, _, err = self._ack("--window", "noon", "--date", "2026-05-10", "--source", "external")
+        self.assertEqual(rc, 3)
+        self.assertIn("--event-id", err)
+
+
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""
 
