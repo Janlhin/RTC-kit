@@ -2317,6 +2317,39 @@ class TestAddWindow(RtcCase):
         self.assertEqual(w["label"], "旅游（改）")
         self.assertEqual(w["expectFires"], 1, "只改文案不该把一次性提醒改成一天五次")
 
+    def test_disabled_report_update_does_not_conflict(self):
+        """禁用的 report 窗口不参与「早报二选一」，改它不应被误判冲突。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "report-old",
+                "label": "旧早报",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report",
+                "disabled": True,
+            },
+            {
+                "id": "report-fb",
+                "label": "兜底",
+                "start": "09:10",
+                "end": "09:14",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report-fallback",
+            },
+        ]
+        self.write_routine(r)
+        rc, _, err = self.cli("add-window", "--id", "report-old", "--update", "--label", "旧早报（改名）")
+        self.assertEqual(rc, 0, f"禁用的 report 窗口不参与冲突：{err}")
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "report-old")
+        self.assertEqual(w["label"], "旧早报（改名）")
+        self.assertTrue(w["disabled"], "禁用状态必须保留")
+
 
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""

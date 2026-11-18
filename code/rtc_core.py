@@ -2316,7 +2316,8 @@ def cmd_add_window(args) -> int:
         for x in defs
         if x.get("id") != args.id and not x.get("disabled") and x.get("format")
     }
-    if w.get("format"):
+    # 候选窗口自己若是停用状态，就不参与「早报二选一」——它今天本来就不会响。
+    if w.get("format") and not w.get("disabled"):
         active_formats.add(str(w["format"]))
     if "report" in active_formats and "report-fallback" in active_formats:
         print(
