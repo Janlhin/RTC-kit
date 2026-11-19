@@ -104,6 +104,34 @@ class TestInstallRun(unittest.TestCase):
         )
         self.assertFalse((base / "skills" / "alarm-clock").exists(), "不该再平铺一份到 skills/<技能>/")
 
+    def test_guard_covers_timetable_not_just_ledger(self):
+        """#81：守则只封 alarms.json，等于门卫只拦后门、前门大敞。
+
+        事故形态：模型看到「禁止手改 alarms.json」，反推出 routines.json 可以手改，
+        于是把日期拼进 `--start`，三条提醒静默失效。部署版文本必须两扇门都封。
+        """
+        base = Path(tempfile.mkdtemp(prefix="rtc-guard-"))
+        args = Namespace(
+            workspace=str(base / "ws"),
+            harness_scripts_dir=str(base / "scripts"),
+            harness_skills_dir=str(base / "skills"),
+            code_src=None,
+            tz_offset="+08:00",
+            dry_run=False,
+            setup_cron=False,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = install.run(args)
+        self.assertEqual(rc, 0)
+
+        alarm = (base / "skills" / "rtc" / "alarm-clock" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("rules/routines.json", alarm, "部署版技能必须封住时刻表")
+        self.assertIn("不要自己拼 JSON", alarm, "命令表达不了时要停下来问，不是自己补文件")
+
+        agents = (base / "ws" / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("rules/routines.json", agents, "AGENTS.md 红线也要封时刻表")
+        self.assertIn("命令覆盖不到", agents, "缺参数的正向规则要装到工作区里")
+
     def test_flat_layout_is_opt_in(self):
         base = Path(tempfile.mkdtemp(prefix="rtc-flat-"))
         args = Namespace(
