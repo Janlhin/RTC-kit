@@ -2475,7 +2475,7 @@ def cmd_set_time(args) -> int:
         w["expectFires"] = expect_fires(start, end, int(w["intervalMin"]))
 
     try:
-        atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+        _write_routine(routine, digest)
     except Conflict as e:
         print(f"set-time: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2

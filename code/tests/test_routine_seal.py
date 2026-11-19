@@ -6,8 +6,8 @@ from unittest.mock import patch
 from test_rtc import RtcCase, base_routine, rtc
 
 
-class TestPostponeSeal(RtcCase):
-    """issue #87 第 1 条：推迟成功却没盖章——次日 plan 把程序自己当成「手改」。"""
+class _SealCase(RtcCase):
+    """推迟/改时刻都算「程序写出的版本」，都必须盖章。issue #87 第 1 条。"""
 
     def setUp(self):
         super().setUp()
@@ -33,6 +33,15 @@ class TestPostponeSeal(RtcCase):
             "印章摘要必须等于当前 routines.json 的摘要，否则下次 plan 必报手改",
         )
         self.assertEqual(self.program_last(), json.loads(self.routine_file().read_text(encoding="utf-8")))
+
+    def assert_next_plan_quiet(self):
+        rc, _, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("被 RTC 之外的东西改过", err, "程序自己写的改动不能报成手改")
+
+
+class TestPostponeSeal(_SealCase):
+    """issue #87 第 1 条：推迟成功却没盖章——次日 plan 把程序自己当成「手改」。"""
 
     def test_postpone_reseals_so_next_plan_is_quiet(self):
         """推迟成功 = 程序写出的版本，次日的 plan 不许把它报成外部编辑。"""
@@ -79,6 +88,18 @@ class TestPostponeSeal(RtcCase):
         rc, _, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
         self.assertEqual(rc, 0, err)
         self.assertNotIn("被 RTC 之外的东西改过", err)
+
+
+class TestSetTimeSeal(_SealCase):
+    """同一个坑的另一处：set-time 也是直接 atomic_write，写完同样不盖章。"""
+
+    def test_set_time_reseals_so_next_plan_is_quiet(self):
+        rc, out, err = self.cli("set-time", "--window", "wake", "--start", "07:10")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        self.assertEqual(self.seal()["windows"], 1, "盖章里的窗口数也要跟着重算")
+        self.assert_sealed()
+        self.assert_next_plan_quiet()
 
 
 if __name__ == "__main__":
