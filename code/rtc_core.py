@@ -63,6 +63,18 @@ class Validation(Exception):
     """生成的计划不满足校验。"""
 
 
+class ContractViolation(Validation):
+    """配置与契约不符（未知字段等），不是文件损坏——不能拿底稿覆盖用户刚写的意图。"""
+
+
+class _DueConflict(Exception):
+    """内部信号：本次 due 撞上了状态写入冲突，账本没写成。
+
+    不对外冒泡——cmd_due 接住它，按契约保持「空 stdout + 退出 0」，
+    且**不跑自检、不投递告警**：自检读的是冲突前的旧账本，此时的告警是假的。
+    """
+
+
 # ---------------------------------------------------------------- 基础设施
 
 
@@ -303,6 +315,46 @@ def atomic_write(path: Path, data: dict, expected_rev: int | None, expected_dige
 
 _ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
 
+# contract/routine.schema.json 的 alarmWindow.properties 全集（additionalProperties: false）。
+# 运行时只认这些键：多出来的字段是「空气开关」——写了不报错、也永远不生效。
+_WINDOW_KEYS = frozenset(
+    {
+        "ackHints",
+        "canceled",
+        "checklist",
+        "dateTypes",
+        "disabled",
+        "dueDate",
+        "end",
+        "expectFires",
+        "format",
+        "id",
+        "intervalMin",
+        "label",
+        "oneOff",
+        "skipDates",
+        "start",
+        "validFrom",
+        "validUntil",
+    }
+)
+
+
+def _check_window_keys(index: int, w: object) -> None:
+    """未知字段一律拒绝：它们不会被排程读取，写了等于没写，比漏响更难查。"""
+    if not isinstance(w, dict):
+        raise ContractViolation(f"alarmWindows[{index}] 应是对象，实际是 {type(w).__name__}")
+    unknown = sorted(set(w) - _WINDOW_KEYS)
+    if not unknown:
+        return
+    raise ContractViolation(
+        f"alarmWindows[{index}]（{w.get('id') or '无 id'}）含契约未定义字段：{', '.join(unknown)}。"
+        "这些字段不会被排程读取——写了等于没写。"
+        "合法字段：" + "、".join(sorted(_WINDOW_KEYS)) + "。"
+        "要停止提醒请用命令：ack（今天结束）/ cancel（取消安排）/ disable（永久停用），不要自造 status 字段。"
+    )
+
+
 # 运行中攒下的「要跟人说一句」的话（自愈、手改），由 plan/due 播一次就清空
 NOTICES: list[str] = []
 
@@ -317,9 +369,14 @@ def load_routine(read_only: bool = False) -> dict:
     `read_only=True` 用于「只读素材」类调用（早报素材生成）：坏文件照常报
     Validation，**绝不写任何文件**——修复时刻表是 plan / 用户交互命令的职责，
     一个被描述为只读的脚本不能顺手改配置。
+
+    契约违规（未知字段）不触发自愈：那不是文件损坏，拿底稿覆盖只会把用户
+    刚写下的意图一起抹掉，而用户还以为自己已经关掉了提醒。
     """
     try:
         return _validate_routine()
+    except ContractViolation:
+        raise
     except Validation:
         if read_only:
             raise
@@ -350,6 +407,8 @@ def _validate_routine() -> dict:
         raise Validation(f"{ROUTINE} 缺字段：{', '.join(missing)}；参考 rules/routines.example.md")
     if not isinstance(routine.get("alarmWindows"), list):
         raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
+    for i, w in enumerate(routine["alarmWindows"]):
+        _check_window_keys(i, w)
     return routine
 
 
@@ -479,22 +538,33 @@ def read_heartbeat_attempt() -> datetime | None:
         return None
 
 
-def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]:
-    """只报告「任务在跑但可能没送达」的信号，正常时不输出任何东西。"""
+def self_check(
+    state: dict,
+    now: datetime,
+    first_run: bool = False,
+    heartbeat: tuple[datetime | None, datetime | None] | None = None,
+) -> list[str]:
+    """只报告「任务在跑但可能没送达」的信号，正常时不输出任何东西。
+
+    `heartbeat` 用于在 due 内部调用时传入「本次刷新之前」的心跳——否则
+    due 刚写下的 attemptAt 会让「从没成功判定」这条检查永远看不到问题。
+    """
     probs: list[str] = []
-    hb = read_heartbeat()
-    hb_attempt = read_heartbeat_attempt()
+    if heartbeat is None:
+        hb, hb_attempt = read_heartbeat(), read_heartbeat_attempt()
+    else:
+        hb, hb_attempt = heartbeat
 
     if hb is None:
         # attempt 新鲜 = due 正在判定中（它会在出口补写 lastOkAt）或持续被调用，
         # 此时不报——pause 期 due 每 tick 都在跑、只是判为静默，属健康。
         # 若 due 因状态损坏失败退出，lastOkAt 永远不写，attemptAt 会随时间变旧，
         # 次日这里就会告警——这正是要抓的场景。
-        attempt_fresh = (
-            hb_attempt is not None and 0 <= (now - hb_attempt).total_seconds() / 60 <= HEARTBEAT_STALE_MIN
-        )
-        if not first_run and not attempt_fresh:
-            probs.append("⚠️ 没有成功判定心跳：rtc-due 可能从未完整跑完一次判定")
+        # attempt 也是空 = 全新部署的第一次运行：还没机会成功，不报噪音。
+        if hb_attempt is not None:
+            attempt_fresh = 0 <= (now - hb_attempt).total_seconds() / 60 <= HEARTBEAT_STALE_MIN
+            if not first_run and not attempt_fresh:
+                probs.append("⚠️ 没有成功判定心跳：rtc-due 可能从未完整跑完一次判定")
     else:
         gap_min = (now - hb).total_seconds() / 60
         if gap_min > HEARTBEAT_STALE_MIN:
@@ -507,6 +577,44 @@ def self_check(state: dict, now: datetime, first_run: bool = False) -> list[str]
         if h.get("state") == "missed" and int(h.get("fires", 0)) == 0:
             probs.append(f"⚠️ 昨天「{h.get('id')}」一次都没响过，当时调度器可能没在跑")
     return probs
+
+
+def alerts_path() -> Path:
+    return WORKSPACE / "state" / "guard.json"
+
+
+def emit_alert_once(key: str, line: str, now: datetime) -> bool:
+    """同一问题同一天只投递一次。
+
+    due 每 5 分钟跑一趟：同一个毛病反复刷屏，用户会把它当噪音关掉，
+    然后真的坏掉那次也看不见了。guard.json 写失败时按「不投递」处理——
+    宁可少一条告警，也不在坏盘上反复尝试。
+    """
+    p = alerts_path()
+    today = now.date().isoformat()
+    keys: list[str] = []
+    try:
+        if p.exists():
+            data = load_json(p)
+            if isinstance(data, dict) and data.get("date") == today and isinstance(data.get("keys"), list):
+                keys = [str(k) for k in data["keys"]]
+    except (Validation, ValueError, TypeError, OSError):
+        keys = []
+    fp = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    if fp in keys:
+        return False
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"date": today, "keys": (keys + [fp])[-200:]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, p)
+    except OSError:
+        return False
+    print(line)
+    return True
 
 
 # ---------------------------------------------------------------- 日程快照
@@ -639,6 +747,11 @@ def expect_fires(start: time, end: time, interval: int) -> int:
     minutes = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
     if minutes < 0:
         raise Validation("窗口跨午夜，当前版本不支持")
+    if interval <= 0:
+        # 零/负间隔是配置错误，不是运行时意外：除零会把整份 plan 炸掉，
+        # 连带旁边健康窗口一起不响。抛 Validation 让单窗口边界降级为
+        # 「跳过该窗口 + 告警」，与 #75 的降级口径一致。
+        raise Validation(f"intervalMin 必须是正整数，当前是 {interval}")
     return minutes // interval + 1
 
 
@@ -687,7 +800,49 @@ def countdown_review_day(defn: dict) -> str | None:
     return review
 
 
-def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool = True) -> list[dict]:
+def _window_bounds(w: dict) -> tuple[time, time]:
+    """解析并校验单窗口的 start/end；格式或取值错统一转成 Validation。
+
+    降级与严格两条路径都必须先过这里：裸 `int(x)` 抛的是 ValueError，
+    既绕过了 errors 通道，也让 `schedule` 这类只读视图直接抛栈（issue #82）。
+    """
+    try:
+        sh, sm = (int(x) for x in str(w["start"]).split(":"))
+        eh, em = (int(x) for x in str(w["end"]).split(":"))
+        return time(sh, sm), time(eh, em)
+    except (KeyError, ValueError, TypeError) as e:
+        raise Validation(f"start/end 格式不对（{e}）") from e
+
+
+def _check_window_arithmetic(w: dict) -> None:
+    """单窗口的数值校验：只拦「算错」这类，避免一条坏配置拖垮整天。"""
+    if w.get("oneOff") or w.get("dueDate") or (w.get("checklist") or []):
+        return
+    start, end = _window_bounds(w)
+    try:
+        interval = int(w["intervalMin"])
+    except (KeyError, ValueError, TypeError) as e:
+        raise Validation(f"intervalMin 格式不对（{e}）") from e
+    exp = expect_fires(start, end, interval)
+    if w.get("expectFires") and int(w["expectFires"]) != exp:
+        raise Validation(f"expectFires={w['expectFires']} 与算术值 {exp} 不符")
+
+
+def build_windows(
+    routine: dict,
+    d: date,
+    kind: str,
+    now: datetime,
+    strict: bool = True,
+    errors: list[str] | None = None,
+) -> list[dict]:
+    """按时刻表生成某天的窗口。
+
+    `errors` 传给「必须继续跑」的调用方（plan）：单个窗口的数值错误降级为
+    「跳过该窗口 + 记一条告警」，而不是让整份计划校验失败——一条写错的
+    提醒不该把一整天的账本都清空（issue #75）。其他调用方不传，保持 fail fast：
+    抛的也是 Validation（不是裸 ValueError），所以只读视图只会「报错」不会抛栈。
+    """
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
@@ -714,10 +869,22 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
         allowed = w.get("dateTypes") or []
         if allowed and kind not in allowed:
             continue
-        sh, sm = (int(x) for x in w["start"].split(":"))
-        eh, em = (int(x) for x in w["end"].split(":"))
-        start = datetime.combine(d, time(sh, sm), tzinfo=tz)
-        end = datetime.combine(d, time(eh, em), tzinfo=tz)
+        # 单窗口边界：解析/算术失败只跳它自己；调用方没给 errors 就 fail fast
+        # （预演要「你必须修」，不能被静默跳过糊过去）。
+        try:
+            t_start, t_end = _window_bounds(w)
+            try:
+                interval = int(w["intervalMin"])
+            except (KeyError, ValueError, TypeError) as e:
+                raise Validation(f"intervalMin 格式不对（{e}）") from e
+            _check_window_arithmetic(w)
+        except Validation as e:
+            if errors is None:
+                raise
+            errors.append(f"{w.get('id', '?')}：{e}")
+            continue
+        start = datetime.combine(d, t_start, tzinfo=tz)
+        end = datetime.combine(d, t_end, tzinfo=tz)
         one_off = bool(w.get("oneOff"))
         due = w.get("dueDate")
         items_def = w.get("checklist") or []
@@ -734,7 +901,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
             # 一次性提醒只响一次，不做算术校验（end 可比 start 晚，用于容忍错过 start 那一分钟）
             exp = 1
         else:
-            exp = expect_fires(time(sh, sm), time(eh, em), int(w["intervalMin"]))
+            exp = expect_fires(t_start, t_end, interval)
             if w.get("expectFires") and int(w["expectFires"]) != exp:
                 raise Validation(f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符")
         expired = now > end
@@ -746,7 +913,7 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
                 "review": is_review,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
-                "intervalMin": int(w["intervalMin"]),
+                "intervalMin": interval,
                 "expectFires": exp,
                 "fireCount": 0,
                 "state": "skipped" if expired else "pending",
@@ -766,6 +933,9 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
             }
         )
     if not out:
+        if errors:
+            # 有窗口被跳过：账本为空这件事必须由调用方告警，不能被「空日」掩盖
+            return []
         if not ranged and len(enabled) < len(routine["alarmWindows"]):
             # 所有窗口都被永久停用：合法空日，静默。
             return []
@@ -780,6 +950,31 @@ def build_windows(routine: dict, d: date, kind: str, now: datetime, strict: bool
             raise Validation("今天没有任何窗口：检查 routines.json 的 dateTypes")
         return []
     return out
+
+
+def expected_today_ids(routine: dict, now: datetime, errors: list[str] | None = None) -> set[str] | None:
+    """今天按时刻表应该出现在账本里的窗口 id；配置整份算不出来时返回 None。
+
+    这是「设了提醒却没响」的入口检查：时刻表有、账本没有，due 就不可能响它。
+
+    `errors` 传进来就按「单窗口坏了只跳过它」算：坏窗口进 errors，其余窗口的
+    id 照常返回。否则一条写错的窗口会让整本对账关掉（`None`），把另一个真缺失
+    的提醒一起掩盖——一个已知缺陷不该藏住另一个缺陷。
+
+    只有「整份时刻表读不懂」（配置语法/结构错）才是 `None`：那种情况下连
+    「今天该有哪几个窗口」都无从谈起。
+    """
+    try:
+        kind = plan_kind(now.date(), routine)
+        if day_disabled(routine, kind):
+            return set()
+        skipped: list[str] = []
+        ids = {w["id"] for w in build_windows(routine, now.date(), kind, now, strict=False, errors=skipped)}
+        if errors is not None:
+            errors.extend(skipped)
+        return ids
+    except (Validation, KeyError, ValueError, TypeError):
+        return None
 
 
 TERMINAL = {"acked", "missed", "skipped", "cancelled", "delivered"}
@@ -1299,7 +1494,13 @@ def cmd_plan(args) -> int:
 
     kind = plan_kind(now.date(), routine)
     # 契约里显式禁用的日期类型 → 合法空日：静默，但照常落盘 state
-    fresh = [] if day_disabled(routine, kind) else build_windows(routine, now.date(), kind, now)
+    # 单个窗口算错 → 跳过该窗口 + 记告警，而不是让整份计划失败（issue #75）
+    plan_errors: list[str] = []
+    fresh = (
+        []
+        if day_disabled(routine, kind)
+        else build_windows(routine, now.date(), kind, now, errors=plan_errors)
+    )
 
     if old and old.get("planDate") == today:
         windows = carry_forward(old, fresh)
@@ -1348,6 +1549,9 @@ def cmd_plan(args) -> int:
         + ("（已暂停）" if paused_today else ""),
         file=sys.stderr,
     )
+    # 被跳过的窗口要吼一声：静默少一个提醒，比漏响更难查（issue #75）
+    for msg in plan_errors:
+        print(f"⚠️ 时刻表里有窗口被跳过（{msg}）：修好后跑 plan --force，才会补进今天的账本")
 
     # 表里只剩一次性提醒时，今天的计划会「生成成功但明天不再有日常窗口」——
     # 这类状态最容易被误判成脚本坏了，所以在这里显式报一句（退出码仍为 0）。
@@ -1417,8 +1621,9 @@ def cmd_plan(args) -> int:
     except Exception as e:  # 备份失败绝不能拖垮提醒本身
         print(f"backup: 备份异常 {type(e).__name__}: {e}")
 
-    # 自检结果走 stdout：有异常才输出，宿主照常投递；正常时一个字都不打印
-    for line in take_notices() + hand_edit + self_check(state, now, first_run=(old is None)):
+    # 自检已随 #78 移到 due（plan 一天一次，崩了没人看；due 每 5 分钟活着）。
+    # 这里只播自愈与手改的提示。
+    for line in take_notices() + hand_edit:
         print(line)
 
     # 行程推到会话入口：模型不跑命令也知道今天排了什么
@@ -1451,9 +1656,27 @@ def cmd_due(args) -> int:
         print(line)
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    # 先记下「本次刷新之前」的心跳：自检要看的是上一次到底有没有判完，
+    # 不能拿自己刚写的 attemptAt 冒充证据。
+    hb_before = read_heartbeat()
+    hb_attempt_before = read_heartbeat_attempt()
     touch_heartbeat(now)  # attemptAt：进入即记，失败也留痕
-    rc = _due_eval(args, routine, tz, now)
+    try:
+        rc = _due_eval(args, routine, tz, now)
+    except _DueConflict:
+        # 冲突时判定确实跑完了（只是账本没写成）：按 #67 口径，心跳仍记 ok——
+        # 心跳回答的是「调度器还在不在判」，不是「这次写没写成」。
+        # 但自检不能借这次机会投递告警：它对账的是旧账本，喊出来的多半是假警报。
+        # 对外仍是空 stdout + 退出 0。
+        touch_heartbeat(now, ok=True)
+        return 0
     if rc == 0:
+        # 自检跟着 due 走：plan 一天只跑一次，崩了 due 还活着。
+        # 同一问题每天只投一次，不刷屏。
+        state = load_state()
+        if state is not None:
+            for line in self_check(state, now, heartbeat=(hb_before, hb_attempt_before)):
+                emit_alert_once("self:" + line, line, now)
         touch_heartbeat(now, ok=True)  # lastOkAt：判定完整走完（含静默）
     return rc
 
@@ -1461,14 +1684,62 @@ def cmd_due(args) -> int:
 def _due_eval(args, routine, tz, now) -> int:
     """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
-    if not state or state.get("planDate") != now.date().isoformat():
-        rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))
+    today = now.date().isoformat()
+    if not state or state.get("planDate") != today:
+        try:
+            rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))
+        except Validation as e:
+            # 配置坏了 → plan 抛错。due 不能跟着静默：今天一条都不会响，
+            # 用户必须收到一条可投递的告警（每天一次，诊断细节在 stderr）。
+            print(f"due: 今日计划生成失败：{e}", file=sys.stderr)
+            rc = 3
         if rc != 0:
-            return rc
+            emit_alert_once(
+                "plan-failed",
+                f"⚠️ 今天（{today}）的计划没生成，所有提醒都不会响；先按诊断修配置，再跑一次 plan",
+                now,
+            )
+            return 0
         state = load_state()
     if state is None:
         print("due: 计划生成后仍没有状态文件，本 tick 放弃", file=sys.stderr)
+        emit_alert_once(
+            "no-state",
+            "⚠️ 今天的计划没有落盘，所有提醒都不会响；检查 state/alarms.json 与磁盘权限",
+            now,
+        )
         return 3
+
+    # 对账：时刻表有、账本没有 → 这些提醒今天物理上不可能响
+    #
+    # 但告警先攒着、不立刻投递：状态写入可能冲突，而契约（#4 §11）要求冲突时
+    # stdout 必须为空。先喊一嗓子「有事」再发现压根没写进账本，等于对用户撒谎。
+    pending: list[tuple[str, str]] = []
+
+    def flush_alerts() -> None:
+        """状态操作定论之后再投递；冲突路径不调用它（PR #79 复审 1）。"""
+        for key, line in pending:
+            emit_alert_once(key, line, now)
+        pending.clear()
+
+    if not pause_covers(load_pause(), now.date()):
+        skipped: list[str] = []
+        expected = expected_today_ids(routine, now, skipped)
+        # 单窗口坏掉只跳过它，其余窗口的 id 照常对账——一条已知缺陷不该
+        # 把另一个真缺失的提醒一起掩盖（PR #79 复审 2）。
+        for line in skipped:
+            print(f"due: 时刻表有窗口被跳过（{line}）", file=sys.stderr)
+        if expected is not None:
+            ledger_ids = {w["id"] for w in state.get("windows", [])}
+            missing = sorted(expected - ledger_ids)
+            if missing:
+                pending.append(
+                    (
+                        "missing-" + ",".join(missing),
+                        f"⚠️ 时刻表有 {'、'.join(missing)}，但今天账本里没有：这些提醒不会响；"
+                        "检查 validFrom / dateTypes，或重建 plan",
+                    )
+                )
 
     rev = int(state["rev"])
     changed = False
@@ -1527,19 +1798,23 @@ def _due_eval(args, routine, tz, now) -> int:
                 print("due: 已把过期窗口标为 missed", file=sys.stderr)
             except Conflict as e:
                 # 契约（issue #4 §11）：due 冲突保持静默，诊断走 stderr，
-                # 下一次 due 重试即可。
+                # 下一次 due 重试即可。攒着的告警也不投递——没写成的事不提。
                 print(f"due: 写入冲突（{e}），missed 标记延后到下一 tick", file=sys.stderr)
+                raise _DueConflict() from e
+        flush_alerts()
         return 0
 
     # 3) 三个条件
     if hit["fireCount"] >= hit["expectFires"]:
         print(f"due: {hit['id']} 已达上限 {hit['expectFires']} 次，静默", file=sys.stderr)
+        flush_alerts()
         return 0
     if hit.get("lastFiredAt"):
         last = datetime.fromisoformat(hit["lastFiredAt"])
         gap = (now - last).total_seconds() / 60
         if gap < hit["intervalMin"] - 1:
             print(f"due: 距上次 {gap:.1f} 分钟，未到间隔，静默", file=sys.stderr)
+            flush_alerts()
             return 0
 
     hit["state"] = "ringing"
@@ -1557,8 +1832,10 @@ def _due_eval(args, routine, tz, now) -> int:
         # 投递文案（空 stdout 即「不投递」）。这是与旧实现「宁可重复响一次」的
         # 显式背离：重复投递比晚一 tick 响更糟，而宿主把空 stdout 当作不响。
         print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
-        return 0
+        raise _DueConflict() from e
     _record_history(state, routine, ts=now)
+    # 状态确实写下去了，才轮到投递攒着的对账告警
+    flush_alerts()
 
     # 状态变了就连带刷新 AGENTS.md 里的行程：模型下次开口时读到的是刚响过什么，
     # 而不是 06:00 生成时的旧版本。写失败只提示，绝不影响这次投递。
@@ -1962,7 +2239,7 @@ def cmd_postpone(args) -> int:
     for k, v in changes.items():
         w[k] = v
     try:
-        post_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+        post_digest = _write_routine(routine, digest)
     except Conflict as e:
         print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
@@ -2013,7 +2290,7 @@ def cmd_postpone(args) -> int:
                     else:
                         w.pop(k, None)
                 try:
-                    atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=post_digest)
+                    _write_routine(routine, post_digest)
                 except Conflict as rb_err:
                     # 部分应用（退出码 3，与「校验失败」共用 3，但语义不同）：
                     # 时刻表已成功推迟到 {target}，但今日状态因并发编辑回滚失败、
@@ -2068,10 +2345,16 @@ def cmd_postpone(args) -> int:
 CANCELLED_REASON = "cancelled"
 
 
-def _write_routine(routine: dict, digest: str | None) -> None:
-    """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。"""
+def _write_routine(routine: dict, digest: str | None) -> str:
+    """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。
+
+    写完必须顺手盖章（摘要 + 底稿副本）。盖章漏了，下一次 plan 就会把程序
+    自己的改动当成「有人手改」来报警，手改真发生时反倒没人信了。
+    返回本次写出的内容摘要，供调用方在回滚时当守卫用。
+    """
     new_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
     seal_routine(new_digest)
+    return new_digest
 
 
 # ---------------------------------------------------------------- 手改探测
@@ -2244,7 +2527,7 @@ def cmd_set_time(args) -> int:
         w["expectFires"] = expect_fires(start, end, int(w["intervalMin"]))
 
     try:
-        atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+        _write_routine(routine, digest)
     except Conflict as e:
         print(f"set-time: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
@@ -2273,6 +2556,10 @@ def cmd_add_window(args) -> int:
 
     只改 rules/routines.json，不碰 state/alarms.json。默认下次 plan 生效；
     `--dry-run` 只打印将要写入的窗口，不落盘。
+
+    `--oneoff` 把窗口标成一次性（当天只响一次、expectFires 固定 1）；再配
+    `--date YYYY-MM-DD` 就等价于「只在这一天生效」——这是「明天 9 点提醒我」
+    这类一句话诉求的最短路径，日期不该混进 `--start`。
     """
     digest = file_digest(ROUTINE)
     # dry-run 是「预览」，必须是纯只读：时刻表坏了就直说，不能借自愈顺手改文件。
@@ -2308,9 +2595,36 @@ def cmd_add_window(args) -> int:
         w["validFrom"] = args.valid_from
     if args.valid_until is not None:
         w["validUntil"] = args.valid_until
+    if getattr(args, "oneoff", False):
+        w["oneOff"] = True
+    # 「明天 9 点提醒我」这种一句话诉求：--oneoff + --date 就是它的最短写法。
+    # 日期只能落到 validFrom/validUntil，绝不能混进 --start（那是 #80 的现场事故）。
+    if getattr(args, "date", None) is not None:
+        text = str(args.date).strip()
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+            print(f"add-window: --date 必须是 YYYY-MM-DD（带短横线），收到 {text}", file=sys.stderr)
+            return 3
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            print(f"add-window: --date 不是有效日期：{text}", file=sys.stderr)
+            return 3
+        if not w.get("oneOff"):
+            print(
+                "add-window: --date 只能配 --oneoff（那天只响一次）；"
+                "要限定一段日期请用 --valid-from / --valid-until",
+                file=sys.stderr,
+            )
+            return 3
+        w["validFrom"] = text
+        w["validUntil"] = text
 
     for key in ("label", "start", "end", "intervalMin"):
         if not w.get(key):
+            if key == "intervalMin" and w.get("oneOff"):
+                # 一次性窗口的间隔没有意义（expectFires 固定 1），别逼调用方瞎填一个数
+                w["intervalMin"] = 1
+                continue
             print(f"add-window: 新窗口缺少 --{key}", file=sys.stderr)
             return 3
 
@@ -2730,6 +3044,15 @@ def main(argv=None) -> int:
     saw.add_argument("--ack", action="append", help="确认词，可重复")
     saw.add_argument("--valid-from", dest="valid_from", help="生效日期 YYYY-MM-DD")
     saw.add_argument("--valid-until", dest="valid_until", help="失效日期 YYYY-MM-DD")
+    saw.add_argument(
+        "--oneoff",
+        action="store_true",
+        help="一次性窗口：当天只响一次（expectFires 固定 1）",
+    )
+    saw.add_argument(
+        "--date",
+        help="只在这一天生效 YYYY-MM-DD（必须配 --oneoff，等价 validFrom=validUntil）",
+    )
     saw.add_argument(
         "--format",
         choices=["follow", "summary", "report", "report-fallback", "none"],

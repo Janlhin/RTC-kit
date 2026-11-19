@@ -21,6 +21,7 @@ RTC 是「判断 + 写入」与「定时触发」分离的两层：
 - ❌ 不要告诉用户「RTC 不存在 / 需要搭建 / 需要设置 cron / 需要部署 rtc.py」——部署是安装器（`install.py`）做的事，运行时系统已经跑着了。
 - ❌ 不要自己动手建 / 删 / 暂停 cron 任务（装完即固定：默认 `rtc-plan` + `rtc-due` 两条；启用早报模型生成后多一条 `rtc-report`）。
 - ❌ 不要手改 `{{WORKSPACE_DIR}}/rules/routines.json` 或任何 `.example` / `.md` 模板。
+- ❌ 现有命令表达不了的，**不要自己拼 JSON 补上**——停下来，说清「缺哪个参数」（如 `add-window` 没有「每 N 天」），等用户决定。写进时刻表的每个字都必须来自一条执行成功的命令行：手拼的配置不会报错，只会静默失效，等到该响那天才发现什么都没响。
 - 用户收到的每一条提醒都是上面这套系统的输出——你看到的定时投递消息就是它的产物，不是外部事件。
 
 
@@ -93,10 +94,22 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 
 ```bash
 python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} add-window \
-  --id <id> --label "<文案>" --start HH:MM --end HH:MM --interval <分钟> \
-  [--ack "<确认词>"] [--valid-from YYYY-MM-DD] [--valid-until YYYY-MM-DD] [--update] [--dry-run]
+  --id <id> --label "<文案>" --start HH:MM --end HH:MM [--interval <分钟>] \
+  [--ack "<确认词>"] [--valid-from YYYY-MM-DD] [--valid-until YYYY-MM-DD] \
+  [--format report|report-fallback|summary|follow|none] [--expect-fires N] \
+  [--oneoff [--date YYYY-MM-DD]] [--update] [--dry-run]
 ```
 
+**「明天 9 点提醒我寄东西」这种一次性安排**（这是最容易写错的一类，照抄下面这行）：
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} add-window \
+  --id send-package --label "寄东西" --start 09:00 --end 09:05 --oneoff --date 2026-11-20
+```
+
+- 日期只走 `--date`（配 `--oneoff`），**绝不写进 `--start`**——`--start` 只认 `HH:MM`，写 `"2026-11-20 09:00"` 会被判坏窗口、整天不响
+- `--oneoff` 固定 `expectFires=1`（`schedule` 会标 `[一次性]`）；不写 `--oneoff` 的窗口照算术算次数，不静默改语义
+- 一次性窗口可省略 `--interval`（间隔对「只响一次」没有意义，默认 1）
 - 不带 `--update` 时，同 id 已存在会以退出码 `4` 拒绝；要改就加 `--update`（字段级合并，没提到的字段保留）
 - `--dry-run` 只打印将写入的窗口，不落盘
 - `--format report` 与 `--format report-fallback` 不能同时启用（退出码 `3`）

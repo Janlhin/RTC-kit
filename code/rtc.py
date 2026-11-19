@@ -19,7 +19,10 @@
   python rtc.py --workspace <dir> disable  --window <ID>
   python rtc.py --workspace <dir> enable   --window <ID>
   python rtc.py --workspace <dir> add-window --id ID --label TXT
-      --start HH:MM --end HH:MM --interval N [--update] [--dry-run]
+      --start HH:MM --end HH:MM [--interval N] [--ack TXT ...] [--format T]
+      [--expect-fires N] [--valid-from YYYY-MM-DD] [--valid-until YYYY-MM-DD]
+      [--oneoff [--date YYYY-MM-DD]] [--update] [--dry-run]
+      （「明天 9 点提醒我寄东西」= --oneoff --date 2026-11-20，日期绝不写进 --start）
   python rtc.py --workspace <dir> metrics sync|report|schedule [--date YYYY-MM-DD]
 
 `import rtc` 拿到的是 rtc_core 这个模块对象——`rtc_due.py` / `rtc_plan.py` 调 `rtc.main()`
