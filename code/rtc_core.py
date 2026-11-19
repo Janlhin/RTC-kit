@@ -2498,6 +2498,10 @@ def cmd_add_window(args) -> int:
 
     只改 rules/routines.json，不碰 state/alarms.json。默认下次 plan 生效；
     `--dry-run` 只打印将要写入的窗口，不落盘。
+
+    `--oneoff` 把窗口标成一次性（当天只响一次、expectFires 固定 1）；再配
+    `--date YYYY-MM-DD` 就等价于「只在这一天生效」——这是「明天 9 点提醒我」
+    这类一句话诉求的最短路径，日期不该混进 `--start`。
     """
     digest = file_digest(ROUTINE)
     # dry-run 是「预览」，必须是纯只读：时刻表坏了就直说，不能借自愈顺手改文件。
@@ -2533,9 +2537,36 @@ def cmd_add_window(args) -> int:
         w["validFrom"] = args.valid_from
     if args.valid_until is not None:
         w["validUntil"] = args.valid_until
+    if getattr(args, "oneoff", False):
+        w["oneOff"] = True
+    # 「明天 9 点提醒我」这种一句话诉求：--oneoff + --date 就是它的最短写法。
+    # 日期只能落到 validFrom/validUntil，绝不能混进 --start（那是 #80 的现场事故）。
+    if getattr(args, "date", None) is not None:
+        text = str(args.date).strip()
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+            print(f"add-window: --date 必须是 YYYY-MM-DD（带短横线），收到 {text}", file=sys.stderr)
+            return 3
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            print(f"add-window: --date 不是有效日期：{text}", file=sys.stderr)
+            return 3
+        if not w.get("oneOff"):
+            print(
+                "add-window: --date 只能配 --oneoff（那天只响一次）；"
+                "要限定一段日期请用 --valid-from / --valid-until",
+                file=sys.stderr,
+            )
+            return 3
+        w["validFrom"] = text
+        w["validUntil"] = text
 
     for key in ("label", "start", "end", "intervalMin"):
         if not w.get(key):
+            if key == "intervalMin" and w.get("oneOff"):
+                # 一次性窗口的间隔没有意义（expectFires 固定 1），别逼调用方瞎填一个数
+                w["intervalMin"] = 1
+                continue
             print(f"add-window: 新窗口缺少 --{key}", file=sys.stderr)
             return 3
 
@@ -2955,6 +2986,15 @@ def main(argv=None) -> int:
     saw.add_argument("--ack", action="append", help="确认词，可重复")
     saw.add_argument("--valid-from", dest="valid_from", help="生效日期 YYYY-MM-DD")
     saw.add_argument("--valid-until", dest="valid_until", help="失效日期 YYYY-MM-DD")
+    saw.add_argument(
+        "--oneoff",
+        action="store_true",
+        help="一次性窗口：当天只响一次（expectFires 固定 1）",
+    )
+    saw.add_argument(
+        "--date",
+        help="只在这一天生效 YYYY-MM-DD（必须配 --oneoff，等价 validFrom=validUntil）",
+    )
     saw.add_argument(
         "--format",
         choices=["follow", "summary", "report", "report-fallback", "none"],

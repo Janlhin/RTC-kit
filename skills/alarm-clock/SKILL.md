@@ -93,10 +93,22 @@ v1 的改期**次日生效**：今天的窗口在日切后就已经固定，改�
 
 ```bash
 python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} add-window \
-  --id <id> --label "<文案>" --start HH:MM --end HH:MM --interval <分钟> \
-  [--ack "<确认词>"] [--valid-from YYYY-MM-DD] [--valid-until YYYY-MM-DD] [--update] [--dry-run]
+  --id <id> --label "<文案>" --start HH:MM --end HH:MM [--interval <分钟>] \
+  [--ack "<确认词>"] [--valid-from YYYY-MM-DD] [--valid-until YYYY-MM-DD] \
+  [--format report|report-fallback|summary|follow|none] [--expect-fires N] \
+  [--oneoff [--date YYYY-MM-DD]] [--update] [--dry-run]
 ```
 
+**「明天 9 点提醒我寄东西」这种一次性安排**（这是最容易写错的一类，照抄下面这行）：
+
+```bash
+python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} add-window \
+  --id send-package --label "寄东西" --start 09:00 --end 09:05 --oneoff --date 2026-11-20
+```
+
+- 日期只走 `--date`（配 `--oneoff`），**绝不写进 `--start`**——`--start` 只认 `HH:MM`，写 `"2026-11-20 09:00"` 会被判坏窗口、整天不响
+- `--oneoff` 固定 `expectFires=1`（`schedule` 会标 `[一次性]`）；不写 `--oneoff` 的窗口照算术算次数，不静默改语义
+- 一次性窗口可省略 `--interval`（间隔对「只响一次」没有意义，默认 1）
 - 不带 `--update` 时，同 id 已存在会以退出码 `4` 拒绝；要改就加 `--update`（字段级合并，没提到的字段保留）
 - `--dry-run` 只打印将写入的窗口，不落盘
 - `--format report` 与 `--format report-fallback` 不能同时启用（退出码 `3`）
