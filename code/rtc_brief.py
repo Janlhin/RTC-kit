@@ -15,10 +15,14 @@ import rtc_history as history
 # ---------------------------------------------------------------- 历史日程查询
 
 
-def preview_schedule(routine: dict, day_iso: str) -> dict | None:
+def preview_schedule(routine: dict, day_iso: str, errors: list[str] | None = None) -> dict | None:
     """按配置推算某天的安排——用于未来日期（那时还没有快照）。
 
     快照回答「那天实际是什么」，推算回答「那天将会是什么」。两者不混。
+
+    `errors` 传进来就按单窗口降级：坏窗口只跳过它自己、进 errors，其余照常
+    推算。查询视图的价值是「告诉我那天会怎样」，一条坏配置不该让它整体答不上来
+    （issue #82）；预演 invoke 则仍走严格路径。
     """
     try:
         d = date.fromisoformat(day_iso)
@@ -29,7 +33,7 @@ def preview_schedule(routine: dict, day_iso: str) -> dict | None:
         return None
     tz = core.tz_of(routine["tzOffset"])
     now = datetime.combine(d, time(0, 0), tzinfo=tz)
-    windows = core.build_windows(routine, d, kind, now, strict=False)
+    windows = core.build_windows(routine, d, kind, now, strict=False, errors=errors)
     return core.schedule_snapshot(routine, kind, windows, day_iso, "")
 
 
@@ -99,10 +103,20 @@ def cmd_schedule(args) -> int:
         source = "快照"
     else:
         # 没有快照：该日期还没到（或那天没跑 plan）。按配置推算。
+        errs: list[str] = []
         try:
-            s = preview_schedule(core.load_routine(), args.date)
+            s = preview_schedule(core.load_routine(), args.date, errs)
         except core.Validation:
             s = None
+        if errs:
+            # 推算不全必须说清楚：被跳过的窗口那一天是真的不会响。
+            ids = [e.split("：")[0] for e in errs]
+            line = (
+                f"⚠️ 跳过 {len(errs)} 个窗口（配置有错）：" + " / ".join(ids) + "；修好后重跑 plan 才会进账本"
+            )
+            print(line, file=sys.stderr if args.json else sys.stdout)
+            for e in errs:
+                print(f"  {e}", file=sys.stderr)
         if s is None:
             print(f"schedule: 没有 {args.date} 的快照，也推算不出安排", file=sys.stderr)
             return 4

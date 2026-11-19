@@ -792,17 +792,30 @@ def countdown_review_day(defn: dict) -> str | None:
     return review
 
 
+def _window_bounds(w: dict) -> tuple[time, time]:
+    """解析并校验单窗口的 start/end；格式或取值错统一转成 Validation。
+
+    降级与严格两条路径都必须先过这里：裸 `int(x)` 抛的是 ValueError，
+    既绕过了 errors 通道，也让 `schedule` 这类只读视图直接抛栈（issue #82）。
+    """
+    try:
+        sh, sm = (int(x) for x in str(w["start"]).split(":"))
+        eh, em = (int(x) for x in str(w["end"]).split(":"))
+        return time(sh, sm), time(eh, em)
+    except (KeyError, ValueError, TypeError) as e:
+        raise Validation(f"start/end 格式不对（{e}）") from e
+
+
 def _check_window_arithmetic(w: dict) -> None:
     """单窗口的数值校验：只拦「算错」这类，避免一条坏配置拖垮整天。"""
     if w.get("oneOff") or w.get("dueDate") or (w.get("checklist") or []):
         return
+    start, end = _window_bounds(w)
     try:
-        sh, sm = (int(x) for x in w["start"].split(":"))
-        eh, em = (int(x) for x in w["end"].split(":"))
         interval = int(w["intervalMin"])
     except (KeyError, ValueError, TypeError) as e:
-        raise Validation(f"start/end/intervalMin 格式不对（{e}）") from e
-    exp = expect_fires(time(sh, sm), time(eh, em), interval)
+        raise Validation(f"intervalMin 格式不对（{e}）") from e
+    exp = expect_fires(start, end, interval)
     if w.get("expectFires") and int(w["expectFires"]) != exp:
         raise Validation(f"expectFires={w['expectFires']} 与算术值 {exp} 不符")
 
@@ -819,7 +832,8 @@ def build_windows(
 
     `errors` 传给「必须继续跑」的调用方（plan）：单个窗口的数值错误降级为
     「跳过该窗口 + 记一条告警」，而不是让整份计划校验失败——一条写错的
-    提醒不该把一整天的账本都清空（issue #75）。其他调用方不传，保持 fail fast。
+    提醒不该把一整天的账本都清空（issue #75）。其他调用方不传，保持 fail fast：
+    抛的也是 Validation（不是裸 ValueError），所以只读视图只会「报错」不会抛栈。
     """
     tz = tz_of(routine["tzOffset"])
     day_iso = d.isoformat()
@@ -847,16 +861,22 @@ def build_windows(
         allowed = w.get("dateTypes") or []
         if allowed and kind not in allowed:
             continue
-        if errors is not None:
+        # 单窗口边界：解析/算术失败只跳它自己；调用方没给 errors 就 fail fast
+        # （预演要「你必须修」，不能被静默跳过糊过去）。
+        try:
+            t_start, t_end = _window_bounds(w)
             try:
-                _check_window_arithmetic(w)
-            except Validation as e:
-                errors.append(f"{w.get('id', '?')}：{e}")
-                continue
-        sh, sm = (int(x) for x in w["start"].split(":"))
-        eh, em = (int(x) for x in w["end"].split(":"))
-        start = datetime.combine(d, time(sh, sm), tzinfo=tz)
-        end = datetime.combine(d, time(eh, em), tzinfo=tz)
+                interval = int(w["intervalMin"])
+            except (KeyError, ValueError, TypeError) as e:
+                raise Validation(f"intervalMin 格式不对（{e}）") from e
+            _check_window_arithmetic(w)
+        except Validation as e:
+            if errors is None:
+                raise
+            errors.append(f"{w.get('id', '?')}：{e}")
+            continue
+        start = datetime.combine(d, t_start, tzinfo=tz)
+        end = datetime.combine(d, t_end, tzinfo=tz)
         one_off = bool(w.get("oneOff"))
         due = w.get("dueDate")
         items_def = w.get("checklist") or []
@@ -873,7 +893,7 @@ def build_windows(
             # 一次性提醒只响一次，不做算术校验（end 可比 start 晚，用于容忍错过 start 那一分钟）
             exp = 1
         else:
-            exp = expect_fires(time(sh, sm), time(eh, em), int(w["intervalMin"]))
+            exp = expect_fires(t_start, t_end, interval)
             if w.get("expectFires") and int(w["expectFires"]) != exp:
                 raise Validation(f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符")
         expired = now > end
@@ -885,7 +905,7 @@ def build_windows(
                 "review": is_review,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
-                "intervalMin": int(w["intervalMin"]),
+                "intervalMin": interval,
                 "expectFires": exp,
                 "fireCount": 0,
                 "state": "skipped" if expired else "pending",

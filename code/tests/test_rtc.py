@@ -4864,5 +4864,64 @@ class TestStateTrustReview(RtcCase):
         self.assertEqual(ids, ["meds"], "健康窗口必须照常进账本")
 
 
+class TestScheduleDegrade(RtcCase):
+    """#82：#75 的降级只盖了 plan，只读视图被坏窗口抛栈。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            # 手改事故的形态：把日期塞进了 start
+            {
+                "id": "send-package",
+                "label": "寄件",
+                "start": "2026-11-20 15:00",
+                "end": "15:10",
+                "intervalMin": 5,
+                "ackHints": ["好了"],
+            },
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "09:00",
+                "end": "09:10",
+                "intervalMin": 5,
+                "expectFires": 3,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "noon",
+                "label": "午间",
+                "start": "12:00",
+                "end": "12:10",
+                "intervalMin": 5,
+                "expectFires": 3,
+                "ackHints": ["好了"],
+            },
+        ]
+        self.write_routine(r)
+
+    def test_schedule_skips_bad_window_and_names_it(self):
+        rc, out, err = self.cli("schedule", "2026-11-20")
+        self.assertEqual(rc, 0, f"查询视图不该抛栈：{err}")
+        self.assertIn("跳过", out, "少算的窗口必须点名，不能悄悄少一条")
+        self.assertIn("send-package", out)
+        self.assertIn("09:00", out, "好窗口照常推算出来")
+        self.assertNotIn("Traceback", err)
+
+    def test_schedule_json_stdout_stays_parsable(self):
+        rc, out, err = self.cli("schedule", "2026-11-20", "--json")
+        self.assertEqual(rc, 0)
+        data = json.loads(out)  # 告警不许污染 JSON
+        self.assertEqual([w["id"] for w in data["windows"]], ["wake", "noon"])
+        self.assertIn("跳过", err, "JSON 模式下告警走 stderr")
+
+    def test_simulate_reports_clean_validation_not_traceback(self):
+        rc, _, err = self.cli("simulate", "--date", "2026-11-20")
+        self.assertEqual(rc, 3, "预演保持严格：要修，不要静默跳过")
+        self.assertIn("格式不对", err)
+        self.assertNotIn("Traceback", err, "报错必须是人话，不是栈")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
