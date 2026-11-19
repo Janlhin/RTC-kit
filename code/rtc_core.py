@@ -739,6 +739,11 @@ def expect_fires(start: time, end: time, interval: int) -> int:
     minutes = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
     if minutes < 0:
         raise Validation("窗口跨午夜，当前版本不支持")
+    if interval <= 0:
+        # 零/负间隔是配置错误，不是运行时意外：除零会把整份 plan 炸掉，
+        # 连带旁边健康窗口一起不响。抛 Validation 让单窗口边界降级为
+        # 「跳过该窗口 + 告警」，与 #75 的降级口径一致。
+        raise Validation(f"intervalMin 必须是正整数，当前是 {interval}")
     return minutes // interval + 1
 
 

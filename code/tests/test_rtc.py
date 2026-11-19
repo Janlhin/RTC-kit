@@ -4751,5 +4751,41 @@ class TestPlanDegrade(RtcCase):
         self.assertEqual(rc, 3, "只读预演保持严格：要修，不要静默跳过")
 
 
+class TestStateTrustReview(RtcCase):
+    """#79 复审的三条：冲突静默、坏窗口不连坐、零间隔不炸整份计划。"""
+
+    def setUp(self):
+        super().setUp()
+        rtc.set_workspace(self.ws)
+
+    def _routine_with(self, windows: list[dict]) -> dict:
+        r = base_routine()
+        r["alarmWindows"] = windows
+        return r
+
+    def test_zero_interval_degrades_instead_of_crashing(self):
+        """复审 3：intervalMin=0 是配置错，不该让整份 plan 除零崩掉。"""
+        r = self._routine_with(
+            [
+                {**base_routine()["alarmWindows"][0], "intervalMin": 0},
+                {
+                    "id": "meds",
+                    "label": "吃药",
+                    "start": "09:00",
+                    "end": "09:25",
+                    "intervalMin": 5,
+                    "expectFires": 6,
+                    "ackHints": ["好了"],
+                },
+            ]
+        )
+        self.write_routine(r)
+        rc, out, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, f"零间隔不该炸掉整份计划（stderr={err}）")
+        self.assertIn("必须是正整数", out, "被跳过的窗口要能投递出原因")
+        ids = [w["id"] for w in self.state()["windows"]]
+        self.assertEqual(ids, ["meds"], "健康窗口必须照常进账本")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
