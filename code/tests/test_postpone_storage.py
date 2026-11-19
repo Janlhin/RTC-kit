@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import shlex
 from unittest.mock import patch
 
 from test_rtc import RtcCase, base_routine, rtc
@@ -13,7 +14,7 @@ class TestPostponeStorageErrors(RtcCase):
         self.cli("plan", now="2026-11-18T06:00:00+08:00")
         rtc.set_workspace(self.ws)
 
-    def invoke(self):
+    def invoke(self, *extra):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = rtc.main(
@@ -28,6 +29,7 @@ class TestPostponeStorageErrors(RtcCase):
                     "--now",
                     "2026-11-18T06:00:00+08:00",
                 ]
+                + list(extra)
             )
         return rc, out.getvalue(), err.getvalue()
 
@@ -71,3 +73,68 @@ class TestPostponeStorageErrors(RtcCase):
         self.assertEqual(rc, 3)
         self.assertIn("partially applied", err)
         self.assertEqual(json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))["version"], 77)
+
+    def test_invalid_required_fields_leave_routine_unchanged(self):
+        for state in [
+            {},
+            {"windows": []},
+            {"rev": "bad", "windows": []},
+            {"rev": 1, "windows": False},
+            {"rev": 1, "windows": [{"id": "wake"}]},
+        ]:
+            with self.subTest(state=state):
+                rtc.STATE.write_text(json.dumps(state), encoding="utf-8")
+                before = rtc.ROUTINE.read_bytes()
+                rc, out, _ = self.invoke()
+                self.assertEqual((rc, out), (3, ""))
+                self.assertEqual(rtc.ROUTINE.read_bytes(), before)
+
+    def test_deadline_retry_preserves_range(self):
+        routine = base_routine()
+        routine["alarmWindows"][0].update(validFrom="2026-11-18", validUntil="2026-11-20")
+        self.write_routine(routine)
+        original = rtc.atomic_write
+
+        def fail(path, *a, **kw):
+            if path == rtc.STATE:
+                raise OSError("injected storage failure")
+            return original(path, *a, **kw)
+
+        with patch.object(rtc, "atomic_write", fail):
+            rc, _, err = self.invoke("--to", "2026-11-25", "--deadline")
+        self.assertEqual(rc, 3)
+        retry = shlex.split(err.split("explicit target: ", 1)[1].strip())
+        self.assertIn("--deadline", retry)
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = rtc.main(["--workspace", str(self.ws), *retry, "--now", "2026-11-18T06:00:00+08:00"])
+        self.assertEqual(rc, 0)
+        window = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))["alarmWindows"][0]
+        self.assertEqual((window["validFrom"], window["validUntil"]), ("2026-11-23", "2026-11-25"))
+
+    def test_plan_creating_ledger_after_preflight_is_observed(self):
+        rtc.STATE.unlink()
+        original = rtc.atomic_write
+
+        def interleave(path, *a, **kw):
+            if path == rtc.ROUTINE:
+                rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+                self.assertEqual(rc, 0, err)
+            return original(path, *a, **kw)
+
+        with patch.object(rtc, "atomic_write", interleave):
+            rc, out, _ = self.invoke()
+        self.assertEqual((rc, out), (0, ""))
+        self.assertEqual(self.window("wake")["state"], "skipped")
+
+    def test_malformed_competing_state_reports_partial(self):
+        original = rtc.atomic_write
+
+        def interleave(path, *a, **kw):
+            if path == rtc.STATE:
+                path.write_text("[]", encoding="utf-8")
+            return original(path, *a, **kw)
+
+        with patch.object(rtc, "atomic_write", interleave):
+            rc, out, err = self.invoke()
+        self.assertEqual((rc, out), (3, ""))
+        self.assertIn("partially applied", err)

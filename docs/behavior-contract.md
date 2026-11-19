@@ -173,8 +173,8 @@ python rtc.py --workspace <dir> ack \
 
 ### Postpone storage failures
 
-`postpone` reads and validates the existing ledger before changing the routine. An unreadable or malformed ledger therefore rejects the operation before the schedule write.
+`postpone` checks the existing ledger's JSON, revision, windows list and window id/state fields before changing the routine. Invalid required fields reject the operation before the schedule write. This is scoped validation for postpone, not exhaustive schema validation. After the schedule commits, the ledger is read and checked again so a concurrent plan is not missed.
 
-If the routine commits but the subsequent state write raises an I/O or validation error, the command returns `3`, keeps stdout empty, and reports partial application on stderr. Today's existing occurrence may still fire. Inspect and repair the storage/state problem first, then retry using the same explicit `--window` and `--to` date printed in the diagnostic. Do not blindly retry a relative date after the day has changed.
+If the routine commits but the subsequent state write raises an I/O or validation error, the command returns `3`, keeps stdout empty, and reports partial application on stderr. Today's existing occurrence may still fire. Inspect and repair the storage/state problem first, then retry using the same explicit `--window`, `--to` date and `--deadline` mode (when used) printed in the diagnostic. Do not blindly retry a relative date after the day has changed.
 
 This error path does not roll back over another writer's routine edits. The existing `Conflict` path retains its digest-guarded rollback. These are two separate file writes, not a crash-atomic transaction; a process interruption between them still requires recovery. No live notification-delivery guarantee is implied.

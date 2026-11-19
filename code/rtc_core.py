@@ -1802,6 +1802,31 @@ def cmd_check(args) -> int:
 POSTPONE_REASON = "postponed"
 
 
+def _load_postpone_state() -> dict | None:
+    """Validate only ledger fields postpone consumes; leave other commands unchanged."""
+    state = load_state()
+    if state is None:
+        return None
+    rev = state.get("rev")
+    try:
+        if isinstance(rev, bool) or not isinstance(rev, (int, str)) or int(rev) < 0:
+            raise ValueError
+    except ValueError as e:
+        raise Validation("postpone: ledger rev must be a nonnegative integer") from e
+    windows = state.get("windows")
+    if not isinstance(windows, list):
+        raise Validation("postpone: ledger windows must be a list")
+    for window in windows:
+        if (
+            not isinstance(window, dict)
+            or not isinstance(window.get("id"), str)
+            or not window["id"]
+            or not isinstance(window.get("state"), str)
+        ):
+            raise Validation("postpone: ledger windows require string id and state fields")
+    return state
+
+
 def cmd_postpone(args) -> int:
     """把一个窗口推迟到目标日期。
 
@@ -1914,9 +1939,21 @@ def cmd_postpone(args) -> int:
 
     # Validate the ledger before committing any schedule change.
     try:
-        state = load_state()
+        _load_postpone_state()
     except OSError as e:
         print(f"postpone: state read failed; schedule unchanged: {e}", file=sys.stderr)
+        return 3
+
+    def partial_failure(error: Exception) -> int:
+        mode = " --deadline" if args.deadline else ""
+        print(
+            f"postpone: partially applied: schedule moved to {target.isoformat()}, "
+            f"but today's state update could not be confirmed ({error}); "
+            "today's occurrence may still fire. Inspect state/alarms.json and repair "
+            "storage/state first, then retry the same explicit target: "
+            f"postpone --window {args.window} --to {target.isoformat()}{mode}",
+            file=sys.stderr,
+        )
         return 3
 
     old_values = {k: (k in w, w.get(k)) for k in changes}
@@ -1929,6 +1966,12 @@ def cmd_postpone(args) -> int:
     except Conflict as e:
         print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
+
+    # Reload after the routine commit: plan/due may have created or changed the ledger.
+    try:
+        state = _load_postpone_state()
+    except (OSError, Validation) as e:
+        return partial_failure(e)
 
     # --- 2. 今天这一次不再响
     outcome = "not_planned"
@@ -1956,15 +1999,9 @@ def cmd_postpone(args) -> int:
                     ts=now,
                 )
                 outcome = "skipped"
-            except (OSError, Validation) as e:
-                print(
-                    f"postpone: partially applied: schedule moved to {target.isoformat()}, "
-                    f"but today's state could not be updated ({e}); today's occurrence may still fire. "
-                    "Inspect state/alarms.json and repair storage/state first, then retry the same "
-                    f"explicit target: postpone --window {args.window} --to {target.isoformat()}",
-                    file=sys.stderr,
-                )
-                return 3
+            except (OSError, Validation, ValueError, TypeError, AttributeError) as e:
+                # A competing malformed replacement can fail the writer's rev read.
+                return partial_failure(e)
             except Conflict as e:
                 # 回滚时刻表：宁可今天照响，也不要明天没有。
                 # 守卫必须是「本次第 1 步写入的那个版本」(post_digest)：
