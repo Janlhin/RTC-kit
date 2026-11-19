@@ -67,6 +67,14 @@ class ContractViolation(Validation):
     """配置与契约不符（未知字段等），不是文件损坏——不能拿底稿覆盖用户刚写的意图。"""
 
 
+class _DueConflict(Exception):
+    """内部信号：本次 due 撞上了状态写入冲突，账本没写成。
+
+    不对外冒泡——cmd_due 接住它，按契约保持「空 stdout + 退出 0」，
+    且**不跑自检、不投递告警**：自检读的是冲突前的旧账本，此时的告警是假的。
+    """
+
+
 # ---------------------------------------------------------------- 基础设施
 
 
@@ -1653,7 +1661,15 @@ def cmd_due(args) -> int:
     hb_before = read_heartbeat()
     hb_attempt_before = read_heartbeat_attempt()
     touch_heartbeat(now)  # attemptAt：进入即记，失败也留痕
-    rc = _due_eval(args, routine, tz, now)
+    try:
+        rc = _due_eval(args, routine, tz, now)
+    except _DueConflict:
+        # 冲突时判定确实跑完了（只是账本没写成）：按 #67 口径，心跳仍记 ok——
+        # 心跳回答的是「调度器还在不在判」，不是「这次写没写成」。
+        # 但自检不能借这次机会投递告警：它对账的是旧账本，喊出来的多半是假警报。
+        # 对外仍是空 stdout + 退出 0。
+        touch_heartbeat(now, ok=True)
+        return 0
     if rc == 0:
         # 自检跟着 due 走：plan 一天只跑一次，崩了 due 还活着。
         # 同一问题每天只投一次，不刷屏。
@@ -1784,7 +1800,7 @@ def _due_eval(args, routine, tz, now) -> int:
                 # 契约（issue #4 §11）：due 冲突保持静默，诊断走 stderr，
                 # 下一次 due 重试即可。攒着的告警也不投递——没写成的事不提。
                 print(f"due: 写入冲突（{e}），missed 标记延后到下一 tick", file=sys.stderr)
-                return 0
+                raise _DueConflict() from e
         flush_alerts()
         return 0
 
@@ -1816,7 +1832,7 @@ def _due_eval(args, routine, tz, now) -> int:
         # 投递文案（空 stdout 即「不投递」）。这是与旧实现「宁可重复响一次」的
         # 显式背离：重复投递比晚一 tick 响更糟，而宿主把空 stdout 当作不响。
         print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
-        return 0
+        raise _DueConflict() from e
     _record_history(state, routine, ts=now)
     # 状态确实写下去了，才轮到投递攒着的对账告警
     flush_alerts()

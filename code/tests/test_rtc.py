@@ -4805,6 +4805,41 @@ class TestStateTrustReview(RtcCase):
         guard = self.ws / "state" / "guard.json"
         self.assertFalse(guard.exists(), "没写成的 tick 不该记『已告警过』")
 
+    def test_conflict_skips_self_check_and_guard(self):
+        """复审 4：冲突时自检不能借机投递告警，guard 也不能记这笔账。
+
+        场景（nqble 复现口径）：心跳停在 03:00，09:10 跑 due 且状态写入冲突。
+        修前 _due_eval 静默返回 0，cmd_due 接着跑 self_check——它读到的是冲突前的
+        旧心跳，于是往 stdout 打出「调度器 6 小时没成功判定」，还给 guard 记了账。
+        """
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        stale = "2026-11-19T03:00:00+08:00"
+        hb = self.ws / "state" / "heartbeat.json"
+        hb.write_text(json.dumps({"attemptAt": stale, "lastOkAt": stale, "at": stale}), encoding="utf-8")
+
+        orig = rtc.atomic_write
+
+        def conflict_write(path, data, expected_rev=None, expected_digest=None):
+            if path == rtc.STATE:
+                raise rtc.Conflict("injected: state changed concurrently")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = conflict_write
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rtc.cmd_due(argparse.Namespace(now="2026-11-19T09:10:00+08:00"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "", "冲突时必须空 stdout（自检也不许抢跑）")
+        self.assertIn("冲突", err.getvalue())
+        guard = self.ws / "state" / "guard.json"
+        self.assertFalse(guard.exists(), "没写成的 tick 不该留下任何告警去重记录")
+        after = json.loads(hb.read_text(encoding="utf-8"))
+        # #67 口径不变：冲突也是完整判定，lastOkAt 照常推进（心跳问的是「还活着吗」）。
+        self.assertEqual(after["lastOkAt"], "2026-11-19T09:10:00+08:00")
+
     def test_bad_window_does_not_disable_reconciliation(self):
         """复审 2：一条算错的窗口不该把整本对账关掉。"""
         r = self._routine_with(
