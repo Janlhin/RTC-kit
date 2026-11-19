@@ -924,16 +924,27 @@ def build_windows(
     return out
 
 
-def expected_today_ids(routine: dict, now: datetime) -> set[str] | None:
-    """今天按时刻表应该出现在账本里的窗口 id；配置算不出来时返回 None。
+def expected_today_ids(routine: dict, now: datetime, errors: list[str] | None = None) -> set[str] | None:
+    """今天按时刻表应该出现在账本里的窗口 id；配置整份算不出来时返回 None。
 
     这是「设了提醒却没响」的入口检查：时刻表有、账本没有，due 就不可能响它。
+
+    `errors` 传进来就按「单窗口坏了只跳过它」算：坏窗口进 errors，其余窗口的
+    id 照常返回。否则一条写错的窗口会让整本对账关掉（`None`），把另一个真缺失
+    的提醒一起掩盖——一个已知缺陷不该藏住另一个缺陷。
+
+    只有「整份时刻表读不懂」（配置语法/结构错）才是 `None`：那种情况下连
+    「今天该有哪几个窗口」都无从谈起。
     """
     try:
         kind = plan_kind(now.date(), routine)
         if day_disabled(routine, kind):
             return set()
-        return {w["id"] for w in build_windows(routine, now.date(), kind, now, strict=False)}
+        skipped: list[str] = []
+        ids = {w["id"] for w in build_windows(routine, now.date(), kind, now, strict=False, errors=skipped)}
+        if errors is not None:
+            errors.extend(skipped)
+        return ids
     except (Validation, KeyError, ValueError, TypeError):
         return None
 

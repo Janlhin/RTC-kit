@@ -4763,6 +4763,41 @@ class TestStateTrustReview(RtcCase):
         r["alarmWindows"] = windows
         return r
 
+    def test_bad_window_does_not_disable_reconciliation(self):
+        """复审 2：一条算错的窗口不该把整本对账关掉。"""
+        r = self._routine_with(
+            [
+                {**base_routine()["alarmWindows"][0], "expectFires": 99},  # wake 算错
+                {
+                    "id": "meds",
+                    "label": "吃药",
+                    "start": "09:00",
+                    "end": "09:25",
+                    "intervalMin": 5,
+                    "expectFires": 6,
+                    "ackHints": ["好了"],
+                },
+            ]
+        )
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")  # 降级：只有 meds 进账本
+
+        r["alarmWindows"].append(
+            {
+                "id": "night",
+                "label": "夜间",
+                "start": "22:00",
+                "end": "22:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+        rc, out, _ = self.cli("due", now="2026-11-19T06:55:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("night", out, "坏窗口被跳过，不证明别的窗口没缺失")
+
     def test_zero_interval_degrades_instead_of_crashing(self):
         """复审 3：intervalMin=0 是配置错，不该让整份 plan 除零崩掉。"""
         r = self._routine_with(
