@@ -1141,7 +1141,9 @@ class TestCancelCompleteDisable(RtcCase):
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
         self.assertNotIn("tea", [w["id"] for w in self.state().get("windows", [])])
         rc, out, _ = self.cli("due", now="2026-11-14T15:00:00+08:00")
-        self.assertEqual(out, "")
+        # 自检告警（⚠️ 开头）不是提醒本身：这条用例只关心窗口静默
+        body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+        self.assertEqual(body.strip(), "")
 
     def test_disable_marks_today_occurrence_cancelled(self):
         self.cli("plan", now="2026-11-13T06:00:00+08:00")
@@ -1299,7 +1301,9 @@ class TestSevenOpsSameDay(RtcCase):
             if want:
                 self.assertIn(want, out, t)
             else:
-                self.assertEqual(out, "", f"{t} 应静默")
+                # 自检告警（⚠️ 开头）不是提醒本身：这里只验证窗口不响
+                body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+                self.assertEqual(body.strip(), "", f"{t} 应静默")
 
         # 次日：只有取件（推迟过来的）与倒计时
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
@@ -1342,7 +1346,8 @@ class TestSevenOpsSameDay(RtcCase):
         self.cli("plan", now=f"{T}T06:00:00+08:00")
         self.cli("cancel", "--window", "cancel-me", now=f"{T}T08:10:00+08:00")
         self.cli("plan", now="2026-11-14T06:00:00+08:00")
-        rc, out, _ = self.cli("plan", "--force", now="2026-11-14T06:00:00+08:00")
+        # 自检已随 #78 移到 due：这里要的是 due 的那条「整段没响」告警
+        rc, out, _ = self.cli("due", now="2026-11-14T08:00:00+08:00")
         self.assertNotIn("cancel-me", out, "取消 ≠ 漏响，不该触发「整段没响」告警")
         self.assertIn("travel", out, "确实整段没响过的窗口仍要报出来——否则真漏了就没人知道")
 
@@ -3738,7 +3743,8 @@ class TestOneOffNoRegen(RtcCase):
         self.cli("plan", now="2026-11-18T06:00:00+08:00")
         self.assertEqual(self.state().get("windows"), [], "没确认也不许次日重生")
         rc, out, _ = self.cli("due", now="2026-11-18T20:00:00+08:00")
-        self.assertEqual(out, "")
+        body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+        self.assertEqual(body.strip(), "")
         routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
         self.assertNotIn("thermos", [w["id"] for w in routine["alarmWindows"]], "过期的一次性条目要清理掉")
 
@@ -4179,7 +4185,8 @@ class TestHeartbeatOk(RtcCase):
             encoding="utf-8",
         )
         self.cli("plan", now="2026-11-16T06:00:00+08:00")
-        rc, out, _ = self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        # 自检已随 #78 移到 due，并用「本次刷新前」的心跳判定
+        rc, out, _ = self.cli("due", now="2026-11-17T06:00:00+08:00")
         self.assertIn("没有成功判定心跳", out)
 
     def test_self_check_silence_on_healthy_day(self):
@@ -4565,6 +4572,390 @@ class TestReportMaterial(RtcCase):
             [],
             "素材脚本不该留下「我把坏文件备份了」的痕迹",
         )
+
+
+class TestWindowContract(RtcCase):
+    """未知字段不再当空气：写错字段要报错，且不能拿底稿覆盖用户的意图。"""
+
+    def _routine(self):
+        return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+
+    def test_unknown_field_is_rejected_without_repair(self):
+        r = base_routine()
+        r["alarmWindows"][0]["status"] = "done"
+        self.write_routine(r)
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "routines.program-last.json").write_text(
+            json.dumps(base_routine(), ensure_ascii=False), encoding="utf-8"
+        )
+
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 3, "未知字段必须让 plan 失败，不能静默继续响")
+        self.assertIn("status", err)
+        self.assertIn("未定义字段", err)
+        self.assertIn("disable", err, "报错要点名合法的停机命令")
+        self.assertEqual(
+            self._routine()["alarmWindows"][0].get("status"),
+            "done",
+            "契约违规不是文件损坏：不能拿底稿把用户刚写的配置覆盖掉",
+        )
+        self.assertEqual(
+            [p.name for p in bdir.iterdir() if p.name.startswith("routines.corrupt-")],
+            [],
+            "不该留下「我把坏文件备份了」的痕迹",
+        )
+
+    def test_known_optional_fields_not_flagged(self):
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "legal",
+                "label": "合法字段",
+                "start": "19:00",
+                "end": "19:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-18",
+                "validUntil": "2026-11-18",
+                "disabled": False,
+                "skipDates": [],
+                "dateTypes": ["workday"],
+                "checklist": ["带清单"],
+            }
+        )
+        self.write_routine(r)
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0, f"合法字段不该被误报：{err}")
+
+    def test_whitelist_matches_contract_schema(self):
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        props = set(schema["$defs"]["alarmWindow"]["properties"])
+        self.assertEqual(props, set(rtc._WINDOW_KEYS), "白名单必须与 routine.schema.json 同步")
+
+
+class TestSchedulerGuard(RtcCase):
+    """#78：心跳不能替账本撒谎，自检要跟着 due 走。"""
+
+    def test_plan_failure_is_delivered_once(self):
+        r = base_routine()
+        # 今天是工作日，窗口却只在节假日响 → 整份计划一个窗口都排不出来（不是单窗口写错，
+        # 那种已在 #75 里降级为跳过 + 告警）
+        r["alarmWindows"][0]["dateTypes"] = ["holiday"]
+        self.write_routine(r)
+        (self.ws / "state" / "alarms.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "rev": 5,
+                    "timezone": "Asia/Shanghai",
+                    "planDate": "2026-11-18",
+                    "planKind": "workday",
+                    "generatedBy": "rtc-plan",
+                    "generatedAt": "2026-11-18T06:00:00+08:00",
+                    "windows": [],
+                    "history": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        rc, out, _ = self.cli("due", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, "due 自己不能崩")
+        self.assertIn("计划没生成", out, "计划失败必须投递，不能静默空跑")
+        rc2, out2, _ = self.cli("due", now="2026-11-19T06:05:00+08:00")
+        self.assertEqual(rc2, 0)
+        self.assertEqual(out2, "", "同一问题同一天只投一次")
+
+    def test_missing_window_visible_in_due_and_status(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "night",
+                "label": "夜间",
+                "start": "22:00",
+                "end": "22:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+        rc, out, _ = self.cli("due", now="2026-11-19T12:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("night", out, "时刻表有、账本没有，必须告警")
+        data = json.loads(self.cli("status", "--json")[1])
+        self.assertIn("night", data["missing_window_ids"])
+
+    def test_heartbeat_check_moves_to_due(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        (self.ws / "state" / "heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "attemptAt": "2026-11-19T03:00:00+08:00",
+                    "lastOkAt": "2026-11-19T03:00:00+08:00",
+                    "at": "2026-11-19T03:00:00+08:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        rc, out, _ = self.cli("due", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("调度器最近一次成功判定", out, "自检要跟着 due 跑")
+
+
+class TestPlanDegrade(RtcCase):
+    """#75：一条写错的窗口不该把一整天的账本清空。"""
+
+    def test_bad_window_skipped_not_fatal(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99  # wake 算错
+        r["alarmWindows"].append(
+            {
+                "id": "meds",
+                "label": "吃药",
+                "start": "09:00",
+                "end": "09:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+        rc, out, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, f"一条坏配置不该让整份计划失败：{err}")
+        self.assertIn("wake", out, "被跳过的窗口必须在可投递输出里点名")
+        self.assertIn("被跳过", out)
+        ids = [w["id"] for w in self.state()["windows"]]
+        self.assertEqual(ids, ["meds"], "好的窗口必须照常进账本")
+
+    def test_all_bad_windows_still_alert(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99
+        self.write_routine(r)
+        rc, out, _ = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, "plan 本身要成功落盘，告警走 stdout")
+        self.assertIn("被跳过", out, "全部被跳过时更要说，否则一整天静默无声")
+        self.assertEqual(self.state()["windows"], [])
+
+    def test_other_commands_still_fail_fast(self):
+        r = base_routine()
+        r["alarmWindows"][0]["expectFires"] = 99
+        self.write_routine(r)
+        rc, _, _ = self.cli("simulate")
+        self.assertEqual(rc, 3, "只读预演保持严格：要修，不要静默跳过")
+
+
+class TestStateTrustReview(RtcCase):
+    """#79 复审的三条：冲突静默、坏窗口不连坐、零间隔不炸整份计划。"""
+
+    def setUp(self):
+        super().setUp()
+        rtc.set_workspace(self.ws)
+
+    def _routine_with(self, windows: list[dict]) -> dict:
+        r = base_routine()
+        r["alarmWindows"] = windows
+        return r
+
+    def test_conflict_stays_silent_even_with_missing_window(self):
+        """复审 1：对账告警不得抢在状态写入之前投递。
+
+        冲突时契约（#4 §11）要求空 stdout、退出 0：先喊「有事」再发现没写成，
+        比不喊更糟——用户以为系统知道了，账本其实一个字没动。
+        """
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        # 账本不动，时刻表多一条 22:00 —— 对账本来会喊「night 缺失」
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "night",
+                "label": "夜间",
+                "start": "22:00",
+                "end": "22:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+
+        orig = rtc.atomic_write
+
+        def conflict_write(path, data, expected_rev=None, expected_digest=None):
+            if path == rtc.STATE:
+                raise rtc.Conflict("injected: state changed concurrently")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = conflict_write
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rtc.cmd_due(argparse.Namespace(now="2026-11-19T07:05:00+08:00"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "", "冲突时必须空 stdout")
+        self.assertIn("冲突", err.getvalue(), "诊断走 stderr，不能连诊断一起吞掉")
+        guard = self.ws / "state" / "guard.json"
+        self.assertFalse(guard.exists(), "没写成的 tick 不该记『已告警过』")
+
+    def test_conflict_skips_self_check_and_guard(self):
+        """复审 4：冲突时自检不能借机投递告警，guard 也不能记这笔账。
+
+        场景（nqble 复现口径）：心跳停在 03:00，09:10 跑 due 且状态写入冲突。
+        修前 _due_eval 静默返回 0，cmd_due 接着跑 self_check——它读到的是冲突前的
+        旧心跳，于是往 stdout 打出「调度器 6 小时没成功判定」，还给 guard 记了账。
+        """
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        stale = "2026-11-19T03:00:00+08:00"
+        hb = self.ws / "state" / "heartbeat.json"
+        hb.write_text(json.dumps({"attemptAt": stale, "lastOkAt": stale, "at": stale}), encoding="utf-8")
+
+        orig = rtc.atomic_write
+
+        def conflict_write(path, data, expected_rev=None, expected_digest=None):
+            if path == rtc.STATE:
+                raise rtc.Conflict("injected: state changed concurrently")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = conflict_write
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rtc.cmd_due(argparse.Namespace(now="2026-11-19T09:10:00+08:00"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "", "冲突时必须空 stdout（自检也不许抢跑）")
+        self.assertIn("冲突", err.getvalue())
+        guard = self.ws / "state" / "guard.json"
+        self.assertFalse(guard.exists(), "没写成的 tick 不该留下任何告警去重记录")
+        after = json.loads(hb.read_text(encoding="utf-8"))
+        # #67 口径不变：冲突也是完整判定，lastOkAt 照常推进（心跳问的是「还活着吗」）。
+        self.assertEqual(after["lastOkAt"], "2026-11-19T09:10:00+08:00")
+
+    def test_bad_window_does_not_disable_reconciliation(self):
+        """复审 2：一条算错的窗口不该把整本对账关掉。"""
+        r = self._routine_with(
+            [
+                {**base_routine()["alarmWindows"][0], "expectFires": 99},  # wake 算错
+                {
+                    "id": "meds",
+                    "label": "吃药",
+                    "start": "09:00",
+                    "end": "09:25",
+                    "intervalMin": 5,
+                    "expectFires": 6,
+                    "ackHints": ["好了"],
+                },
+            ]
+        )
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")  # 降级：只有 meds 进账本
+
+        r["alarmWindows"].append(
+            {
+                "id": "night",
+                "label": "夜间",
+                "start": "22:00",
+                "end": "22:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+        rc, out, _ = self.cli("due", now="2026-11-19T06:55:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("night", out, "坏窗口被跳过，不证明别的窗口没缺失")
+
+    def test_zero_interval_degrades_instead_of_crashing(self):
+        """复审 3：intervalMin=0 是配置错，不该让整份 plan 除零崩掉。"""
+        r = self._routine_with(
+            [
+                {**base_routine()["alarmWindows"][0], "intervalMin": 0},
+                {
+                    "id": "meds",
+                    "label": "吃药",
+                    "start": "09:00",
+                    "end": "09:25",
+                    "intervalMin": 5,
+                    "expectFires": 6,
+                    "ackHints": ["好了"],
+                },
+            ]
+        )
+        self.write_routine(r)
+        rc, out, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, f"零间隔不该炸掉整份计划（stderr={err}）")
+        self.assertIn("必须是正整数", out, "被跳过的窗口要能投递出原因")
+        ids = [w["id"] for w in self.state()["windows"]]
+        self.assertEqual(ids, ["meds"], "健康窗口必须照常进账本")
+
+
+class TestScheduleDegrade(RtcCase):
+    """#82：#75 的降级只盖了 plan，只读视图被坏窗口抛栈。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            # 手改事故的形态：把日期塞进了 start
+            {
+                "id": "send-package",
+                "label": "寄件",
+                "start": "2026-11-20 15:00",
+                "end": "15:10",
+                "intervalMin": 5,
+                "ackHints": ["好了"],
+            },
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "09:00",
+                "end": "09:10",
+                "intervalMin": 5,
+                "expectFires": 3,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "noon",
+                "label": "午间",
+                "start": "12:00",
+                "end": "12:10",
+                "intervalMin": 5,
+                "expectFires": 3,
+                "ackHints": ["好了"],
+            },
+        ]
+        self.write_routine(r)
+
+    def test_schedule_skips_bad_window_and_names_it(self):
+        rc, out, err = self.cli("schedule", "2026-11-20")
+        self.assertEqual(rc, 0, f"查询视图不该抛栈：{err}")
+        self.assertIn("跳过", out, "少算的窗口必须点名，不能悄悄少一条")
+        self.assertIn("send-package", out)
+        self.assertIn("09:00", out, "好窗口照常推算出来")
+        self.assertNotIn("Traceback", err)
+
+    def test_schedule_json_stdout_stays_parsable(self):
+        rc, out, err = self.cli("schedule", "2026-11-20", "--json")
+        self.assertEqual(rc, 0)
+        data = json.loads(out)  # 告警不许污染 JSON
+        self.assertEqual([w["id"] for w in data["windows"]], ["wake", "noon"])
+        self.assertIn("跳过", err, "JSON 模式下告警走 stderr")
+
+    def test_simulate_reports_clean_validation_not_traceback(self):
+        rc, _, err = self.cli("simulate", "--date", "2026-11-20")
+        self.assertEqual(rc, 3, "预演保持严格：要修，不要静默跳过")
+        self.assertIn("格式不对", err)
+        self.assertNotIn("Traceback", err, "报错必须是人话，不是栈")
 
 
 if __name__ == "__main__":
