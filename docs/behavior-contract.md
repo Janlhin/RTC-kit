@@ -169,3 +169,12 @@ python rtc.py --workspace <dir> ack \
 
 **行为变了，先改这里，再改测试，最后改代码。**
 只改代码不改这里，等于把契约藏回 `if` 分支里——那正是 #4 要结束的状态。
+
+
+### Postpone storage failures
+
+`postpone` reads and validates the existing ledger before changing the routine. An unreadable or malformed ledger therefore rejects the operation before the schedule write.
+
+If the routine commits but the subsequent state write raises an I/O or validation error, the command returns `3`, keeps stdout empty, and reports partial application on stderr. Today's existing occurrence may still fire. Inspect and repair the storage/state problem first, then retry using the same explicit `--window` and `--to` date printed in the diagnostic. Do not blindly retry a relative date after the day has changed.
+
+This error path does not roll back over another writer's routine edits. The existing `Conflict` path retains its digest-guarded rollback. These are two separate file writes, not a crash-atomic transaction; a process interruption between them still requires recovery. No live notification-delivery guarantee is implied.
