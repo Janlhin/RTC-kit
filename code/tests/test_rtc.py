@@ -4958,5 +4958,138 @@ class TestScheduleDegrade(RtcCase):
         self.assertNotIn("Traceback", err, "报错必须是人话，不是栈")
 
 
+class TestAddWindowOneOff(RtcCase):
+    """#80：用法说明藏参数 + 缺 --oneoff，导致「明天 9 点」被写成坏窗口。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_routine(base_routine())
+
+    def routine(self) -> dict:
+        return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+
+    def test_oneoff_with_date_is_a_single_fire_window(self):
+        rc, out, err = self.cli(
+            "add-window",
+            "--id",
+            "send-package",
+            "--label",
+            "寄东西",
+            "--start",
+            "09:00",
+            "--end",
+            "09:05",
+            "--oneoff",
+            "--date",
+            "2026-11-20",
+        )
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self.routine()["alarmWindows"] if x["id"] == "send-package")
+        self.assertTrue(w["oneOff"])
+        self.assertEqual(w["validFrom"], "2026-11-20")
+        self.assertEqual(w["validUntil"], "2026-11-20")
+        self.assertEqual(w["expectFires"], 1, "一次性窗口必须固定 1 次")
+        rc, out, _ = self.cli("schedule", "2026-11-20")
+        self.assertEqual(rc, 0)
+        self.assertIn("[一次性]", out)
+        self.assertIn("× 1 次", out, "不能按算术写成 2 次")
+
+    def test_oneoff_may_omit_interval(self):
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "send-package",
+            "--label",
+            "寄东西",
+            "--start",
+            "09:00",
+            "--end",
+            "09:05",
+            "--oneoff",
+            "--date",
+            "2026-11-20",
+        )
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self.routine()["alarmWindows"] if x["id"] == "send-package")
+        self.assertEqual(w["intervalMin"], 1, "一次性窗口不该逼调用方瞎填间隔")
+
+    def test_date_without_oneoff_is_rejected(self):
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "bad-date",
+            "--label",
+            "错用",
+            "--start",
+            "09:00",
+            "--end",
+            "09:05",
+            "--interval",
+            "5",
+            "--date",
+            "2026-11-20",
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertIn("--oneoff", err, "错误信息要指向正确写法")
+        ids = [x["id"] for x in self.routine()["alarmWindows"]]
+        self.assertNotIn("bad-date", ids, "被拒的窗口不能半途落盘")
+
+    def test_compact_date_is_rejected(self):
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "compact",
+            "--label",
+            "紧凑日期",
+            "--start",
+            "09:00",
+            "--end",
+            "09:05",
+            "--oneoff",
+            "--date",
+            "20261120",
+        )
+        self.assertEqual(rc, 3)
+        self.assertIn("YYYY-MM-DD", err)
+
+    def test_period_window_keeps_arithmetic(self):
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "period",
+            "--label",
+            "周期",
+            "--start",
+            "09:00",
+            "--end",
+            "09:05",
+            "--interval",
+            "5",
+            "--valid-from",
+            "2026-11-20",
+        )
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self.routine()["alarmWindows"] if x["id"] == "period")
+        self.assertEqual(w["expectFires"], 2, "没给 --oneoff 就照算术，不静默改语义")
+        self.assertNotIn("oneOff", w)
+
+    def test_usage_docstring_lists_every_flag(self):
+        # 参数存在但藏起来 = 等于没有（#80 的根因）。这条测试守住用法行。
+        # 注意 rtc 模块被换成 rtc_core（单一命名空间），所以直接读源文件。
+        usage = (Path(__file__).resolve().parents[1] / "rtc.py").read_text(encoding="utf-8")
+        for flag in (
+            "--valid-from",
+            "--valid-until",
+            "--oneoff",
+            "--date",
+            "--ack",
+            "--format",
+            "--expect-fires",
+            "--update",
+            "--dry-run",
+        ):
+            self.assertIn(flag, usage, f"用法说明漏了 {flag}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
