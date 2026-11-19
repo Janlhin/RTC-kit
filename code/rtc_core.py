@@ -1675,17 +1675,34 @@ def _due_eval(args, routine, tz, now) -> int:
         return 3
 
     # 对账：时刻表有、账本没有 → 这些提醒今天物理上不可能响
+    #
+    # 但告警先攒着、不立刻投递：状态写入可能冲突，而契约（#4 §11）要求冲突时
+    # stdout 必须为空。先喊一嗓子「有事」再发现压根没写进账本，等于对用户撒谎。
+    pending: list[tuple[str, str]] = []
+
+    def flush_alerts() -> None:
+        """状态操作定论之后再投递；冲突路径不调用它（PR #79 复审 1）。"""
+        for key, line in pending:
+            emit_alert_once(key, line, now)
+        pending.clear()
+
     if not pause_covers(load_pause(), now.date()):
-        expected = expected_today_ids(routine, now)
+        skipped: list[str] = []
+        expected = expected_today_ids(routine, now, skipped)
+        # 单窗口坏掉只跳过它，其余窗口的 id 照常对账——一条已知缺陷不该
+        # 把另一个真缺失的提醒一起掩盖（PR #79 复审 2）。
+        for line in skipped:
+            print(f"due: 时刻表有窗口被跳过（{line}）", file=sys.stderr)
         if expected is not None:
             ledger_ids = {w["id"] for w in state.get("windows", [])}
             missing = sorted(expected - ledger_ids)
             if missing:
-                emit_alert_once(
-                    "missing-" + ",".join(missing),
-                    f"⚠️ 时刻表有 {'、'.join(missing)}，但今天账本里没有：这些提醒不会响；"
-                    "检查 validFrom / dateTypes，或重建 plan",
-                    now,
+                pending.append(
+                    (
+                        "missing-" + ",".join(missing),
+                        f"⚠️ 时刻表有 {'、'.join(missing)}，但今天账本里没有：这些提醒不会响；"
+                        "检查 validFrom / dateTypes，或重建 plan",
+                    )
                 )
 
     rev = int(state["rev"])
@@ -1745,19 +1762,23 @@ def _due_eval(args, routine, tz, now) -> int:
                 print("due: 已把过期窗口标为 missed", file=sys.stderr)
             except Conflict as e:
                 # 契约（issue #4 §11）：due 冲突保持静默，诊断走 stderr，
-                # 下一次 due 重试即可。
+                # 下一次 due 重试即可。攒着的告警也不投递——没写成的事不提。
                 print(f"due: 写入冲突（{e}），missed 标记延后到下一 tick", file=sys.stderr)
+                return 0
+        flush_alerts()
         return 0
 
     # 3) 三个条件
     if hit["fireCount"] >= hit["expectFires"]:
         print(f"due: {hit['id']} 已达上限 {hit['expectFires']} 次，静默", file=sys.stderr)
+        flush_alerts()
         return 0
     if hit.get("lastFiredAt"):
         last = datetime.fromisoformat(hit["lastFiredAt"])
         gap = (now - last).total_seconds() / 60
         if gap < hit["intervalMin"] - 1:
             print(f"due: 距上次 {gap:.1f} 分钟，未到间隔，静默", file=sys.stderr)
+            flush_alerts()
             return 0
 
     hit["state"] = "ringing"
@@ -1777,6 +1798,8 @@ def _due_eval(args, routine, tz, now) -> int:
         print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
         return 0
     _record_history(state, routine, ts=now)
+    # 状态确实写下去了，才轮到投递攒着的对账告警
+    flush_alerts()
 
     # 状态变了就连带刷新 AGENTS.md 里的行程：模型下次开口时读到的是刚响过什么，
     # 而不是 06:00 生成时的旧版本。写失败只提示，绝不影响这次投递。

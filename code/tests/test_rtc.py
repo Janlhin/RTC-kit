@@ -4763,6 +4763,48 @@ class TestStateTrustReview(RtcCase):
         r["alarmWindows"] = windows
         return r
 
+    def test_conflict_stays_silent_even_with_missing_window(self):
+        """复审 1：对账告警不得抢在状态写入之前投递。
+
+        冲突时契约（#4 §11）要求空 stdout、退出 0：先喊「有事」再发现没写成，
+        比不喊更糟——用户以为系统知道了，账本其实一个字没动。
+        """
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        # 账本不动，时刻表多一条 22:00 —— 对账本来会喊「night 缺失」
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "night",
+                "label": "夜间",
+                "start": "22:00",
+                "end": "22:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        )
+        self.write_routine(r)
+
+        orig = rtc.atomic_write
+
+        def conflict_write(path, data, expected_rev=None, expected_digest=None):
+            if path == rtc.STATE:
+                raise rtc.Conflict("injected: state changed concurrently")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = conflict_write
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rtc.cmd_due(argparse.Namespace(now="2026-11-19T07:05:00+08:00"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "", "冲突时必须空 stdout")
+        self.assertIn("冲突", err.getvalue(), "诊断走 stderr，不能连诊断一起吞掉")
+        guard = self.ws / "state" / "guard.json"
+        self.assertFalse(guard.exists(), "没写成的 tick 不该记『已告警过』")
+
     def test_bad_window_does_not_disable_reconciliation(self):
         """复审 2：一条算错的窗口不该把整本对账关掉。"""
         r = self._routine_with(
