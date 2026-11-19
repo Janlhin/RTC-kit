@@ -2195,7 +2195,7 @@ def cmd_postpone(args) -> int:
     for k, v in changes.items():
         w[k] = v
     try:
-        post_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+        post_digest = _write_routine(routine, digest)
     except Conflict as e:
         print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
@@ -2238,7 +2238,7 @@ def cmd_postpone(args) -> int:
                     else:
                         w.pop(k, None)
                 try:
-                    atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=post_digest)
+                    _write_routine(routine, post_digest)
                 except Conflict as rb_err:
                     # 部分应用（退出码 3，与「校验失败」共用 3，但语义不同）：
                     # 时刻表已成功推迟到 {target}，但今日状态因并发编辑回滚失败、
@@ -2293,10 +2293,16 @@ def cmd_postpone(args) -> int:
 CANCELLED_REASON = "cancelled"
 
 
-def _write_routine(routine: dict, digest: str | None) -> None:
-    """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。"""
+def _write_routine(routine: dict, digest: str | None) -> str:
+    """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。
+
+    写完必须顺手盖章（摘要 + 底稿副本）。盖章漏了，下一次 plan 就会把程序
+    自己的改动当成「有人手改」来报警，手改真发生时反倒没人信了。
+    返回本次写出的内容摘要，供调用方在回滚时当守卫用。
+    """
     new_digest = atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
     seal_routine(new_digest)
+    return new_digest
 
 
 # ---------------------------------------------------------------- 手改探测
@@ -2469,7 +2475,7 @@ def cmd_set_time(args) -> int:
         w["expectFires"] = expect_fires(start, end, int(w["intervalMin"]))
 
     try:
-        atomic_write(ROUTINE, routine, expected_rev=None, expected_digest=digest)
+        _write_routine(routine, digest)
     except Conflict as e:
         print(f"set-time: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
