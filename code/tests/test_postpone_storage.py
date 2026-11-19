@@ -76,7 +76,6 @@ class TestPostponeStorageErrors(RtcCase):
 
     def test_invalid_required_fields_leave_routine_unchanged(self):
         for state in [
-            {},
             {"windows": []},
             {"rev": "bad", "windows": []},
             {"rev": 1, "windows": False},
@@ -138,3 +137,60 @@ class TestPostponeStorageErrors(RtcCase):
             rc, out, err = self.invoke()
         self.assertEqual((rc, out), (3, ""))
         self.assertIn("partially applied", err)
+
+    def test_empty_ledger_is_not_planned(self):
+        rtc.STATE.write_text("{}", encoding="utf-8")
+        rc, out, err = self.invoke()
+        self.assertEqual((rc, out), (0, ""))
+        self.assertEqual(json.loads(rtc.STATE.read_text(encoding="utf-8")), {})
+        routine = json.loads(rtc.ROUTINE.read_text(encoding="utf-8"))
+        self.assertIn("2026-11-18", routine["alarmWindows"][0]["skipDates"])
+        self.assertNotIn("partially applied", err)
+
+    def test_empty_ledger_created_after_preflight_is_not_planned(self):
+        original = rtc.atomic_write
+
+        def interleave(path, *a, **kw):
+            result = original(path, *a, **kw)
+            if path == rtc.ROUTINE:
+                rtc.STATE.write_text("{}", encoding="utf-8")
+            return result
+
+        with patch.object(rtc, "atomic_write", interleave):
+            self.assertEqual(self.invoke()[:2], (0, ""))
+
+    def test_history_exception_keeps_committed_state_and_syncs_snapshot(self):
+        with patch.object(rtc, "_record_history", side_effect=OSError("history unavailable")):
+            rc, out, err = self.invoke()
+        self.assertEqual((rc, out), (3, ""))
+        self.assertEqual(self.window("wake")["state"], "skipped")
+        snap = json.loads((rtc.SCHEDULE_DIR / "2026-11-18.json").read_text(encoding="utf-8"))
+        self.assertNotIn("wake", [w["id"] for w in snap["windows"]])
+        self.assertIn("state committed", err)
+        self.assertIn("history update failed", err)
+        self.assertIn("snapshot synchronized", err)
+        self.assertNotIn("may still fire", err)
+        self.assertNotIn("retry the same explicit target", err)
+
+    def test_history_and_snapshot_exceptions_report_both(self):
+        before = (rtc.SCHEDULE_DIR / "2026-11-18.json").read_bytes()
+        with (
+            patch.object(rtc, "_record_history", side_effect=OSError("history unavailable")),
+            patch.object(rtc, "write_schedule_snapshot", side_effect=OSError("snapshot unavailable")),
+        ):
+            rc, out, err = self.invoke()
+        self.assertEqual((rc, out), (3, ""))
+        self.assertEqual(self.window("wake")["state"], "skipped")
+        self.assertIn("history update failed", err)
+        self.assertIn("snapshot update failed", err)
+        self.assertNotIn("may still fire", err)
+        self.assertEqual((rtc.SCHEDULE_DIR / "2026-11-18.json").read_bytes(), before)
+
+    def test_preflight_validation_has_one_command_prefix(self):
+        rtc.STATE.write_text('{"rev":"bad","windows":[]}', encoding="utf-8")
+        before = rtc.ROUTINE.read_bytes()
+        rc, out, err = self.invoke()
+        self.assertEqual((rc, out), (3, ""))
+        self.assertEqual(err.count("postpone:"), 1)
+        self.assertIn("schedule unchanged", err)
+        self.assertEqual(rtc.ROUTINE.read_bytes(), before)

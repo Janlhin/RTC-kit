@@ -2082,17 +2082,17 @@ POSTPONE_REASON = "postponed"
 def _load_postpone_state() -> dict | None:
     """Validate only ledger fields postpone consumes; leave other commands unchanged."""
     state = load_state()
-    if state is None:
+    if not state:
         return None
     rev = state.get("rev")
     try:
         if isinstance(rev, bool) or not isinstance(rev, (int, str)) or int(rev) < 0:
             raise ValueError
     except ValueError as e:
-        raise Validation("postpone: ledger rev must be a nonnegative integer") from e
+        raise Validation("ledger rev must be a nonnegative integer") from e
     windows = state.get("windows")
     if not isinstance(windows, list):
-        raise Validation("postpone: ledger windows must be a list")
+        raise Validation("ledger windows must be a list")
     for window in windows:
         if (
             not isinstance(window, dict)
@@ -2100,7 +2100,7 @@ def _load_postpone_state() -> dict | None:
             or not window["id"]
             or not isinstance(window.get("state"), str)
         ):
-            raise Validation("postpone: ledger windows require string id and state fields")
+            raise Validation("ledger windows require string id and state fields")
     return state
 
 
@@ -2217,8 +2217,8 @@ def cmd_postpone(args) -> int:
     # Validate the ledger before committing any schedule change.
     try:
         _load_postpone_state()
-    except OSError as e:
-        print(f"postpone: state read failed; schedule unchanged: {e}", file=sys.stderr)
+    except (OSError, Validation) as e:
+        print(f"postpone: ledger preflight failed; schedule unchanged: {e}", file=sys.stderr)
         return 3
 
     def partial_failure(error: Exception) -> int:
@@ -2252,6 +2252,7 @@ def cmd_postpone(args) -> int:
 
     # --- 2. 今天这一次不再响
     outcome = "not_planned"
+    history_error: Exception | None = None
     if state:
         srev = int(state["rev"])
         hit = next((x for x in state.get("windows", []) if x["id"] == args.window), None)
@@ -2267,15 +2268,6 @@ def cmd_postpone(args) -> int:
             state["rev"] = srev + 1
             try:
                 atomic_write(STATE, state, expected_rev=srev)
-                _record_history(
-                    state,
-                    routine,
-                    kind="postpone",
-                    window=args.window,
-                    note=f"{args.to} <- {state.get('planDate')}",
-                    ts=now,
-                )
-                outcome = "skipped"
             except (OSError, Validation, ValueError, TypeError, AttributeError) as e:
                 # A competing malformed replacement can fail the writer's rev read.
                 return partial_failure(e)
@@ -2307,10 +2299,24 @@ def cmd_postpone(args) -> int:
                     return 3
                 print(f"postpone: 状态冲突（{e}），已回滚，未推迟", file=sys.stderr)
                 return 2
+            # The state write succeeded. A later audit error cannot undo that fact.
+            outcome = "skipped"
+            try:
+                _record_history(
+                    state,
+                    routine,
+                    kind="postpone",
+                    window=args.window,
+                    note=f"{args.to} <- {state.get('planDate')}",
+                    ts=now,
+                )
+            except (OSError, Validation, ValueError, TypeError, AttributeError) as e:
+                history_error = e
         else:
             outcome = "already_fired"
 
     # --- 3. 今天的快照同步：被跳过的那一次不再出现在当天安排里
+    snapshot_error: OSError | None = None
     if outcome == "skipped":
         # skipped 只在「今天有计划且该窗口还在跑」时才出现
         assert state is not None
@@ -2326,7 +2332,21 @@ def cmd_postpone(args) -> int:
                 )
             )
         except OSError as e:
+            snapshot_error = e
             print(f"postpone: 快照更新失败 {e}", file=sys.stderr)
+
+    if history_error is not None:
+        snapshot_status = (
+            f"snapshot update failed ({snapshot_error})" if snapshot_error else "snapshot synchronized"
+        )
+        print(
+            "postpone: partially applied: schedule moved and state committed as skipped; "
+            f"history update failed ({history_error}); {snapshot_status}. "
+            "Inspect and repair history/snapshot storage; verify the committed ledger "
+            "before recovery. Repeating postpone alone does not repair missing history.",
+            file=sys.stderr,
+        )
+        return 3
 
     notes = {
         "skipped": "今天这一次已跳过",
