@@ -2205,6 +2205,149 @@ def cmd_set_time(args) -> int:
     return 0
 
 
+def _parse_hhmm(value: str, what: str) -> time | None:
+    try:
+        h, m = (int(x) for x in value.split(":"))
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError
+        return time(h, m)
+    except ValueError:
+        print(f"add-window: --{what} 应为 HH:MM，收到 {value}", file=sys.stderr)
+        return None
+
+
+def cmd_add_window(args) -> int:
+    """新增或更新一个周期窗口；写入走 digest 守卫 + 统一印章。
+
+    只改 rules/routines.json，不碰 state/alarms.json。默认下次 plan 生效；
+    `--dry-run` 只打印将要写入的窗口，不落盘。
+    """
+    digest = file_digest(ROUTINE)
+    # dry-run 是「预览」，必须是纯只读：时刻表坏了就直说，不能借自愈顺手改文件。
+    # 否则用户以为只是看一眼，磁盘上的 routines.json / 印章 / 备份已经变了。
+    routine = load_routine(read_only=bool(args.dry_run))
+    defs = routine.get("alarmWindows") or []
+    idx = next((i for i, x in enumerate(defs) if x.get("id") == args.id), None)
+
+    if idx is not None and not args.update:
+        print(f"add-window: 窗口 {args.id} 已存在；要改它请加 --update", file=sys.stderr)
+        return 4
+    if idx is None and args.update:
+        print(f"add-window: 窗口 {args.id} 不存在，--update 不能凭空创建", file=sys.stderr)
+        return 4
+
+    w = dict(defs[idx]) if idx is not None else {"id": args.id}
+    if args.label is not None:
+        w["label"] = args.label
+    if args.start is not None:
+        w["start"] = args.start
+    if args.end is not None:
+        w["end"] = args.end
+    if args.interval is not None:
+        w["intervalMin"] = args.interval
+    if args.ack:
+        w["ackHints"] = list(args.ack)
+    if args.format is not None:
+        if args.format == "none":
+            w.pop("format", None)
+        else:
+            w["format"] = args.format
+    if args.valid_from is not None:
+        w["validFrom"] = args.valid_from
+    if args.valid_until is not None:
+        w["validUntil"] = args.valid_until
+
+    for key in ("label", "start", "end", "intervalMin"):
+        if not w.get(key):
+            print(f"add-window: 新窗口缺少 --{key}", file=sys.stderr)
+            return 3
+
+    start = _parse_hhmm(str(w["start"]), "start")
+    end = _parse_hhmm(str(w["end"]), "end")
+    if start is None or end is None:
+        return 3
+    if end <= start:
+        print(f"add-window: end ({w['end']}) 必须晚于 start ({w['start']})", file=sys.stderr)
+        return 3
+
+    interval = int(w["intervalMin"])
+    if interval <= 0:
+        print("add-window: --interval 必须是正整数", file=sys.stderr)
+        return 3
+    # 一次性 / 倒计时 / 清单窗口每天只响一次，expectFires 由类型固定为 1；
+    # 只改文案时如果按时刻算术重算，会把「响一次」改写成「响五次」。
+    fixed_once = bool(w.get("oneOff") or w.get("dueDate") or w.get("checklist"))
+    computed = 1 if fixed_once else expect_fires(start, end, interval)
+    if args.expect_fires is not None and int(args.expect_fires) != computed:
+        why = "一次性/倒计时/清单窗口固定为 1" if fixed_once else f"应为 {computed}"
+        print(
+            f"add-window: --expect-fires={args.expect_fires} 与窗口类型不符（{why}）",
+            file=sys.stderr,
+        )
+        return 3
+    w["expectFires"] = computed
+
+    for key in ("validFrom", "validUntil"):
+        if w.get(key):
+            text = str(w[key]).strip()
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+                print(
+                    f"add-window: --{key} 必须是 YYYY-MM-DD（带短横线）；"
+                    f"紧凑写法 {text} 存进去后排程按字符串比较，窗口会认不出来",
+                    file=sys.stderr,
+                )
+                return 3
+            try:
+                date.fromisoformat(text)
+            except ValueError:
+                print(f"add-window: --{key} 不是有效日期：{text}", file=sys.stderr)
+                return 3
+            w[key] = text
+    if w.get("validFrom") and w.get("validUntil") and w["validFrom"] > w["validUntil"]:
+        print("add-window: validFrom 不能晚于 validUntil", file=sys.stderr)
+        return 3
+
+    # 规范要求 ackHints 必填；省略 --ack 时写显式合法默认，别让候选配置带着洞过门。
+    if not w.get("ackHints"):
+        w["ackHints"] = ["知道了"]
+
+    active_formats = {
+        str(x.get("format"))
+        for x in defs
+        if x.get("id") != args.id and not x.get("disabled") and x.get("format")
+    }
+    # 候选窗口自己若是停用状态，就不参与「早报二选一」——它今天本来就不会响。
+    if w.get("format") and not w.get("disabled"):
+        active_formats.add(str(w["format"]))
+    if "report" in active_formats and "report-fallback" in active_formats:
+        print(
+            "add-window: report 与 report-fallback 只能二选一，不能同时启用",
+            file=sys.stderr,
+        )
+        return 3
+
+    if args.dry_run:
+        print(json.dumps(w, ensure_ascii=False, indent=2))
+        return 0
+
+    if idx is None:
+        defs.append(w)
+    else:
+        defs[idx] = w
+    routine["alarmWindows"] = defs
+    try:
+        _write_routine(routine, digest)
+    except Conflict as e:
+        print(f"add-window: 时刻表已被改动（{e}），未写入", file=sys.stderr)
+        return 2
+    print(
+        f"add-window: {args.id} 已写入（{w['start']}–{w['end']}，每 {interval} 分钟，"
+        f"共 {computed} 次）；下次 plan 生效",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_cancel(args) -> int:
     """取消一个安排。
 
@@ -2519,6 +2662,30 @@ def main(argv=None) -> int:
     sst.add_argument("--start", required=True, help="新起始时刻 HH:MM")
     sst.add_argument("--end", help="新结束时刻 HH:MM（省略=保持不变）")
     sst.set_defaults(func=cmd_set_time)
+
+    saw = sub.add_parser("add-window", help="新增或更新周期窗口（不再手改 routines.json）")
+    saw.add_argument("--id", required=True, help="窗口 id")
+    saw.add_argument("--label", help="窗口文案")
+    saw.add_argument("--start", help="起始时刻 HH:MM")
+    saw.add_argument("--end", help="结束时刻 HH:MM")
+    saw.add_argument("--interval", type=int, help="间隔分钟")
+    saw.add_argument(
+        "--expect-fires",
+        dest="expect_fires",
+        type=int,
+        help="显式覆盖响铃次数（需与窗口算术一致）",
+    )
+    saw.add_argument("--ack", action="append", help="确认词，可重复")
+    saw.add_argument("--valid-from", dest="valid_from", help="生效日期 YYYY-MM-DD")
+    saw.add_argument("--valid-until", dest="valid_until", help="失效日期 YYYY-MM-DD")
+    saw.add_argument(
+        "--format",
+        choices=["follow", "summary", "report", "report-fallback", "none"],
+        help="窗口类型；none = 清除已有类型",
+    )
+    saw.add_argument("--update", action="store_true", help="更新已有窗口（字段级合并）")
+    saw.add_argument("--dry-run", action="store_true", help="只打印将要写入的窗口，不落盘")
+    saw.set_defaults(func=cmd_add_window)
 
     ssch = sub.add_parser("schedule")
     ssch.add_argument("date", nargs="?", help="YYYY-MM-DD")

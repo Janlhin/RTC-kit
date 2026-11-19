@@ -2044,6 +2044,313 @@ class TestExternalAck(RtcCase):
         self.assertIn("--event-id", err)
 
 
+class TestAddWindow(RtcCase):
+    """add-window：新增/更新周期窗口走命令，不再手改 routines.json。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_routine(base_routine())
+
+    def _routine(self):
+        return json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+
+    def test_adds_new_window_and_plan_sees_it(self):
+        rc, out, err = self.cli(
+            "add-window",
+            "--id",
+            "cjy",
+            "--label",
+            "催 cjy",
+            "--start",
+            "19:00",
+            "--end",
+            "23:00",
+            "--interval",
+            "60",
+            "--ack",
+            "回了",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "", "配置命令的 stdout 不该被投递出去")
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "cjy")
+        self.assertEqual(w["expectFires"], 5)
+        self.assertEqual(w["ackHints"], ["回了"])
+
+        self.cli("plan", now="2026-05-10T06:00:00+08:00")
+        win = next(x for x in self.state()["windows"] if x["id"] == "cjy")
+        self.assertEqual(win["state"], "pending")
+
+    def test_duplicate_id_requires_update(self):
+        args = (
+            "add-window",
+            "--id",
+            "dup",
+            "--label",
+            "重复",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "30",
+        )
+        self.assertEqual(self.cli(*args)[0], 0)
+        rc, _, err = self.cli(*args)
+        self.assertEqual(rc, 4, err)
+        self.assertIn("--update", err)
+
+    def test_update_merges_fields_and_recomputes(self):
+        self.cli(
+            "add-window",
+            "--id",
+            "cjy",
+            "--label",
+            "催 cjy",
+            "--start",
+            "19:00",
+            "--end",
+            "23:00",
+            "--interval",
+            "60",
+            "--ack",
+            "回了",
+        )
+        rc, _, err = self.cli("add-window", "--id", "cjy", "--update", "--start", "19:30", "--end", "22:30")
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "cjy")
+        self.assertEqual(w["label"], "催 cjy", "未提到的字段必须保留")
+        self.assertEqual(w["ackHints"], ["回了"])
+        self.assertEqual(w["expectFires"], 4, "19:30–22:30 / 60 分钟 = 4 次")
+
+    def test_dry_run_does_not_write(self):
+        rc, out, err = self.cli(
+            "add-window",
+            "--id",
+            "dry",
+            "--label",
+            "试跑",
+            "--start",
+            "19:00",
+            "--end",
+            "23:00",
+            "--interval",
+            "60",
+            "--dry-run",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertIn('"id": "dry"', out)
+        self.assertFalse(any(x["id"] == "dry" for x in self._routine()["alarmWindows"]))
+
+    def test_rejects_bad_time_and_report_mode_conflict(self):
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "bad",
+            "--label",
+            "坏",
+            "--start",
+            "19:00",
+            "--end",
+            "18:00",
+            "--interval",
+            "60",
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertFalse(any(x["id"] == "bad" for x in self._routine()["alarmWindows"]))
+
+        self.assertEqual(
+            self.cli(
+                "add-window",
+                "--id",
+                "r1",
+                "--label",
+                "report",
+                "--start",
+                "09:00",
+                "--end",
+                "09:04",
+                "--interval",
+                "5",
+                "--format",
+                "report",
+            )[0],
+            0,
+        )
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "r2",
+            "--label",
+            "fallback",
+            "--start",
+            "09:10",
+            "--end",
+            "09:14",
+            "--interval",
+            "5",
+            "--format",
+            "report-fallback",
+        )
+        self.assertEqual(rc, 3, "report 与 report-fallback 不能同时启用")
+        self.assertIn("二选一", err)
+
+    def test_dry_run_never_repairs_broken_routine(self):
+        """dry-run 是只读预览：坏时刻表直说，不能借自愈顺手改盘。"""
+        bdir = self.ws / "state" / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "routines.program-last.json").write_text(
+            json.dumps(base_routine(), ensure_ascii=False), encoding="utf-8"
+        )
+        routine = self.ws / "rules" / "routines.json"
+        bad = "{ 这不是 JSON"
+        routine.write_text(bad, encoding="utf-8")
+
+        rc, out, err = self.cli(
+            "add-window",
+            "--id",
+            "dry",
+            "--label",
+            "试跑",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+            "--dry-run",
+        )
+        self.assertEqual(rc, 3, "坏时刻表的 dry-run 必须报错，不能靠自愈")
+        self.assertIn("校验失败", err)
+        self.assertEqual(routine.read_text(encoding="utf-8"), bad, "dry-run 绝不能改写时刻表")
+        self.assertEqual(
+            [p.name for p in bdir.iterdir() if p.name.startswith("routines.corrupt-")],
+            [],
+            "dry-run 不该留下「我把坏文件备份了」的痕迹",
+        )
+
+    def test_rejects_compact_date(self):
+        """紧凑日期 20261118 能过 fromisoformat，但排程按字符串比会认不出来。"""
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "cd",
+            "--label",
+            "紧凑",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+            "--valid-from",
+            "20261118",
+        )
+        self.assertEqual(rc, 3, err)
+        self.assertIn("YYYY-MM-DD", err)
+        self.assertFalse(any(x["id"] == "cd" for x in self._routine()["alarmWindows"]), "被拒的窗口不该落盘")
+
+    def test_valid_from_window_appears_on_first_day(self):
+        """规范日期写的窗口，必须在生效第一天真的进账本。"""
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "vf",
+            "--label",
+            "生效首日",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+            "--valid-from",
+            "2026-11-18",
+        )
+        self.assertEqual(rc, 0, err)
+        self.cli("plan", "--force", now="2026-11-18T06:00:00+08:00")
+        win = next((x for x in self.state()["windows"] if x["id"] == "vf"), None)
+        self.assertIsNotNone(win, "生效首日必须进账本")
+        self.assertEqual(win["state"], "pending")
+
+    def test_default_ack_hints_keeps_candidate_valid(self):
+        """不传 --ack 也要写显式合法默认，别让候选配置带着洞过门。"""
+        rc, _, err = self.cli(
+            "add-window",
+            "--id",
+            "noack",
+            "--label",
+            "无确认词",
+            "--start",
+            "19:00",
+            "--end",
+            "20:00",
+            "--interval",
+            "60",
+        )
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "noack")
+        self.assertEqual(w["ackHints"], ["知道了"], "schema 要求 ackHints 必填")
+        if HAVE_JSONSCHEMA:
+            jsonschema.validate(self._routine(), json.loads(SCHEMA.read_text(encoding="utf-8")))
+
+    def test_update_oneoff_keeps_single_fire(self):
+        """只改文案时，不按时刻算术重写一次性窗口的响铃次数。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "travel",
+                "label": "旅游",
+                "start": "09:00",
+                "end": "09:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "oneOff": True,
+                "validFrom": "2026-11-18",
+                "validUntil": "2026-11-18",
+            }
+        ]
+        self.write_routine(r)
+        rc, _, err = self.cli("add-window", "--id", "travel", "--update", "--label", "旅游（改）")
+        self.assertEqual(rc, 0, err)
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "travel")
+        self.assertEqual(w["label"], "旅游（改）")
+        self.assertEqual(w["expectFires"], 1, "只改文案不该把一次性提醒改成一天五次")
+
+    def test_disabled_report_update_does_not_conflict(self):
+        """禁用的 report 窗口不参与「早报二选一」，改它不应被误判冲突。"""
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "report-old",
+                "label": "旧早报",
+                "start": "09:00",
+                "end": "09:04",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report",
+                "disabled": True,
+            },
+            {
+                "id": "report-fb",
+                "label": "兜底",
+                "start": "09:10",
+                "end": "09:14",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["知道了"],
+                "format": "report-fallback",
+            },
+        ]
+        self.write_routine(r)
+        rc, _, err = self.cli("add-window", "--id", "report-old", "--update", "--label", "旧早报（改名）")
+        self.assertEqual(rc, 0, f"禁用的 report 窗口不参与冲突：{err}")
+        w = next(x for x in self._routine()["alarmWindows"] if x["id"] == "report-old")
+        self.assertEqual(w["label"], "旧早报（改名）")
+        self.assertTrue(w["disabled"], "禁用状态必须保留")
+
+
 class TestAckGrace(RtcCase):
     """ack 宽限：当天刚过期的 missed 窗口也应能被确认（模型晚一点回『好了』也有效）。"""
 
