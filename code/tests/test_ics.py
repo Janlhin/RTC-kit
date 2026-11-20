@@ -59,7 +59,32 @@ class IcsExportCase(unittest.TestCase):
         self.assertIn("SUMMARY:起床", out)
         self.assertIn("DTSTART:20261118T070000", out)
         self.assertIn("DTEND:20261118T072500", out)
-        self.assertIn("STATUS:COMPLETED", out)
+        # COMPLETED 是 VTODO 的状态值，VEVENT 只能用 CONFIRMED；原状态留在自定义字段
+        self.assertIn("STATUS:CONFIRMED", out)
+        self.assertIn("X-RTC-STATE:acked", out)
+        self.assertNotIn("STATUS:COMPLETED", out)
+
+    def test_event_status_never_uses_todo_values(self):
+        """VEVENT 的 STATUS 只能是 TENTATIVE / CONFIRMED / CANCELLED。"""
+        self.write_state(
+            [
+                {"id": e, "start": f"2026-11-18T0{i}:00:00+08:00", "state": s, "fireCount": 0}
+                for i, (e, s) in enumerate(
+                    [
+                        ("a", "pending"),
+                        ("b", "ringing"),
+                        ("c", "acked"),
+                        ("d", "done"),
+                        ("e", "missed"),
+                        ("f", "skipped"),
+                        ("g", "cancelled"),
+                    ]
+                )
+            ]
+        )
+        out = rtc_ics.export_calendar(self.ws)
+        statuses = set(re.findall(r"^STATUS:(\w+)", out, flags=re.MULTILINE))
+        self.assertTrue(statuses <= {"TENTATIVE", "CONFIRMED", "CANCELLED"}, statuses)
 
     def test_special_chars_escaped(self):
         self.write_state(

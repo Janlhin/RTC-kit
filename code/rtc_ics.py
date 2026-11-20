@@ -109,12 +109,14 @@ def export_calendar(workspace: Path) -> str:
             ve.append(f"DTEND:{local_to_ics(end)}")
         ve.append(f"SUMMARY:{ics_escape(w.get('label') or w.get('id', '提醒'))}")
         status = w.get("state", "")
-        if status in {"acked", "done"}:
-            ve.append("STATUS:COMPLETED")
-        elif status == "cancelled":
+        # VEVENT 的 STATUS 只有 TENTATIVE / CONFIRMED / CANCELLED 三个值。
+        # COMPLETED 是 VTODO（待办）的语义，日历客户端会当成陌生值。
+        # 所以「已响过」不能写进 STATUS，改用自定义字段保住原状态。
+        if status == "cancelled":
             ve.append("STATUS:CANCELLED")
         else:
             ve.append("STATUS:CONFIRMED")
+        ve.append(f"X-RTC-STATE:{status or 'unknown'}")
         note = f"RTC 状态: {status}; 响铃 {w.get('fireCount', 0)} 次"
         if w.get("missedReason"):
             note += f"; 漏响原因: {w['missedReason']}"
