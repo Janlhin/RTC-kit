@@ -828,6 +828,23 @@ def _check_window_arithmetic(w: dict) -> None:
         raise Validation(f"expectFires={w['expectFires']} 与算术值 {exp} 不符")
 
 
+def occurrence_id(w: dict, day_iso: str) -> str:
+    """这一次提醒的稳定身份（ocid），日历导出拿它当 UID。
+
+    两类窗口身份不同：
+
+    - `oneOff`：整个模板只活一次，身份跟着模板走（`id@rtc`）。改日期是「同一条
+      提醒换了时间」，日历里该是一次更新，而不是旧的消失、新的凭空出现。
+    - 其余（周期 / 倒计时 / 清单）：每天都算一次独立事件，身份带日期
+      （`id@YYYY-MM-DD`），否则日历会把昨天和今天当成同一条的后一次修订。
+
+    身份只在 plan 生成时定一次，之后靠 `carry_forward` 带过去——推迟、改时刻都不换身份。
+    """
+    if w.get("oneOff"):
+        return f"{w['id']}@rtc"
+    return f"{w['id']}@{day_iso}"
+
+
 def build_windows(
     routine: dict,
     d: date,
@@ -908,6 +925,8 @@ def build_windows(
         out.append(
             {
                 "id": w["id"],
+                "ocid": occurrence_id(w, day_iso),
+                "seq": 0,
                 "label": label,
                 "type": window_type(w),
                 "review": is_review,
@@ -1100,8 +1119,20 @@ def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
             merged.append(p)
         else:
             _migrate_checklist(p, w)
+            _carry_occurrence_identity(p, w)
             merged.append(w)
     return merged
+
+
+def _carry_occurrence_identity(old: dict, new: dict) -> None:
+    """同日重建时把 ocid 带过去；开始时间变了就 seq+1（日历据此认「同一条的新版本」）。"""
+    if not old.get("ocid"):
+        return
+    new["ocid"] = old["ocid"]
+    seq = int(old.get("seq") or 0)
+    if new.get("start") != old.get("start"):
+        seq += 1
+    new["seq"] = seq
 
 
 def rollover(old: dict | None, today_iso: str) -> list[dict]:
@@ -1508,7 +1539,11 @@ def cmd_plan(args) -> int:
         # 跨日：窗口全部重建，但清单的勾选状态要带过去
         prev_windows = {x["id"]: x for x in (old or {}).get("windows", [])}
         for w in fresh:
-            _migrate_checklist(prev_windows.get(w["id"], {}), w)
+            prev = prev_windows.get(w["id"]) or {}
+            _migrate_checklist(prev, w)
+            # 一次性窗口跨日身份不变（id@rtc）：换了日期就是同一条的新版本，seq 要跟着涨
+            if prev.get("ocid") and prev["ocid"] == w.get("ocid"):
+                w["seq"] = int(prev.get("seq") or 0) + (1 if prev.get("start") != w.get("start") else 0)
         windows = fresh
     history = (
         rollover(old, today) if not (old and old.get("planDate") == today) else list(old.get("history", []))
