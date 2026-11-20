@@ -63,6 +63,18 @@ def rrule_from_window(w: dict) -> str:
     return "FREQ=DAILY"  # 窗口是每天 plan 生成的，导出日当天实例即可
 
 
+def uid_for(w: dict, start: str) -> str:
+    """日历 UID：优先用窗口的 ocid，这样推迟/改时刻只是「同一条的新版本」。
+
+    老账本没有 ocid 时退回旧算法（id + 开始时间）——它会在改期后换 UID，
+    但那种账本本来就是老版本导出的，一致性只能这样保。
+    """
+    ocid = w.get("ocid")
+    if ocid:
+        return f"{ocid}@rtc-kit"
+    return f"{w.get('id', 'win')}-{local_to_ics(start)}@rtc-kit"
+
+
 def export_calendar(workspace: Path) -> str:
     """读当天状态，产出标准 VCALENDAR。源真相仍在 routines.json + alarms.json。"""
     state = None
@@ -88,8 +100,9 @@ def export_calendar(workspace: Path) -> str:
             continue
         ve = [
             "BEGIN:VEVENT",
-            f"UID:{w.get('id', 'win')}-{local_to_ics(start)}@rtc-kit",
+            f"UID:{uid_for(w, start)}",
             f"DTSTAMP:{stamp}",
+            f"SEQUENCE:{int(w.get('seq') or 0)}",
             f"DTSTART:{local_to_ics(start)}",
         ]
         if end:

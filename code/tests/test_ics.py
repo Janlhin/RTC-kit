@@ -120,6 +120,45 @@ class IcsExportCase(unittest.TestCase):
         uid_b = re.search(r"UID:([^\r\n]+)", b).group(1)
         self.assertEqual(uid_a, uid_b, "同一事件两次导出 UID 必须稳定（日历去重靠它）")
 
+    def test_uid_uses_ocid_and_survives_reschedule(self):
+        window = {
+            "id": "wake",
+            "ocid": "wake@2026-11-18",
+            "seq": 0,
+            "label": "起床",
+            "start": "2026-11-18T07:00:00+08:00",
+            "state": "pending",
+            "fireCount": 0,
+        }
+        self.write_state([window])
+        before = rtc_ics.export_calendar(self.ws)
+        uid_before = re.search(r"UID:([^\r\n]+)", before).group(1)
+        self.assertEqual(uid_before, "wake@2026-11-18@rtc-kit")
+        self.assertIn("SEQUENCE:0", before)
+
+        window.update(seq=1, start="2026-11-18T07:10:00+08:00")
+        self.write_state([window])
+        after = rtc_ics.export_calendar(self.ws)
+        uid_after = re.search(r"UID:([^\r\n]+)", after).group(1)
+        self.assertEqual(uid_after, uid_before, "改期后 UID 不许变，否则日历当成两条")
+        self.assertIn("SEQUENCE:1", after, "改了时间要让日历知道是新版本")
+
+    def test_legacy_window_without_ocid_keeps_old_uid(self):
+        self.write_state(
+            [
+                {
+                    "id": "wake",
+                    "label": "起床",
+                    "start": "2026-11-18T07:00:00+08:00",
+                    "state": "pending",
+                    "fireCount": 0,
+                }
+            ]
+        )
+        out = rtc_ics.export_calendar(self.ws)
+        self.assertIn("UID:wake-20261118T070000@rtc-kit", out, "老账本没有 ocid，退回旧算法")
+        self.assertIn("SEQUENCE:0", out)
+
 
 if __name__ == "__main__":
     unittest.main()
