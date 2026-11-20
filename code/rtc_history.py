@@ -22,22 +22,6 @@ from pathlib import Path
 
 import rtc_core as core
 
-SCHEMA_VERSION = 1
-
-WINDOW_COLUMNS = (
-    "window_id",
-    "routine_id",
-    "label",
-    "start",
-    "end",
-    "interval_min",
-    "one_off",
-    "valid_from",
-    "valid_until",
-    "first_seen",
-    "last_seen",
-)
-
 
 def history_db() -> Path:
     return core.WORKSPACE / "state" / "history.db"
