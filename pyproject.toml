@@ -41,7 +41,7 @@ warn_redundant_casts = true
 # 已有缺口：mypy 尚未收紧到 strict（T-004）。按模块一批一批收，收完一批就把
 # 该模块加进下面的 overrides；全部收完时把 `strict = true` 提到 [tool.mypy] 顶层。
 [[tool.mypy.overrides]]
-module = ["rtc_ics", "rtc_report"]
+module = ["rtc_ics", "rtc_report", "rtc_archive"]
 strict = true
 
 [tool.coverage.run]
