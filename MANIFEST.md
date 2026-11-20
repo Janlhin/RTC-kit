@@ -12,6 +12,7 @@
 | ruff | https://pypi.org/project/ruff/ | 0.17.5（开发依赖） | 由 pip 校验（`pip hash`） | Lint 与格式化门禁 | MIT |
 | mypy | https://pypi.org/project/mypy/ | 2.4.1（开发依赖） | 由 pip 校验（`pip hash`） | 类型检查门禁 | MIT |
 | coverage | https://pypi.org/project/coverage/ | 7.17.3（开发依赖） | 由 pip 校验（`pip hash`） | 覆盖率度量与阈值 | Apache-2.0 |
+| vulture | https://pypi.org/project/vulture/ | 2.16（开发依赖） | 由 pip 校验（`pip hash`） | 死代码门禁：未被引用的函数、变量、属性 | MIT |
 | Node.js | https://nodejs.org/ | 未固定（可选） | 不适用（运行时） | 仅 `code/metrics.mjs` 旁路统计使用；主链路不依赖 | MIT |
 
 ## 说明

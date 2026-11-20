@@ -18,6 +18,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rtc_core as core  # noqa: E402
@@ -48,19 +49,6 @@ def local_to_ics(iso: str) -> str:
     """2026-11-20T15:00:00+08:00 -> 20261120T150000（本地浮动时间）。"""
     dt = datetime.fromisoformat(iso)
     return dt.strftime("%Y%m%dT%H%M%S")
-
-
-def rrule_from_window(w: dict) -> str:
-    """把 RTC 窗口的日期类型/有效期翻成 RFC 5545 RRULE。
-
-    只有明确的周期才转；dateTypes/workday 这种"按日类型"的规则 iCalendar
-    表达不了，留空（导出的是具体某天生成的窗口，不是无限规则）。
-    """
-    if w.get("oneOff"):
-        return ""
-    if w.get("disabled") or w.get("canceled"):
-        return ""
-    return "FREQ=DAILY"  # 窗口是每天 plan 生成的，导出日当天实例即可
 
 
 def export_calendar(workspace: Path) -> str:
@@ -113,13 +101,14 @@ def export_calendar(workspace: Path) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
-def json_load(path: Path):
+def json_load(path: Path) -> dict[str, Any]:
     import json
 
-    return json.loads(path.read_text(encoding="utf-8"))
+    # json.loads 的返回类型是 Any；这里只读自己写出的 alarms.json，形状由 schema 保证
+    return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="rtc_ics", description="导出标准 iCalendar")
     ap.add_argument("--workspace", default=str(core.WORKSPACE))
     ap.add_argument("-o", "--output", help="输出文件；不填则 stdout")

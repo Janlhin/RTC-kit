@@ -59,6 +59,10 @@ try {
             & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-root-whitelist.ps1')
         }
 
+        Step '冲突标记残留' {
+            & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-conflict-markers.ps1')
+        }
+
         Step '文档链接可达' {
             & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-doc-links.ps1')
         }
@@ -82,6 +86,10 @@ try {
         Step '类型（mypy）' {
             & $py -m mypy
         }
+
+        Step '死代码（vulture）' {
+            & $py -m vulture code install.py --min-confidence 60 --ignore-names row_factory --exclude code/tests
+        }
     }
 
     if (-not $Fast) {
@@ -93,6 +101,8 @@ try {
             if ($LASTEXITCODE -ne 0) { return }
             & $py -m coverage combine
             & $py -m coverage report
+            if ($LASTEXITCODE -ne 0) { return }
+            & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-coverage.ps1') -Python $py
         }
 
         Step '安装器冒烟（dry-run）' {
