@@ -205,7 +205,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 - 提醒主链路的调度由 `code/rtc.py` 承担，但**投递**取决于宿主；不同宿主的 payload 与失败语义不同，本仓库只给示例。
 - `code/metrics.mjs` 是可选旁路统计，**不随主链路维护**；主链路统计走 `rtc.py metrics`。
 - 覆盖率阈值已按实测基线收紧到语句 80% / 分支 70%（2026-11-20 实测 82% / 76%），但局部仍有空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%），见 `TASKS.md` T-003。
-- `mypy` 尚未收紧到 `--strict`，存量注解分批补（见 `TASKS.md` T-004）。
+- `mypy` 已全量收紧到 `--strict`（`[tool.mypy]` 顶层开关，2026-11-21），`code/` 与 `install.py` 零错误。
 - 执行历史在 `state/history.db`（`windows` / `daily` / `checklist` / `events` 四表，唯一真相源）；`state/schedule/*.json` 是它的人读副本，删掉整个目录历史照样查得到。查询用 `rtc.py history` / `history --range` / `events` / `stats`。
 - 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天压一份 zip 到**其他本地盘**的 `RTC-Backup`（目标盘由 `rules/backup.json` 指定），也可按天提交进私有 git 仓库。恢复办法见 `docs/troubleshooting.md` §7 / §8。
 - 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文，详见 `docs/attribution.md`。
