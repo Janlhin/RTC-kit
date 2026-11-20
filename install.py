@@ -491,19 +491,10 @@ def run(args: argparse.Namespace) -> int:
     print("\n[install] 1/5 安装入口脚本")
     if not dry_run:
         scripts_dir.mkdir(parents=True, exist_ok=True)
-    to_copy = [
-        "rtc.py",
-        "rtc_core.py",
-        "rtc_archive.py",
-        "rtc_metrics.py",
-        "rtc_brief.py",
-        "rtc_history.py",
-        "rtc_plan.py",
-        "rtc_due.py",
-        "rtc_once.py",
-        "rtc_report.py",  # 早报素材（agent 模式 cron 注入 prompt，issue #60 方案 B）
-        "metrics.mjs",  # 可选旁路统计；不拷会让技能里的 node metrics.mjs 调用摸空
-    ]
+    # 拷贝清单按 code/ 实际 *py 枚举，不再手写：模块会新增，手写清单必然漏
+    # （`rtc_ics.py` 就这么漏过一次——装完宿主的 `ics` 命令直接没有）。`metrics.mjs`
+    # 是可选旁路统计，不是 .py 但同样必须拷，否则技能里的 node 调用摸空。
+    to_copy = sorted(p.name for p in code_src.glob("*.py")) + ["metrics.mjs"]
     for fname in to_copy:
         src = code_src / fname
         if not src.is_file():
