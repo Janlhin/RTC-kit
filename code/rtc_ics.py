@@ -18,6 +18,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rtc_core as core  # noqa: E402
@@ -100,13 +101,14 @@ def export_calendar(workspace: Path) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
-def json_load(path: Path):
+def json_load(path: Path) -> dict[str, Any]:
     import json
 
-    return json.loads(path.read_text(encoding="utf-8"))
+    # json.loads 的返回类型是 Any；这里只读自己写出的 alarms.json，形状由 schema 保证
+    return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="rtc_ics", description="导出标准 iCalendar")
     ap.add_argument("--workspace", default=str(core.WORKSPACE))
     ap.add_argument("-o", "--output", help="输出文件；不填则 stdout")
