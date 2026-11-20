@@ -5091,5 +5091,61 @@ class TestAddWindowOneOff(RtcCase):
             self.assertIn(flag, usage, f"用法说明漏了 {flag}")
 
 
+class TestOccurrenceIdentity(RtcCase):
+    """每次提醒的身份（ocid）：日历 UID 靠它，推迟/改时刻都不许换。
+
+    身份规则见 `rtc_core.occurrence_id`：oneOff 跟模板走，其余跟当天走。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_routine(base_routine())
+
+    def test_recurring_ocid_is_per_day_and_survives_same_day_replan(self):
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        w = self.window("wake")
+        self.assertEqual(w["ocid"], "wake@2026-11-18")
+        self.assertEqual(w["seq"], 0)
+
+        rc, _, err = self.cli("set-time", "--window", "wake", "--start", "07:10")
+        self.assertEqual(rc, 0, err)
+        rc, _, err = self.cli("plan", "--force", now="2026-11-18T06:30:00+08:00")
+        self.assertEqual(rc, 0, err)
+        w = self.window("wake")
+        self.assertEqual(w["ocid"], "wake@2026-11-18", "同一天重建不许换身份")
+        self.assertEqual(w["seq"], 1, "开始时间变了，日历要知道这是同一条的新版本")
+        self.assertIn("07:10", w["start"])
+
+    def test_unchanged_replan_does_not_bump_seq(self):
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        rc, _, err = self.cli("plan", "--force", now="2026-11-18T06:05:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.window("wake")["seq"], 0, "内容没变就不该报「有新版本」")
+
+    def test_next_day_occurrence_gets_its_own_ocid(self):
+        rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        rc, _, err = self.cli("plan", now="2026-11-19T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.window("wake")["ocid"], "wake@2026-11-19")
+
+    def test_one_off_keeps_identity_when_its_date_moves(self):
+        routine = base_routine()
+        routine["alarmWindows"][0].update(oneOff=True, validFrom="2026-11-20", validUntil="2026-11-21")
+        self.write_routine(routine)
+        rc, _, err = self.cli("plan", now="2026-11-20T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        first = self.window("wake")
+        self.assertEqual(first["ocid"], "wake@rtc", "一次性提醒的身份跟着模板，不跟日期")
+
+        rc, _, err = self.cli("plan", now="2026-11-21T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        second = self.window("wake")
+        self.assertEqual(second["ocid"], first["ocid"], "换了日期仍是同一条提醒")
+        self.assertEqual(second["seq"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -32,6 +32,16 @@
       "required": ["id", "label", "start", "end", "intervalMin", "expectFires", "fireCount", "state"],
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "ocid": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+@(rtc|[0-9]{4}-[0-9]{2}-[0-9]{2})$",
+          "description": "这一次提醒的稳定身份，日历导出用它当 UID。oneOff 窗口取 id@rtc（同一条提醒改日期算同一条）；其余窗口取 id@YYYY-MM-DD（每天是独立事件）。只在 plan 分配，之后不许改写"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "这条提醒被更新过几次（日历 SEQUENCE）。开始时间变化就 +1；没变不动"
+        },
         "label": { "type": "string" },
         "start": { "type": "string", "format": "date-time" },
         "end": { "type": "string", "format": "date-time" },
