@@ -157,7 +157,6 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 ```
 
 `git commit` 时 pre-commit 钩子跑的是同一个脚本，所以钩子拦下「No module named ruff」也是这个原因，不是钩子装错了。
->>>>>>> origin/main
 
 ## 目录一览
 
