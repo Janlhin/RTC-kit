@@ -14,7 +14,8 @@
 | T-002 | done | 覆盖率无阈值，测试只增不减的假设没有任何机器判据 | 用 `coverage.py` 测基线并接入 `verify`；2026-11-20 实测 82% / 分支 76% 后上调到目标值 | `pwsh -File scripts/check-coverage.ps1 -Python <venv>` → 0（语句 80 / 分支 70 双判定） | 2026-11-16 | 2026-11-20 |
 | T-003 | todo | 总覆盖率已达标，但局部有空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%），总数字把它们盖住了 | 按模块逐个补边界用例，先补 `rtc_once` 的 plan/due 互斥路径，再给 `rtc_plan` 补入口用例 | `python -m coverage report --include="code/rtc_once.py" --fail-under=70` → 0 | 2026-11-16 | — |
 | T-004 | todo | `mypy` 尚未收紧到 `--strict` | 分批补注解、消 `Any`，每批一个独立提交 | `python -m mypy --strict code install.py` → 0 | 2026-11-16 | — |
-| T-005 | todo | 仓库内没有死代码与重复代码检查 | 接入 `vulture`（未使用符号）并接入 CI | `python -m vulture code install.py --min-confidence 80` → 0 | 2026-11-16 | — |
+| T-005 | done | 仓库内没有死代码检查，删了函数没人发现还有调用方 | 接入 `vulture`，置信度取 60（80 会放过真正的死函数），测试目录排除、`row_factory` 这类动态属性忽略；接入 `verify` 静态段与 CI | `python -m vulture code install.py --min-confidence 60 --ignore-names row_factory --exclude code/tests` → 0 | 2026-11-16 | 2026-11-20 |
+| T-009 | todo | 重复代码没有度量（目标 < 3%），同类逻辑散在多个模块里只能靠人眼发现 | 评估 `jscpd`（Node）与 `pylint` 重复块报告两条路，选不需要第二套包管理器的那个，接入 CI | 选定工具后：报告退出码 0，且重复率 < 3% | 2026-11-20 | — |
 | T-006 | done | 文档里的命令片段没有被实际执行过，写错了没人发现 | 人工抽取 30 份 Markdown 的 79 条命令，在隔离工作区逐条实跑并记录退出码（`docs/verification-2026-11-16.md`） | 每条命令退出码符合预期，0 条失败 | 2026-11-16 | 2026-11-16 |
 | T-006b | done | 上面是人工一次性验证，没有机器判据——下次文档改错不会有人跑 | 写 `scripts/verify-docs.ps1`：抽代码块里的 `rtc.py` 命令比对真实子命令/参数，再在临时工作区跑一条链路；已接入 `verify.ps1` | `pwsh -File scripts/verify-docs.ps1` → 0（故意写错子命令/参数 → 1） | 2026-11-16 | 2026-11-16 |
 | T-007 | done | 文档断链无门禁 | 接入 `scripts/check-doc-links.ps1`，覆盖全部 `.md` 的相对链接（不校验锚点） | `pwsh -File scripts/check-doc-links.ps1` → 0 | 2026-11-16 | 2026-11-16 |

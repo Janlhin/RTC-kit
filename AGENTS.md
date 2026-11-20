@@ -11,11 +11,12 @@
 | 静态检查 | `python -m ruff check code install.py` | 退出码 0 |
 | 格式检查 | `python -m ruff format --check code install.py` | 退出码 0 |
 | 类型检查 | `python -m mypy code install.py` | 退出码 0 |
+| 死代码检查 | `python -m vulture code install.py --min-confidence 60 --ignore-names row_factory --exclude code/tests` | 退出码 0 |
 | 安装器冒烟 | `python install.py --workspace ./_smoke-ws --dry-run` | 退出码 0 |
 | 文档命令门禁 | `pwsh -NoLogo -NoProfile -File scripts/verify-docs.ps1` | 退出码 0 |
 | 启用 Git 钩子（每台机器一次） | `pwsh -NoLogo -NoProfile -File scripts/install-hooks.ps1` | `core.hooksPath = .husky` |
 
-`verify.ps1` 是唯一验收入口；它内部按「快 → 慢」排：脚本基线 → 根白名单 → 冲突标记 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试 + 覆盖率（语句 80 / 分支 70 双判定） → 安装器冒烟。`-Fast` 只跑静态部分（钩子用），`-SkipStatic` 只跑测试、覆盖率与冒烟（CI 的 test 层用）。CI 分两层：`static` 跑 `-Fast`，`test` 矩阵跑 `-SkipStatic`。
+`verify.ps1` 是唯一验收入口；它内部按「快 → 慢」排：脚本基线 → 根白名单 → 冲突标记 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 死代码 → 测试 + 覆盖率（语句 80 / 分支 70 双判定） → 安装器冒烟。`-Fast` 只跑静态部分（钩子用），`-SkipStatic` 只跑测试、覆盖率与冒烟（CI 的 test 层用）。CI 分两层：`static` 跑 `-Fast`，`test` 矩阵跑 `-SkipStatic`。
 
 ## 项目约定
 

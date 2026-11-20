@@ -86,6 +86,10 @@ try {
         Step '类型（mypy）' {
             & $py -m mypy
         }
+
+        Step '死代码（vulture）' {
+            & $py -m vulture code install.py --min-confidence 60 --ignore-names row_factory --exclude code/tests
+        }
     }
 
     if (-not $Fast) {

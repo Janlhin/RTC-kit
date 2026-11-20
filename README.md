@@ -110,6 +110,7 @@ python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate --date 2026-11-17 --js
 | 覆盖率 | `coverage.py`：语句阈值在 `pyproject.toml`，分支阈值在 `scripts/check-coverage.ps1` | 两处各一条 |
 | Lint / 格式 | `ruff` | `pyproject.toml` |
 | 类型检查 | `mypy` | `pyproject.toml` |
+| 死代码 | `vulture`（置信度 ≥ 80 才报） | `pyproject.toml` |
 | 脚本入口 | PowerShell 7.4+（`pwsh`），禁止 `.cmd` / `.bat` | `scripts/*.ps1` |
 
 ## 目录结构
@@ -137,7 +138,7 @@ python -m unittest discover -s code/tests -p "test_*.py"
 python install.py --workspace ./_smoke-ws --dry-run
 ```
 
-`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 冲突标记 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率（含阈值双判定） → 安装器冒烟。`-Fast` 只跑静态部分（pre-commit 用），`-SkipStatic` 只跑测试、覆盖率与冒烟（CI 的 test 层用）。
+`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 冲突标记 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 死代码 → 测试与覆盖率（含阈值双判定） → 安装器冒烟。`-Fast` 只跑静态部分（pre-commit 用），`-SkipStatic` 只跑测试、覆盖率与冒烟（CI 的 test 层用）。
 
 ### 校验要用哪个 python
 
