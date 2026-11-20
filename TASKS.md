@@ -18,6 +18,7 @@
 | T-006 | done | 文档里的命令片段没有被实际执行过，写错了没人发现 | 人工抽取 30 份 Markdown 的 79 条命令，在隔离工作区逐条实跑并记录退出码（`docs/verification-2026-11-16.md`） | 每条命令退出码符合预期，0 条失败 | 2026-11-16 | 2026-11-16 |
 | T-006b | done | 上面是人工一次性验证，没有机器判据——下次文档改错不会有人跑 | 写 `scripts/verify-docs.ps1`：抽代码块里的 `rtc.py` 命令比对真实子命令/参数，再在临时工作区跑一条链路；已接入 `verify.ps1` | `pwsh -File scripts/verify-docs.ps1` → 0（故意写错子命令/参数 → 1） | 2026-11-16 | 2026-11-16 |
 | T-007 | done | 文档断链无门禁 | 接入 `scripts/check-doc-links.ps1`，覆盖全部 `.md` 的相对链接（不校验锚点） | `pwsh -File scripts/check-doc-links.ps1` → 0 | 2026-11-16 | 2026-11-16 |
+| T-008 | done | README 里残留了合并冲突标记，所有门禁都没拦住 | 新增 `scripts/check-conflict-markers.ps1`（`git grep` 三个形态），接入 `verify.ps1` 静态段 | `pwsh -File scripts/check-conflict-markers.ps1` → 0；故意写入 `>>>>>>> origin/main` → 1 | 2026-11-20 | 2026-11-20 |
 
 ## 功能与修复
 

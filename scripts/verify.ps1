@@ -59,6 +59,10 @@ try {
             & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-root-whitelist.ps1')
         }
 
+        Step '冲突标记残留' {
+            & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-conflict-markers.ps1')
+        }
+
         Step '文档链接可达' {
             & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-doc-links.ps1')
         }
