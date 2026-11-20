@@ -97,6 +97,8 @@ try {
             if ($LASTEXITCODE -ne 0) { return }
             & $py -m coverage combine
             & $py -m coverage report
+            if ($LASTEXITCODE -ne 0) { return }
+            & pwsh -NoLogo -NoProfile -File (Join-Path $PSScriptRoot 'check-coverage.ps1') -Python $py
         }
 
         Step '安装器冒烟（dry-run）' {

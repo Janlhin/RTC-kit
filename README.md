@@ -107,7 +107,7 @@ python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate --date 2026-11-17 --js
 | 语言 | Python 3.11 / 3.13（CI 双版本） | `.python-version`、`.github/workflows/tests.yml` |
 | 包管理 | pip + `pyproject.toml`（无 lockfile，CI 固定版本区间） | `pyproject.toml` |
 | 测试框架 | `unittest`（标准库） | `code/tests/` |
-| 覆盖率 | `coverage.py`，阈值见 `pyproject.toml` | `pyproject.toml` |
+| 覆盖率 | `coverage.py`：语句阈值在 `pyproject.toml`，分支阈值在 `scripts/check-coverage.ps1` | 两处各一条 |
 | Lint / 格式 | `ruff` | `pyproject.toml` |
 | 类型检查 | `mypy` | `pyproject.toml` |
 | 脚本入口 | PowerShell 7.4+（`pwsh`），禁止 `.cmd` / `.bat` | `scripts/*.ps1` |
@@ -137,7 +137,7 @@ python -m unittest discover -s code/tests -p "test_*.py"
 python install.py --workspace ./_smoke-ws --dry-run
 ```
 
-`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率 → 安装器冒烟。`-Fast` 只跑前八项（pre-commit 用），`-SkipStatic` 只跑后两项（CI 的 test 层用）。
+`verify.ps1` 内部按「快 → 慢」执行：脚本基线 → 根目录白名单 → 冲突标记 → 文档链接 → SemVer → 文档命令 → 格式 → Lint → 类型 → 测试与覆盖率（含阈值双判定） → 安装器冒烟。`-Fast` 只跑静态部分（pre-commit 用），`-SkipStatic` 只跑测试、覆盖率与冒烟（CI 的 test 层用）。
 
 ### 校验要用哪个 python
 
@@ -203,7 +203,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 - 这是一套**规格与模板**，不是开箱即用的产品：需要填配置、选运行时、建定时任务。
 - 提醒主链路的调度由 `code/rtc.py` 承担，但**投递**取决于宿主；不同宿主的 payload 与失败语义不同，本仓库只给示例。
 - `code/metrics.mjs` 是可选旁路统计，**不随主链路维护**；主链路统计走 `rtc.py metrics`。
-- 覆盖率当前未达语句 80% / 分支 70%，阈值按实测基线逐季上调（见 `TASKS.md` T-002 / T-003）。
+- 覆盖率阈值已按实测基线收紧到语句 80% / 分支 70%（2026-11-20 实测 82% / 76%），但局部仍有空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%），见 `TASKS.md` T-003。
 - `mypy` 尚未收紧到 `--strict`，存量注解分批补（见 `TASKS.md` T-004）。
 - 执行历史在 `state/history.db`（`windows` / `daily` / `checklist` / `events` 四表，唯一真相源）；`state/schedule/*.json` 是它的人读副本，删掉整个目录历史照样查得到。查询用 `rtc.py history` / `history --range` / `events` / `stats`。
 - 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天压一份 zip 到**其他本地盘**的 `RTC-Backup`（目标盘由 `rules/backup.json` 指定），也可按天提交进私有 git 仓库。恢复办法见 `docs/troubleshooting.md` §7 / §8。

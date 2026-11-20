@@ -11,8 +11,8 @@
 | 编号 | 状态 | 问题 | 方法 | 完成判据 | 创建 | 完成 |
 |---|---|---|---|---|---|---|
 | T-001 | done | 仓库没有 Lint / 类型 / 覆盖率门禁，缺陷只能靠人工 review | 接入 `ruff`（Lint + 格式）与 `mypy`，`verify.ps1` 聚合，CI 执行 | `pwsh -File scripts/verify.ps1` → 0 | 2026-11-16 | 2026-11-16 |
-| T-002 | doing | 覆盖率无阈值，测试只增不减的假设没有任何机器判据 | 用 `coverage.py` 测基线，写入 `pyproject.toml` 阈值，逐季上调 | `python -m coverage report --fail-under=<当前阈值>` → 0 | 2026-11-16 | — |
-| T-003 | todo | 覆盖率未达语句 80% / 分支 70% 的目标 | 补 `plan` 边界、`gitarchive` 失败路径、并发写冲突用例 | `python -m coverage report --fail-under=80` → 0 | 2026-11-16 | — |
+| T-002 | done | 覆盖率无阈值，测试只增不减的假设没有任何机器判据 | 用 `coverage.py` 测基线并接入 `verify`；2026-11-20 实测 82% / 分支 76% 后上调到目标值 | `pwsh -File scripts/check-coverage.ps1 -Python <venv>` → 0（语句 80 / 分支 70 双判定） | 2026-11-16 | 2026-11-20 |
+| T-003 | todo | 总覆盖率已达标，但局部有空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%），总数字把它们盖住了 | 按模块逐个补边界用例，先补 `rtc_once` 的 plan/due 互斥路径，再给 `rtc_plan` 补入口用例 | `python -m coverage report --include="code/rtc_once.py" --fail-under=70` → 0 | 2026-11-16 | — |
 | T-004 | todo | `mypy` 尚未收紧到 `--strict` | 分批补注解、消 `Any`，每批一个独立提交 | `python -m mypy --strict code install.py` → 0 | 2026-11-16 | — |
 | T-005 | todo | 仓库内没有死代码与重复代码检查 | 接入 `vulture`（未使用符号）并接入 CI | `python -m vulture code install.py --min-confidence 80` → 0 | 2026-11-16 | — |
 | T-006 | done | 文档里的命令片段没有被实际执行过，写错了没人发现 | 人工抽取 30 份 Markdown 的 79 条命令，在隔离工作区逐条实跑并记录退出码（`docs/verification-2026-11-16.md`） | 每条命令退出码符合预期，0 条失败 | 2026-11-16 | 2026-11-16 |
