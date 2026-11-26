@@ -180,6 +180,9 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
 
    退出码 0。
 
+   > 注意：安装器默认会扫除源盘外的固定盘写进 `rules/backup.json` 的 `targets`；
+   > 演练前先把它改成 `<TARGET>`（临时目录），否则第 2 步 `plan` 的自动备份会写到真机盘。
+
 2. 固定时刻生成当天账本：
 
    ```powershell
@@ -188,7 +191,7 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
 
    退出码 0；输出 `plan: 2026-11-27 workday 4 窗口 / 25 次，rev=1`。
 
-3. 打备份（`plan` 每日自动打一份；手动复核用）：
+3. 打备份（`plan` 每日自动打一份；下面这条是手动复核命令，本次也实测退出 0）：
 
    ```powershell
    python <CODE_DIR>/rtc.py --workspace <WS> backup --to <TARGET>
