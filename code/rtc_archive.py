@@ -6,6 +6,7 @@ git 仓库并推送（GitHub / Gitee / 自建都行）。被 core 的 plan / mai
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
@@ -115,7 +116,7 @@ def snapshot_tasks(keep: int | None = None) -> Path | None:
     return path
 
 
-def cmd_touch_tasks(args) -> int:
+def cmd_touch_tasks(args: argparse.Namespace) -> int:
     path = snapshot_tasks()
     if path is None:
         print("tasks: 没有 tasks.md，或内容和上一份底稿一样——不留新底稿")
@@ -265,7 +266,7 @@ def daily_backup(now: datetime) -> list[str]:
     return []
 
 
-def cmd_backup(args) -> int:
+def cmd_backup(args: argparse.Namespace) -> int:
     today = date.today().isoformat()
     targets, keep = backup_config()
     if args.to:
@@ -296,7 +297,7 @@ def cmd_backup(args) -> int:
 # 远端随便写：GitHub / Gitee / GitLab / 自建 / 本地裸库都行（URL 或路径原样交给 git）。
 
 
-def git_archive_config() -> dict:
+def git_archive_config() -> dict[str, Any]:
     """读 rules/backup.json 里的 git 段。没有就返回空 dict（=不启用）。"""
     cfg = core.WORKSPACE / BACKUP_CFG
     if not cfg.exists():
@@ -416,7 +417,7 @@ def git_archive(now: datetime) -> tuple[bool, list[str]]:
     return True, errors
 
 
-def cmd_gitarchive(args) -> int:
+def cmd_gitarchive(args: argparse.Namespace) -> int:
     g = git_archive_config()
     if args.dir or args.remote:
         g = dict(g)

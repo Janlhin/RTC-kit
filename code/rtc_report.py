@@ -22,6 +22,7 @@ import argparse
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -29,12 +30,12 @@ import rtc_brief as brief  # noqa: E402
 import rtc_core as core  # noqa: E402
 
 
-def _yesterday_entries(state: dict, day: str) -> list[dict]:
+def _yesterday_entries(state: dict[str, Any], day: str) -> list[dict[str, Any]]:
     """取 history 里指定日期的条目；没有就返回空列表（合法空日，不是错误）。"""
     return [h for h in (state.get("history") or []) if str(h.get("date")) == day]
 
 
-def _render_entries(entries: list[dict]) -> list[str]:
+def _render_entries(entries: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for h in entries:
         label = str(h.get("label") or h.get("id") or "")
@@ -95,7 +96,7 @@ def build_material(workspace: Path, day: date) -> list[str]:
     return lines
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="生成早报素材（注入模型 prompt）")
     p.add_argument("--workspace", required=True)
     p.add_argument("--date", help="覆盖「今天」，默认取系统当天（测试用）")

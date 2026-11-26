@@ -11,6 +11,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "coverage>=7.6",
+    "vulture>=2.11",
 ]
 
 [tool.ruff]
@@ -36,6 +37,7 @@ check_untyped_defs = true
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
+strict = true
 
 [tool.coverage.run]
 branch = true
@@ -46,6 +48,6 @@ omit = ["code/tests/*"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-# 基线：2026-11-16 实测 77%（含子进程；只统计父进程曾低到 16%，那是假数字）。
-# 目标 80 / 分支 70，逐季上调，见 TASKS.md T-002 / T-003。
-fail_under = 77
+# 2026-11-20 实测：语句 82%、分支 76%。阈值按实测基线取整到目标值（80/70），
+# 分支阈值在 scripts/check-coverage.ps1 里判——coverage.py 没有分支阈值配置项。
+fail_under = 80

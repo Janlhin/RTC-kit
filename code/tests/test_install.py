@@ -84,6 +84,31 @@ class TestInstallRun(unittest.TestCase):
         routine = base / "ws" / "rules" / "routines.json"
         self.assertTrue(routine.is_file(), "工作区应当有可运行的初始 routines.json")
 
+    def test_copies_every_code_module(self):
+        """拷贝清单不能手写：新增模块必须自动跟上。
+
+        `rtc_ics.py` 就漏过一次——仓库里有、测试里过、装到宿主却没有，
+        宿主的 `ics` 命令直接不存在。清单改成按 `code/*.py` 枚举之后，
+        这个断言就是那次的回归测试。
+        """
+        base = Path(tempfile.mkdtemp(prefix="rtc-mod-"))
+        args = Namespace(
+            workspace=str(base / "ws"),
+            harness_scripts_dir=str(base / "scripts"),
+            harness_skills_dir=str(base / "skills"),
+            code_src=None,
+            tz_offset="+08:00",
+            dry_run=False,
+            setup_cron=False,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = install.run(args)
+        self.assertEqual(rc, 0)
+
+        expected = sorted([p.name for p in (REPO / "code").glob("*.py")] + ["metrics.mjs"])
+        landed = sorted(p.name for p in (base / "scripts").glob("*") if p.is_file())
+        self.assertEqual(landed, expected, "code/ 下的每个模块都该进宿主的 scripts 目录")
+
     def test_skills_are_nested_under_category(self):
         """D-01：宿主按父目录识别技能；平铺写等于装上了却看不见。"""
         base = Path(tempfile.mkdtemp(prefix="rtc-cat-"))

@@ -28,6 +28,7 @@ import sqlite3
 import sys
 import tempfile
 import time as _time
+from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -111,7 +112,7 @@ def set_workspace(path: Path) -> None:
     SCHEDULE_DIR = WORKSPACE / "state" / "schedule"
 
 
-def load_json(path: Path):
+def load_json(path: Path) -> Any:
     """读 JSON；读坏了就给一行可读诊断，绝不抛 Traceback 给调度器。
 
     状态文件被手改坏、写到一半断电、编码被编辑器改掉，都会落到这里。以前
@@ -182,7 +183,7 @@ def _unlock_fd(fd: int) -> None:
 
 
 @contextlib.contextmanager
-def _exclusive_file_lock(path: Path):
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
     """持久 sidecar + 操作系统持锁：互斥由内核保证，文件本身不按年龄替换或删除。
 
     协议要点：
@@ -248,8 +249,8 @@ def _exclusive_file_lock(path: Path):
 
 
 def _record_history(
-    state: dict | None,
-    routine: dict | None = None,
+    state: dict[str, Any] | None,
+    routine: dict[str, Any] | None = None,
     *,
     kind: str | None = None,
     window: str | None = None,
@@ -278,7 +279,9 @@ def _record_history(
         print(f"history: 写库失败（{type(e).__name__}: {e}），本轮历史可能少一条", file=sys.stderr)
 
 
-def atomic_write(path: Path, data: dict, expected_rev: int | None, expected_digest: str | None = None) -> str:
+def atomic_write(
+    path: Path, data: dict[str, Any], expected_rev: int | None, expected_digest: str | None = None
+) -> str:
     """写入前比对 rev 与内容摘要；不一致则抛 Conflict，绝不覆盖别人的写入。
 
     rev 适合程序自己写的账本；摘要适合人会手改的配置文件（时刻表）。
@@ -360,7 +363,7 @@ def _check_window_keys(index: int, w: object) -> None:
 NOTICES: list[str] = []
 
 
-def load_routine(read_only: bool = False) -> dict:
+def load_routine(read_only: bool = False) -> dict[str, Any]:
     """读时刻表并做最小形状校验；坏了就先想办法自愈。
 
     实机教训：模型把 routines.json 写成了 0 字节，plan/due 双双失败，
@@ -388,7 +391,7 @@ def load_routine(read_only: bool = False) -> dict:
         return _validate_routine()
 
 
-def _validate_routine() -> dict:
+def _validate_routine() -> dict[str, Any]:
     """读时刻表并做最小形状校验。
 
     「JSON 合法但结构不对」（整个文件被写成 `[]`、少了 tzOffset）同样会让
@@ -456,7 +459,7 @@ def take_notices() -> list[str]:
     return got
 
 
-def load_state() -> dict | None:
+def load_state() -> dict[str, Any] | None:
     if not STATE.exists():
         return None
     state = load_json(STATE)
@@ -492,7 +495,7 @@ def touch_heartbeat(now: datetime, *, ok: bool = False) -> None:
     """
     p = hb_path()
     try:
-        prev: dict = {}
+        prev: dict[str, Any] = {}
         if p.exists():
             try:
                 loaded = load_json(p)
@@ -540,7 +543,7 @@ def read_heartbeat_attempt() -> datetime | None:
 
 
 def self_check(
-    state: dict,
+    state: dict[str, Any],
     now: datetime,
     first_run: bool = False,
     heartbeat: tuple[datetime | None, datetime | None] | None = None,
@@ -622,13 +625,13 @@ def emit_alert_once(key: str, line: str, now: datetime) -> bool:
 
 
 def schedule_snapshot(
-    routine: dict,
+    routine: dict[str, Any],
     kind: str,
-    windows: list[dict],
+    windows: list[dict[str, Any]],
     day_iso: str,
     generated_at: str,
-    results: dict | None = None,
-) -> dict:
+    results: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """当天完整计划的快照。写一次，留永久——回答「那天到底是什么安排」。
 
     窗口的 start/end 用生成时的实际值（含日期），有效期从时刻表定义取回。
@@ -680,7 +683,7 @@ def schedule_snapshot(
     }
 
 
-def fill_snapshot_results(day_iso: str, results: dict) -> bool:
+def fill_snapshot_results(day_iso: str, results: dict[str, Any]) -> bool:
     """把「实际结果」回填进某天的快照。返回是否写入成功。
 
     快照是永久存档：plan 时写计划、rollover 时补结果。
@@ -706,7 +709,7 @@ def fill_snapshot_results(day_iso: str, results: dict) -> bool:
     return True
 
 
-def write_schedule_snapshot(snap: dict) -> Path:
+def write_schedule_snapshot(snap: dict[str, Any]) -> Path:
     """原子写一份每日快照。永久保留，不做清理。"""
     d = SCHEDULE_DIR
     d.mkdir(parents=True, exist_ok=True)
@@ -729,12 +732,12 @@ def write_schedule_snapshot(snap: dict) -> Path:
 # ---------------------------------------------------------------- 计划生成
 
 
-def plan_kind(d: date, routine: dict) -> str:
+def plan_kind(d: date, routine: dict[str, Any]) -> str:
     overrides = routine.get("dateTypes", {}).get("holidayOverrides", [])
     iso = d.isoformat()
     for o in overrides:
         if o.get("date") == iso:
-            return o["type"]
+            return cast(str, o["type"])
     # 契约里 0=周日，Python 里 weekday() 0=周一，必须换算
     dow = (d.weekday() + 1) % 7
     if dow in routine["dateTypes"]["workday"]:
@@ -756,7 +759,7 @@ def expect_fires(start: time, end: time, interval: int) -> int:
     return minutes // interval + 1
 
 
-def in_valid_range(w: dict, day_iso: str) -> bool:
+def in_valid_range(w: dict[str, Any], day_iso: str) -> bool:
     """窗口是否在有效期内（闭区间）。任一端省略 = 无限期。"""
     vf = w.get("validFrom")
     vu = w.get("validUntil")
@@ -765,7 +768,7 @@ def in_valid_range(w: dict, day_iso: str) -> bool:
     return not (vu and day_iso > vu)
 
 
-def day_disabled(routine: dict, kind: str) -> bool:
+def day_disabled(routine: dict[str, Any], kind: str) -> bool:
     """该日期类型被契约显式禁用（weekendAlarms / holidayAlarms = false）。
 
     禁用日 = 合法空日：静默，不报配置错误。
@@ -775,7 +778,7 @@ def day_disabled(routine: dict, kind: str) -> bool:
     )
 
 
-def window_type(defn: dict) -> str:
+def window_type(defn: dict[str, Any]) -> str:
     """四类日程的身份：预约 = 一次性 + 倒计时；倒计时不是独立类型，是 fixed 的一种活法。
 
     `cancelled` 不是第四种类型，是覆盖在任意类型之上的粘性状态（见 issue #9 §10.2）。
@@ -785,7 +788,7 @@ def window_type(defn: dict) -> str:
     return "fixed"
 
 
-def countdown_review_day(defn: dict) -> str | None:
+def countdown_review_day(defn: dict[str, Any]) -> str | None:
     """倒计时（fixed + dueDate）的复盘日 = 截止日次日。
 
     截止日之后再无提醒（复盘日只响一次，响完永停）。显式给了 `validUntil` 且
@@ -801,7 +804,7 @@ def countdown_review_day(defn: dict) -> str | None:
     return review
 
 
-def _window_bounds(w: dict) -> tuple[time, time]:
+def _window_bounds(w: dict[str, Any]) -> tuple[time, time]:
     """解析并校验单窗口的 start/end；格式或取值错统一转成 Validation。
 
     降级与严格两条路径都必须先过这里：裸 `int(x)` 抛的是 ValueError，
@@ -815,7 +818,7 @@ def _window_bounds(w: dict) -> tuple[time, time]:
         raise Validation(f"start/end 格式不对（{e}）") from e
 
 
-def _check_window_arithmetic(w: dict) -> None:
+def _check_window_arithmetic(w: dict[str, Any]) -> None:
     """单窗口的数值校验：只拦「算错」这类，避免一条坏配置拖垮整天。"""
     if w.get("oneOff") or w.get("dueDate") or (w.get("checklist") or []):
         return
@@ -847,13 +850,13 @@ def occurrence_id(w: dict, day_iso: str) -> str:
 
 
 def build_windows(
-    routine: dict,
+    routine: dict[str, Any],
     d: date,
     kind: str,
     now: datetime,
     strict: bool = True,
     errors: list[str] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """按时刻表生成某天的窗口。
 
     `errors` 传给「必须继续跑」的调用方（plan）：单个窗口的数值错误降级为
@@ -972,7 +975,9 @@ def build_windows(
     return out
 
 
-def expected_today_ids(routine: dict, now: datetime, errors: list[str] | None = None) -> set[str] | None:
+def expected_today_ids(
+    routine: dict[str, Any], now: datetime, errors: list[str] | None = None
+) -> set[str] | None:
     """今天按时刻表应该出现在账本里的窗口 id；配置整份算不出来时返回 None。
 
     这是「设了提醒却没响」的入口检查：时刻表有、账本没有，due 就不可能响它。
@@ -1013,9 +1018,9 @@ def _item_id(label: str, explicit: str | None = None) -> str:
     return "i" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
 
 
-def _checklist_defs(items_def: list) -> list[dict]:
+def _checklist_defs(items_def: list[Any]) -> list[dict[str, Any]]:
     """把法则里的清单定义（字符串或 {id,label}）统一成 {id,label}。"""
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
     for raw in items_def:
         if isinstance(raw, dict):
@@ -1036,7 +1041,7 @@ def _checklist_defs(items_def: list) -> list[dict]:
     return out
 
 
-def _migrate_checklist(prev: dict, w: dict) -> None:
+def _migrate_checklist(prev: dict[str, Any], w: dict[str, Any]) -> None:
     """把旧窗口的勾选状态与「已打完」终态迁移到新窗口上。
 
     清单不会因为日切而重置——昨天打了 3 项，今天还剩 15 项。
@@ -1087,7 +1092,7 @@ def _migrate_checklist(prev: dict, w: dict) -> None:
         w["fireCount"] = int(prev.get("fireCount", 0))
 
 
-def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
+def carry_forward(old: dict[str, Any] | None, fresh: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """只增不改：同日同 id 的终态窗口原样带回，避免重建冲掉确认。
 
     `ringing`（正在响）也算：它带着 fireCount 与 lastFiredAt。
@@ -1125,7 +1130,7 @@ def carry_forward(old: dict | None, fresh: list[dict]) -> list[dict]:
     return merged
 
 
-def _carry_occurrence_identity(old: dict, new: dict) -> None:
+def _carry_occurrence_identity(old: dict[str, Any], new: dict[str, Any]) -> None:
     """同日重建时把 ocid 带过去；开始时间变了就 seq+1（日历据此认「同一条的新版本」）。"""
     if not old.get("ocid"):
         return
@@ -1136,7 +1141,7 @@ def _carry_occurrence_identity(old: dict, new: dict) -> None:
     new["seq"] = seq
 
 
-def rollover(old: dict | None, today_iso: str) -> list[dict]:
+def rollover(old: dict[str, Any] | None, today_iso: str) -> list[dict[str, Any]]:
     """日切归档：每个窗口都进历史，不只是 pending/ringing。
 
     只压未终结的窗口会丢掉 acked 的记录，账本会永久缺一天（原设计的一处缺口）。
@@ -1164,7 +1169,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
             }
         )
     # 同 date+id 去重，后写覆盖先写
-    dedup: dict[tuple, dict] = {}
+    dedup: dict[tuple[Any, Any], dict[str, Any]] = {}
     for h in hist:
         dedup[(h.get("date"), h.get("id"))] = h
     cutoff = (date.fromisoformat(today_iso) - timedelta(days=14)).isoformat()
@@ -1189,7 +1194,7 @@ def rollover(old: dict | None, today_iso: str) -> list[dict]:
     return [h for k, h in sorted(dedup.items()) if h.get("date", "") >= cutoff]
 
 
-def simulate_day(routine: dict, d: date, paused: dict | None = None) -> dict:
+def simulate_day(routine: dict[str, Any], d: date, paused: dict[str, Any] | None = None) -> dict[str, Any]:
     """预演某一天会怎样：只读，绝不落盘。
 
     判定全部复用 plan 的那一套（有效期 / skipDates / disabled / dateTypes / 算术校验），
@@ -1200,8 +1205,8 @@ def simulate_day(routine: dict, d: date, paused: dict | None = None) -> dict:
     day_start = datetime.combine(d, time(0, 0), tzinfo=tz)
     day_iso = d.isoformat()
 
-    windows: list[dict] = []
-    skipped: list[dict] = []
+    windows: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     day_off = day_disabled(routine, kind)
     if pause_covers(paused, d):
         until = (paused or {}).get("until", "?")
@@ -1243,7 +1248,7 @@ def simulate_day(routine: dict, d: date, paused: dict | None = None) -> dict:
     }
 
 
-def render_simulate(data: dict) -> list[str]:
+def render_simulate(data: dict[str, Any]) -> list[str]:
     """预演的人读版：几号、几次、几点、重叠、跳过。"""
     d = date.fromisoformat(data["date"])
     weekday = "一二三四五六日"[d.weekday()]
@@ -1266,7 +1271,7 @@ def render_simulate(data: dict) -> list[str]:
     return lines
 
 
-def cmd_simulate(args) -> int:
+def cmd_simulate(args: argparse.Namespace) -> int:
     routine = load_routine()
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
@@ -1300,7 +1305,7 @@ def pause_path() -> Path:
     return WORKSPACE / "state" / "paused.json"
 
 
-def load_pause() -> dict | None:
+def load_pause() -> dict[str, Any] | None:
     """读暂停标记。坏文件当作没暂停——宁可按原样响，不能因为标记坏了集体静默。"""
     p = pause_path()
     if not p.exists():
@@ -1308,19 +1313,19 @@ def load_pause() -> dict | None:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         date.fromisoformat(data["until"])
-        return data
+        return cast(dict[str, Any], data)
     except (OSError, ValueError, TypeError, KeyError) as e:
         print(f"pause: 暂停标记看不懂（{type(e).__name__}: {e}），当作没暂停", file=sys.stderr)
         return None
 
 
-def _pause_range(p: dict) -> tuple[date, date]:
+def _pause_range(p: dict[str, Any]) -> tuple[date, date]:
     until = date.fromisoformat(p["until"])
     start = date.fromisoformat(p.get("from") or p["until"])
     return start, until
 
 
-def pause_covers(p: dict | None, d: date) -> bool:
+def pause_covers(p: dict[str, Any] | None, d: date) -> bool:
     """这一天是否落在暂停期（左闭右开：until 那天已经恢复）。"""
     if not p:
         return False
@@ -1331,7 +1336,7 @@ def pause_covers(p: dict | None, d: date) -> bool:
     return f <= d < t
 
 
-def pause_summary(p: dict) -> str:
+def pause_summary(p: dict[str, Any]) -> str:
     """恢复时说清「停了几天、跳过多少条」，数字从每日快照里数。"""
     f, t = _pause_range(p)
     days = (t - f).days
@@ -1348,7 +1353,7 @@ def pause_summary(p: dict) -> str:
     return f"{f:%m-%d} ~ {t - timedelta(days=1):%m-%d} 暂停了 {days} 天，跳过 {skipped} 次提醒"
 
 
-def cmd_pause(args) -> int:
+def cmd_pause(args: argparse.Namespace) -> int:
     tz = tz_of(load_routine()["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(load_routine()["tzOffset"])
     until = None
@@ -1380,7 +1385,7 @@ def cmd_pause(args) -> int:
     return 0
 
 
-def cmd_resume(args) -> int:
+def cmd_resume(args: argparse.Namespace) -> int:
     p = load_pause()
     if not p:
         print("resume: 本来就没暂停")
@@ -1420,7 +1425,7 @@ def record_delivery(window: str, target: str, result: str, error: str | None, at
         )
 
 
-def read_delivery(day: str | None = None) -> list[dict]:
+def read_delivery(day: str | None = None) -> list[dict[str, Any]]:
     """读回执；坏行跳过，不让一行坏 JSON 毁掉整天的账。"""
     path = delivery_log()
     if not path.exists():
@@ -1442,7 +1447,7 @@ def read_delivery(day: str | None = None) -> list[dict]:
     return rows
 
 
-def delivery_summary(day: str) -> dict:
+def delivery_summary(day: str) -> dict[str, Any]:
     rows = read_delivery(day)
     fails = [r for r in rows if r.get("result") != "ok"]
     return {
@@ -1462,7 +1467,7 @@ def delivery_summary(day: str) -> dict:
     }
 
 
-def cmd_delivery(args) -> int:
+def cmd_delivery(args: argparse.Namespace) -> int:
     day = args.date or now_tz("+08:00").date().isoformat()
     if not delivery_log().exists():
         print(
@@ -1482,7 +1487,7 @@ def cmd_delivery(args) -> int:
     return 0
 
 
-def cmd_delivery_record(args) -> int:
+def cmd_delivery_record(args: argparse.Namespace) -> int:
     if args.result not in ("ok", "fail"):
         print(f"delivery-record: --result 只能是 ok / fail，收到 {args.result}", file=sys.stderr)
         return 3
@@ -1493,7 +1498,7 @@ def cmd_delivery_record(args) -> int:
     return 0
 
 
-def cmd_plan(args) -> int:
+def cmd_plan(args: argparse.Namespace) -> int:
     routine = load_routine()
     # 早报只能选一种输出方式：单窗口（due 直接出稿）或双窗口（模型先写 + 兜底）。
     # 两种同时启用会让 9:00 和 9:10 各发一次同一份汇报——外部审计实测到过重复输出。
@@ -1680,7 +1685,7 @@ def cmd_plan(args) -> int:
 # ---------------------------------------------------------------- 到点判断
 
 
-def cmd_due(args) -> int:
+def cmd_due(args: argparse.Namespace) -> int:
     """due 入口：先进心跳 attemptAt，判定完整走完才补 lastOkAt。
 
     `_due_eval` 的所有 return 0（含「正确判定为静默」）都算判定完整走完；
@@ -1717,7 +1722,7 @@ def cmd_due(args) -> int:
     return rc
 
 
-def _due_eval(args, routine, tz, now) -> int:
+def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: timezone, now: datetime) -> int:
     """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
     today = now.date().isoformat()
@@ -1934,7 +1939,7 @@ def _due_eval(args, routine, tz, now) -> int:
 # ---------------------------------------------------------------- 确认
 
 
-def cmd_ack(args) -> int:
+def cmd_ack(args: argparse.Namespace) -> int:
     routine = load_routine()
     tz = tz_of(routine["tzOffset"])
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
@@ -2035,7 +2040,7 @@ def cmd_ack(args) -> int:
 # ---------------------------------------------------------------- 清单打勾
 
 
-def cmd_check(args) -> int:
+def cmd_check(args: argparse.Namespace) -> int:
     """勾选 / 取消勾选清单里的某一项。
 
     stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
@@ -2115,7 +2120,7 @@ def cmd_check(args) -> int:
 POSTPONE_REASON = "postponed"
 
 
-def _load_postpone_state() -> dict | None:
+def _load_postpone_state() -> dict[str, Any] | None:
     """Validate only ledger fields postpone consumes; leave other commands unchanged."""
     state = load_state()
     if not state:
@@ -2140,7 +2145,7 @@ def _load_postpone_state() -> dict | None:
     return state
 
 
-def cmd_postpone(args) -> int:
+def cmd_postpone(args: argparse.Namespace) -> int:
     """把一个窗口推迟到目标日期。
 
     一次做完三件事：
@@ -2200,7 +2205,7 @@ def cmd_postpone(args) -> int:
     vf = w.get("validFrom")
     vu = w.get("validUntil")
     due = w.get("dueDate")
-    changes: dict = {}
+    changes: dict[str, Any] = {}
 
     def _shift(d: str, delta: int) -> str:
         return (date.fromisoformat(d) + timedelta(days=delta)).isoformat()
@@ -2407,7 +2412,7 @@ def cmd_postpone(args) -> int:
 CANCELLED_REASON = "cancelled"
 
 
-def _write_routine(routine: dict, digest: str | None) -> str:
+def _write_routine(routine: dict[str, Any], digest: str | None) -> str:
     """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。
 
     写完必须顺手盖章（摘要 + 底稿副本）。盖章漏了，下一次 plan 就会把程序
@@ -2456,7 +2461,7 @@ def seal_routine(digest: str | None = None) -> None:
         pass  # 印章写不进去不影响提醒本身
 
 
-def audit_routine(routine: dict) -> list[str]:
+def audit_routine(routine: dict[str, Any]) -> list[str]:
     """时刻表被程序之外的东西改过吗？返回要报告给人的行（正常时为空）。"""
     try:
         if not seal_path().exists():
@@ -2494,7 +2499,7 @@ def audit_routine(routine: dict) -> list[str]:
     return [msg]
 
 
-def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:
+def _prune_expired_oneoffs(routine: dict[str, Any], today: str) -> list[str]:
     """删掉已经过期的一次性提醒条目，返回被删的 id。
 
     一次性窗口只存在于 validFrom~validUntil 那一天，过期后既不会再响、也不会
@@ -2511,14 +2516,14 @@ def _prune_expired_oneoffs(routine: dict, today: str) -> list[str]:
     return sorted(dead_ids)
 
 
-def _find_window(routine: dict, wid: str) -> dict | None:
+def _find_window(routine: dict[str, Any], wid: str) -> dict[str, Any] | None:
     for w in routine.get("alarmWindows", []) or []:
         if w["id"] == wid:
-            return w
+            return cast(dict[str, Any], w)
     return None
 
 
-def _mark_state(state: dict | None, wid: str, new_state: str, now: datetime, reason: str) -> str:
+def _mark_state(state: dict[str, Any] | None, wid: str, new_state: str, now: datetime, reason: str) -> str:
     """把今天 state 里某个窗口改成给定终态。返回结果标记。"""
     if not state:
         return "not_planned"
@@ -2541,7 +2546,7 @@ def _mark_state(state: dict | None, wid: str, new_state: str, now: datetime, rea
     return "changed"
 
 
-def cmd_set_time(args) -> int:
+def cmd_set_time(args: argparse.Namespace) -> int:
     """改窗口的起止时刻（HH:MM）。只写时刻表，下次 plan 生效（默认次日）。
 
     stdout 保持为空：由用户交互触发，不是定时任务，不该被投递出去。
@@ -2555,7 +2560,7 @@ def cmd_set_time(args) -> int:
         print(f"set-time: 时刻表里没有窗口 {args.window}", file=sys.stderr)
         return 4
 
-    def parse_hhmm(s, what):
+    def parse_hhmm(s: str, what: str) -> time | None:
         try:
             h, m = (int(x) for x in s.split(":"))
             if not (0 <= h <= 23 and 0 <= m <= 59):
@@ -2568,6 +2573,7 @@ def cmd_set_time(args) -> int:
     start = parse_hhmm(args.start, "start")
     if start is None:
         return 3
+    end: time | None
     if args.end is None:
         eh, em = (int(x) for x in w["end"].split(":"))
         end = time(eh, em)
@@ -2613,7 +2619,7 @@ def _parse_hhmm(value: str, what: str) -> time | None:
         return None
 
 
-def cmd_add_window(args) -> int:
+def cmd_add_window(args: argparse.Namespace) -> int:
     """新增或更新一个周期窗口；写入走 digest 守卫 + 统一印章。
 
     只改 rules/routines.json，不碰 state/alarms.json。默认下次 plan 生效；
@@ -2776,7 +2782,7 @@ def cmd_add_window(args) -> int:
     return 0
 
 
-def cmd_cancel(args) -> int:
+def cmd_cancel(args: argparse.Namespace) -> int:
     """取消一个安排。
 
     两层含义，按窗口类型自动判断：
@@ -2879,7 +2885,7 @@ def cmd_cancel(args) -> int:
     return 0
 
 
-def cmd_complete(args) -> int:
+def cmd_complete(args: argparse.Namespace) -> int:
     """完成一件事。
 
     语义 = 「做完了，以后不用提醒我」：记录确认 + 永久停用这个窗口。
@@ -2930,7 +2936,7 @@ def cmd_complete(args) -> int:
     return 0
 
 
-def cmd_disable(args) -> int:
+def cmd_disable(args: argparse.Namespace) -> int:
     """永久停用一个窗口（「以后别提醒我了」）。
 
     与 `cancel` 的区别：cancel 取消一个安排，disable 关掉一类提醒。
@@ -2972,7 +2978,7 @@ def cmd_disable(args) -> int:
     return 0
 
 
-def cmd_enable(args) -> int:
+def cmd_enable(args: argparse.Namespace) -> int:
     """重新启用一个被停用的窗口。"""
     digest = file_digest(ROUTINE)
     routine = load_routine()
@@ -2992,7 +2998,7 @@ def cmd_enable(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="rtc", description="RTC-kit 确定性核心")
     p.add_argument("--workspace", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -3181,7 +3187,7 @@ def main(argv=None) -> int:
         set_workspace(Path(args.workspace))
 
     try:
-        return args.func(args)
+        return cast(int, args.func(args))
     except Validation as e:
         print(f"校验失败：{e}", file=sys.stderr)
         return 3

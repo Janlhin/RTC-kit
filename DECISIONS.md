@@ -33,6 +33,7 @@
 - **背景**：首轮实测 35 个类型错误集中在「`load_state()` 可能返回 `None`」这类真实缺陷上；一次性全量 strict 会把行为改动与类型改动混在一个提交里。
 - **被采纳**：先修真实缺陷（`None` 收窄、缺注解、`except` 变量逃逸），配置随代码一起收紧；`TASKS.md` 登记剩余收紧项与机器判据。
 - **被否决**：① 直接 `# type: ignore` 全量压平——等于关掉通道；② 只对新增代码做检查、存量不查——存量正是缺陷密度最高的地方。
+- **后续（2026-11-21）**：8 批全部收完，`strict = true` 已提到 `[tool.mypy]` 顶层，不再有 per-module overrides；新增模块自动落在 strict 之下。
 - **影响**：`pyproject.toml` 的 `[tool.mypy]`；`code/*.py` 的注解与收窄。
 - **复审条件**：每完成一批注解，阈值上调一次；上调必须在 `DECISIONS.md` 留痕。
 
@@ -85,3 +86,23 @@
 - **被否决**：① `code/rtc/` 包结构（`__init__.py`）——脚本被拷到宿主目录平铺执行，加包会让 `python rtc.py` 失效；② 改测试或改调用方去适配新命名空间——本轮要求「149 条测试一条不改」。
 - **影响**：`code/` 五个文件、`install.py` 的拷贝清单（少拷一个模块，宿主的 `import rtc_core` 直接崩）、`code/README.md` 的文件表。
 - **复审条件**：`rtc_core.py` 仍是最大文件（约 1800 行）；若继续增长，按命令组再拆，但必须保持「一次一个 commit、拆前拆后输出逐字节一致」。
+
+## D-009 覆盖率阈值由「逐季上调」改为「直接落在目标值」
+
+- **日期**：2026-11-20
+- **决策**：语句阈值从 77% 提到 80%，并新增分支 70% 的独立判定（`scripts/check-coverage.ps1`），两者都由 `verify.ps1` 执行。D-005 的「逐季上调」提前结束。
+- **背景**：2026-11-20 实测语句 82%、分支 76%，已越过 80/70。继续停在 77% 等于给回归留了 5 个百分点（约 170 行）的余量——阈值低于实测值越多，越拦不住「慢慢变松」。
+- **被采纳**：语句阈值仍只写在 `pyproject.toml` 的 `fail_under`；分支阈值 coverage.py 没有配置项，写进 `scripts/check-coverage.ps1` 并读同一份实测数据判定。两条路径都拦：`coverage report` 与阈值脚本各判一次。
+- **被否决**：① 一次跳到 90%——当前局部空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%）会立刻变红，只能靠堆无断言用例刷分，正是「自证式测试」；② 只保留总阈值——总数会把局部空洞盖住，所以另开 T-003 按模块追；③ 装 `pytest-cov` 统一管阈值——为一条配置引入第二套测试入口，与「入口唯一」冲突。
+- **影响**：`pyproject.toml`、`scripts/check-coverage.ps1`、`scripts/verify.ps1`、`README.md` 已知限制、`TASKS.md` T-002 / T-003。
+- **复审条件**：局部空洞补齐后，按季度再上调（语句 85%、分支 80%）。
+
+## D-010 死代码门禁用 vulture，置信度取 60，测试目录不进扫描
+
+- **日期**：2026-11-20
+- **决策**：`vulture`（PyPI，MIT）作为死代码通道，命令固定为 `--min-confidence 60 --ignore-names row_factory --exclude code/tests`，接入 `verify` 静态段与 CI。
+- **背景**：仓库里曾有三个「看起来像配置、实际没人引用」的符号（`rrule_from_window`、`SCHEMA_VERSION`、`WINDOW_COLUMNS`），它们不会被 ruff 或 mypy 拦下——未被引用不等于写错。先按 `--min-confidence 80` 试跑，结果对「从未被调用的函数」根本不报（函数默认 60%），门禁形同虚设；降到 60 才抓到真货，代价是三类误报。
+- **被采纳**：60% + 两类豁免——`row_factory`（SQLite 按属性名动态取用，静态工具看不见）与 `code/tests`（测试基类靠继承使用，且测试本身就是入口，扫它只会制造噪音）。豁免写在命令行里、跟着 `verify` 走，不另建白名单文件。
+- **被否决**：① `--min-confidence 80`——首轮实测对真死函数零命中，等于没装；② 建 `vulture_whitelist.py`——多一个要维护的文件，且豁免项只有两条，命令行够用；③ 用 `pylint` 的未使用检查替代——为一条通道引入整套 pylint 与其配置，与「入口唯一」冲突。
+- **影响**：`pyproject.toml`（开发依赖）、`MANIFEST.md`（来源与许可）、`scripts/verify.ps1`、`.github/workflows/tests.yml`、`AGENTS.md`、`TASKS.md` T-005。
+- **复审条件**：豁免名单超过 3 条时，改为独立白名单文件；`vulture` 若出现回归版本，按依赖升级流程处理。

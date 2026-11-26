@@ -5,16 +5,18 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import rtc_core as core
 
 
-def _metrics_tables(con) -> None:
+def _metrics_tables(con: sqlite3.Connection) -> None:
     con.execute(
         """CREATE TABLE IF NOT EXISTS daily (
              date TEXT NOT NULL, window TEXT NOT NULL, label TEXT,
@@ -33,7 +35,7 @@ def _metrics_tables(con) -> None:
     )
 
 
-def metrics_sync(state: dict) -> int:
+def metrics_sync(state: dict[str, Any]) -> int:
     """把当天状态 + 历史 + 每日快照灌进 metrics.db，返回快照索引行数。
 
     这是**派生索引**，不是真相；真丢了下次 sync 能重建。
@@ -150,18 +152,18 @@ def metrics_dump() -> Path | None:
     return out
 
 
-def _last_week(today) -> tuple:
+def _last_week(today: date) -> tuple[date, date]:
     """上周一 ~ 上周日。周一才算「上周」结束，所以以本周一往前推。"""
     monday = today - timedelta(days=today.weekday())
     return monday - timedelta(days=7), monday - timedelta(days=1)
 
 
-def _week_key(d) -> str:
+def _week_key(d: date) -> str:
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
 
 
-def weekly_report(now) -> list[str] | None:
+def weekly_report(now: datetime) -> list[str] | None:
     """周一早上的一页小账：上周靠谱吗。
 
     只在周一输出；发过就记在 state/.weekly-last.json（ISO 周号），一天多条不重复。
@@ -232,7 +234,7 @@ def weekly_report(now) -> list[str] | None:
     return lines
 
 
-def _paused_days(start, end) -> int:
+def _paused_days(start: date, end: date) -> int:
     """上周被 pause 盖住的天数。读不到就当没暂停——宁可少说一句，不编。"""
     path = core.WORKSPACE / "state" / "paused.json"
     try:
@@ -247,7 +249,7 @@ def _paused_days(start, end) -> int:
     return (hi - lo).days + 1 if lo <= hi else 0
 
 
-def cmd_metrics(args) -> int:
+def cmd_metrics(args: argparse.Namespace) -> int:
     state = core.load_state()
     if not state:
         print("metrics: 没有状态文件", file=sys.stderr)
