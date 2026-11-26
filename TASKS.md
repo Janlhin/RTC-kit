@@ -28,7 +28,7 @@
 | T-010 | done | `rtc.py` 2788 行、8 个领域挤在一个文件，改一处容易误伤另一处 | 拆成 `rtc_core` / `rtc_archive` / `rtc_metrics` / `rtc_brief`，`rtc.py` 退成单命名空间薄壳（见 D-008），命令面零变化 | 149 条测试一条不改全绿；拆前/拆后 6 条命令输出逐字节一致；`rtc.py` 30 行 | 2026-11-16 | 2026-11-16 |
 | T-011 | done | 备份方案只差恢复文档：没有 `docs/RESTORE.md`，也没真删过 `alarms.json` 演练 | 写恢复文档并做一次删除恢复演练 | 隔离临时工作区实跑：`plan --now <ISO>` → 0、`backup --to <dir>` → 0；真删 `state/alarms.json` 后按 `docs/RESTORE.md` 第 1–5 步盖回；`status` / `status --json` / `history --month <当月>` / `schedule --month <当月>` 均 → 0，`planDate` / `rev` / 窗口列表（id、label、state、fireCount、expectFires）/ 文件指纹与备份时刻一致（实跑记录见 `docs/RESTORE.md` 6.1） | 2026-11-16 | 2026-11-27 |
 | T-012 | todo | 外部审计提出的锁实现（持久 sidecar + 操作系统持锁）尚未合并与实机验证 | 先停旧写手，再按两套锁协议不可重叠的前提合并并实测 | 两个进程并发写同一 `alarms.json`，一成一败且无静默丢写 → 0 | 2026-11-16 | — |
-| T-013 | todo | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段 → 0 | 2026-11-16 | — |
+| T-013 | done | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段，子键 `at`（上次成功时间）/ `written`（目标盘数）/ `git`（推送状态）/ `errors`（最近错误）→ 0；JSON 子键断言见 `code/tests/test_rtc.py` `TestBrief` | 2026-11-16 | 2026-11-27 |
 
 ## 待裁决台账
 
