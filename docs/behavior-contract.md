@@ -129,6 +129,18 @@ python rtc.py --workspace <dir> ack \
 - 恢复提示只有一条，走 `due` stdout；状态冲突未写成时不投递（沿用 due 静默口径）。
 - `due --bootstrap` 是宿主重启钩子的显式核对入口，不新增子命令；心跳新鲜或账本是今天时不伪造停摆。
 
+## 5c. 意图 vs 账本核对（issue #83）
+
+#78 补的是「账本 vs 计划」对账；本节补另一半：**用户已经说要取消，但账本没落地**。
+
+- **意图先行**：`cancel --window X` 在改动账本 / 时刻表**之前**，先往 `state/intents.json` 落一条取消意图；后续写入成败都不抹掉这条记录。
+- **幂等**：幂等键 = `(window_id, 日期)`；同一天重复 `cancel` 只记一条，跨日同窗口可另记一条。
+- **TTL 当天有效**：意图带 `requestedAt`，只在登记当天生效；次日自动失效，**不许永久压制**窗口——用户改主意后窗口要能重新正常响。
+- **成功即清**：账本被真正置 `cancelled`（或窗口已是终态）后，删掉对应意图。
+- **due 核对**：某窗口存在未落地意图（意图在、账本仍 `pending` / `ringing`）→ 这次 `due` **不响**（rc=0、零响应正文），攒一条告警「取消没生效，需人工确认」；告警复用 #78 的 `guard.json` 节流，同一窗口同一天只投一次。
+- **status**：列出未落地意图（「未落地的意图：N」并点名 window id）；`--json` 字段 `pending_intent_ids`。
+- **边界**：`ack` 侧同款核对（用户说「好了」但 ack 没落地）属 #17 P2，不在本契约范围。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |
@@ -158,12 +170,14 @@ python rtc.py --workspace <dir> ack \
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
 | 并发写不覆盖 | `TestPostponeRollbackPreservesConcurrentEdit`、`TestLockOwnership` |
 | 重启后按 `planDate` 补建 | `TestMainlineRegression` |
+| 未落地取消意图 → due 不响 + 节流告警 + status 点名 | `TestIntentGuard` |
 
 ## 8. 明确不做
 
 - Rules Engine 框架、进程内 Scheduler、宿主侧故障注入、BDD 运行框架
 - 断网 / 网关崩溃 / Agent 超时类测试：宿主侧，脚本观测不到，写进来就是永远红的测试
 - 自建重试队列：`due` 的下一个 tick 就是重试；真正的失败（投递层）由 `delivery` 记录，不静默重发
+- `ack` 侧的「意图 vs 账本」核对：用户回复「好了」但 ack 没落地（窗口继续 pending）的兜底，属 #17 P2，不在本契约范围；本契约只覆盖 `cancel` 一侧
 
 ### 早报的模型调用是唯一的例外（issue #60 方案 B）
 

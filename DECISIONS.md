@@ -126,3 +126,13 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-013 取消意图落独立旁路文件，当天 TTL，告警复用 #78 节流
+
+- **日期**：2026-11-27
+- **决策**：新增运行时旁路 `state/intents.json` 登记未落地的取消意图；幂等键 `(window_id, 日期)`，当天有效（跨日自动失效）；due 核对到未落地意图时不响，告警走既有 `emit_alert_once`（`guard.json` 按天去重）。
+- **背景**：issue #83 现场，坏 shim 让 `cancel` 退出码 127、一字未执行，账本全程 `pending`/`missed`，系统对「用户说过要停」没有任何留痕。#78 只做了账本 vs 计划对账，缺意图 vs 账本这一半。
+- **被采纳**：① 独立 JSON 旁路，与 `guard.json` / `heartbeat.json` 同类，不进 `contract/` schema、不进仓库树；② TTL 取当天，意图只在登记当天压制对应窗口；③ 告警复用 #78 既有节流机制，不另建第二套去重口径。
+- **被否决**：① 把意图字段塞进 `alarms.json`——账本由 plan 生成，cancel 失败时账本不变，意图无处可塞；② 新建一套意图告警节流——`guard.json` 已按天去重，两套口径会出现「一边报过、一边没报」；③ 意图永久有效——用户改主意后窗口会被无限期压制；④ ack 侧同款核对一并做——属 #17 P2，跨范围，单列后续提案。
+- **影响**：`code/rtc_core.py`（意图登记 / 清理 / 核对）、`code/rtc_brief.py`（status 展示）、`docs/behavior-contract.md` §5c、`docs/architecture.md`、`code/tests/`。
+- **复审条件**：ack 侧核对落地（#17 P2）时，评审本文件是否扩展为通用「用户意图簿」。
