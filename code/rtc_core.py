@@ -718,6 +718,9 @@ def emit_alert_once(key: str, line: str, now: datetime) -> bool:
 
 # ---------------------------------------------------------------- 取消意图旁路（#83）
 
+# 账本终态：落到这些状态的窗口不会再响，对应的取消意图视为已落地。
+INTENT_FINAL_STATES = frozenset({"acked", "delivered", "cancelled", "missed", "skipped"})
+
 
 def intents_path() -> Path:
     return WORKSPACE / "state" / "intents.json"
@@ -735,6 +738,20 @@ def _read_intents_raw() -> dict[str, list[dict[str, Any]]]:
     except (Validation, ValueError, TypeError, OSError):
         pass
     return {"intents": []}
+
+
+def load_cancel_intents(today: str) -> list[dict[str, Any]]:
+    """读今天仍有效的取消意图；跨日条目按 TTL 丢弃（意图当天有效，不永久压制窗口）。"""
+    out: list[dict[str, Any]] = []
+    for item in _read_intents_raw()["intents"]:
+        if str(item.get("date")) != today:
+            continue
+        if str(item.get("kind", "cancel")) != "cancel":
+            continue
+        if not item.get("window"):
+            continue
+        out.append(item)
+    return out
 
 
 def register_cancel_intent(window: str, day_iso: str, now: datetime) -> None:
@@ -769,6 +786,21 @@ def clear_cancel_intent(window: str, day_iso: str) -> None:
         atomic_write(intents_path(), {"date": day_iso, "intents": entries}, expected_rev=None)
     except OSError as e:
         print(f"intent: 意图清理失败 {e}", file=sys.stderr)
+
+
+def pending_cancel_intents(state: dict[str, Any] | None, today: str) -> list[dict[str, Any]]:
+    """未落地的取消意图：意图是今天的，但账本对应窗口还在进行态（或压根没进账本）。
+
+    窗口不在账本里也算未落地——cancel 当时就没写进去（#83 现场：坏 shim 退出 127，
+    账本全程 pending/missed）。终态窗口不再响，对应意图不再列入。
+    """
+    ledger = {w.get("id"): w for w in (state or {}).get("windows", [])}
+    pending: list[dict[str, Any]] = []
+    for item in load_cancel_intents(today):
+        w = ledger.get(item["window"])
+        if w is None or w.get("state") not in INTENT_FINAL_STATES:
+            pending.append(item)
+    return pending
 
 
 # ---------------------------------------------------------------- 日程快照
@@ -2148,6 +2180,9 @@ def _due_eval(
                     )
                 )
 
+    # 意图 vs 账本：意图在、账本仍进行态 → 这一窗不响，攒一条节流告警（#83）。
+    stuck_ids = {it["window"] for it in pending_cancel_intents(state, today)}
+
     rev = int(state["rev"])
     changed = False
 
@@ -2192,6 +2227,16 @@ def _due_eval(
                     w["state"] = "skipped"
                     w["missedReason"] = "covered_by_receipt"
                 changed = True
+                continue
+            if w["id"] in stuck_ids:
+                # 取消意图没落地：这一窗本次不响；告警攒着，状态写定论后再投递，
+                # 走 #78 的 guard.json 节流，同一窗口当天只报一次。
+                pending.append(
+                    (
+                        "cancel-stuck:" + w["id"],
+                        f"⚠️ {w['id']} 的取消没生效，需人工确认：已登记取消意图，账本仍是 {w['state']}",
+                    )
+                )
                 continue
             hit = w
             break
