@@ -1773,8 +1773,15 @@ def _due_eval(
     old = state
     today = now.date().isoformat()
     errors: list[str] = []
+    ledger_stale = old is None or old.get("planDate") != today
     recovery_report = recovery.build_report(
-        routine, old, now, outage_attempt, bootstrap=bool(getattr(args, "bootstrap", False)), errors=errors
+        routine,
+        old,
+        now,
+        outage_attempt,
+        bootstrap=bool(getattr(args, "bootstrap", False)),
+        ledger_stale=ledger_stale,
+        errors=errors,
     )
     rebuilt = old is None or old.get("planDate") != today
     if not state or state.get("planDate") != today:

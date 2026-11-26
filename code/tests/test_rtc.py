@@ -5244,6 +5244,17 @@ class TestRecovery(RtcCase):
         self.assertEqual(self.q("SELECT kind FROM events WHERE kind='recovery'"), [])
         self.assertFalse(any(h.get("missedReason") == "host_outage" for h in self.state().get("history", [])))
 
+    def test_same_day_stale_heartbeat_is_not_recovery(self):
+        # 同一天里稀疏地手动跑 due，心跳陈旧但账本是今天：不算停摆，不归档不投递
+        self.write_routine(self.two_window_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.write_hb("2026-11-16T09:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-16T12:10:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("刚恢复", out)
+        self.assertEqual(self.q("SELECT kind FROM events WHERE kind='recovery'"), [])
+        self.assertFalse(any(h.get("missedReason") == "host_outage" for h in self.state().get("history", [])))
+
     def test_bootstrap_on_fresh_heartbeat_is_silent(self):
         self.write_routine(base_routine())
         self.cli("plan", now="2026-11-16T06:00:00+08:00")
@@ -5295,11 +5306,16 @@ class TestRecovery(RtcCase):
         now = datetime.fromisoformat("2026-11-11T09:00:00+08:00")
         fresh = now - timedelta(minutes=5)
         stale = now - timedelta(minutes=120)
-        self.assertFalse(recovery.detect_outage(now, fresh, bootstrap=False))
-        self.assertTrue(recovery.detect_outage(now, stale, bootstrap=False))
-        self.assertFalse(recovery.detect_outage(now, None, bootstrap=False))
-        self.assertTrue(recovery.detect_outage(now, None, bootstrap=True))
-        self.assertFalse(recovery.detect_outage(now, fresh, bootstrap=True))
+        # 账本滞后（跨日）才是确定性证据
+        self.assertFalse(recovery.detect_outage(now, fresh, bootstrap=False, ledger_stale=True))
+        self.assertTrue(recovery.detect_outage(now, stale, bootstrap=False, ledger_stale=True))
+        self.assertFalse(recovery.detect_outage(now, None, bootstrap=False, ledger_stale=True))
+        self.assertTrue(recovery.detect_outage(now, None, bootstrap=True, ledger_stale=True))
+        self.assertFalse(recovery.detect_outage(now, fresh, bootstrap=True, ledger_stale=True))
+        # 账本是今天的：心跳再陈旧也不判停摆（同日稀疏 tick / 有意静默不算停摆）
+        self.assertFalse(recovery.detect_outage(now, stale, bootstrap=False, ledger_stale=False))
+        self.assertFalse(recovery.detect_outage(now, stale, bootstrap=True, ledger_stale=False))
+        self.assertFalse(recovery.detect_outage(now, None, bootstrap=True, ledger_stale=False))
 
     def test_human_span_and_message_variants(self):
         import rtc_recovery as recovery
@@ -5327,9 +5343,13 @@ class TestRecovery(RtcCase):
         routine = self.two_window_routine()
         now = datetime.fromisoformat("2026-11-11T09:00:00+08:00")
         attempt = datetime.fromisoformat("2026-11-09T12:40:00+08:00")
-        missing = recovery.build_report(routine, None, now, attempt, bootstrap=False, errors=[])
+        missing = recovery.build_report(
+            routine, None, now, attempt, bootstrap=False, ledger_stale=True, errors=[]
+        )
         self.assertEqual(missing.missed, [])
-        bad = recovery.build_report(routine, {"planDate": "坏日期"}, now, attempt, bootstrap=False, errors=[])
+        bad = recovery.build_report(
+            routine, {"planDate": "坏日期"}, now, attempt, bootstrap=False, ledger_stale=True, errors=[]
+        )
         self.assertEqual(bad.missed, [])
 
 

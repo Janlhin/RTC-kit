@@ -40,14 +40,20 @@ class RecoveryReport:
     already_handled: bool = False
 
 
-def detect_outage(now: datetime, attempt_at: datetime | None, *, bootstrap: bool) -> bool:
+def detect_outage(now: datetime, attempt_at: datetime | None, *, bootstrap: bool, ledger_stale: bool) -> bool:
     """是否判定为「刚从停摆恢复」。
 
+    证据要两条凑齐：心跳陈旧 **且** 账本滞后于今天（旧 planDate 还没补建）。
+    只凭心跳陈旧不够——同一天里稀疏地手动跑几次 due、或有意静默，心跳也会
+    陈旧，但账本是今天的，判成停摆就是误报。
+
     - ``bootstrap=True``：宿主重启钩子 / agent 显式唤醒，不等下一个 cron tick，
-      现在就跑一次核对；但仍要讲证据——心跳新鲜说明宿主一直在跑，不能伪造停摆。
-    - 没有 ``attemptAt``（心跳文件缺失或损坏）：自动判定不猜，按无证据处理；
-      显式 bootstrap 才把它当作「需要核对账本」。
+      现在就跑一次核对；账本新鲜时仍不伪造停摆。
+    - 没有 ``attemptAt``（心跳文件缺失或损坏）：自动判定不猜；显式 bootstrap
+      且账本滞后才当作「需要核对账本」。
     """
+    if not ledger_stale:
+        return False
     if attempt_at is None:
         return bool(bootstrap)
     return now - attempt_at > timedelta(minutes=RECOVERY_STALE_MIN)
@@ -139,10 +145,11 @@ def build_report(
     attempt_at: datetime | None,
     *,
     bootstrap: bool,
+    ledger_stale: bool,
     errors: list[str],
 ) -> RecoveryReport:
     """判定停摆并算出归档清单。只读，不落盘。"""
-    outage = detect_outage(now, attempt_at, bootstrap=bootstrap)
+    outage = detect_outage(now, attempt_at, bootstrap=bootstrap, ledger_stale=ledger_stale)
     if not outage:
         return RecoveryReport(False, attempt_at, 0)
     gap = int((now - attempt_at).total_seconds() // 60) if attempt_at else 0
