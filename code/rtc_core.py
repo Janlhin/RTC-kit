@@ -37,6 +37,7 @@ import rtc_archive as archive
 import rtc_brief as brief
 import rtc_history as hist
 import rtc_metrics as metrics
+import rtc_recovery as recovery
 
 if hasattr(sys.stdout, "reconfigure"):
     # 标准库类型里 TextIO 没有 reconfigure；实际解释器上是 TextIOWrapper。
@@ -277,6 +278,43 @@ def _record_history(
             )
     except (sqlite3.Error, OSError, ValueError, TypeError) as e:
         print(f"history: 写库失败（{type(e).__name__}: {e}），本轮历史可能少一条", file=sys.stderr)
+
+
+def _apply_recovery(
+    state: dict[str, Any],
+    routine: dict[str, Any],
+    now: datetime,
+    report: recovery.RecoveryReport,
+    *,
+    rebuilt: bool,
+) -> str:
+    """把停摆期间错过的窗口归档进 history，落 history.db，返回恢复提示。
+
+    归档是确定性的账本修复，不依赖模型在线；同一停摆身份只做一次（调用方已判
+    ``already_handled``）。写冲突按 due 既有口径冒泡成 ``_DueConflict``，本函数
+    不吞。
+    """
+    identity = recovery.outage_identity(report.attempt_at)
+    if report.missed:
+        rev = int(state["rev"])
+        history = list(state.get("history") or [])
+        known = {(h.get("date"), h.get("id")) for h in history}
+        for m in report.missed:
+            if (m["date"], m["id"]) not in known:
+                history.append(m)
+        cutoff = (now.date() - timedelta(days=14)).isoformat()
+        state["history"] = [h for h in history if str(h.get("date", "")) >= cutoff]
+        state["rev"] = rev + 1
+        atomic_write(STATE, state, expected_rev=rev)
+        _record_history(state, routine, kind="recovery", window="-", note=identity, ts=now)
+        hist.import_state_history(state, routine)
+    else:
+        # 停摆但没有可归档的窗口（同日恢复 / 合法空日）：仍留一条事件作为证据。
+        try:
+            hist.log_event("recovery", "-", ts=now, day=state.get("planDate"), note=identity)
+        except (sqlite3.Error, OSError, ValueError, TypeError) as e:
+            print(f"history: 写库失败（{type(e).__name__}: {e}），恢复事件可能少一条", file=sys.stderr)
+    return recovery.format_message(report, rebuilt=rebuilt)
 
 
 def atomic_write(
@@ -1703,7 +1741,7 @@ def cmd_due(args: argparse.Namespace) -> int:
     hb_attempt_before = read_heartbeat_attempt()
     touch_heartbeat(now)  # attemptAt：进入即记，失败也留痕
     try:
-        rc = _due_eval(args, routine, tz, now)
+        rc = _due_eval(args, routine, tz, now, outage_attempt=hb_attempt_before)
     except _DueConflict:
         # 冲突时判定确实跑完了（只是账本没写成）：按 #67 口径，心跳仍记 ok——
         # 心跳回答的是「调度器还在不在判」，不是「这次写没写成」。
@@ -1722,10 +1760,23 @@ def cmd_due(args: argparse.Namespace) -> int:
     return rc
 
 
-def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: timezone, now: datetime) -> int:
+def _due_eval(
+    args: argparse.Namespace,
+    routine: dict[str, Any],
+    tz: timezone,
+    now: datetime,
+    *,
+    outage_attempt: datetime | None = None,
+) -> int:
     """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
+    old = state
     today = now.date().isoformat()
+    errors: list[str] = []
+    recovery_report = recovery.build_report(
+        routine, old, now, outage_attempt, bootstrap=bool(getattr(args, "bootstrap", False)), errors=errors
+    )
+    rebuilt = old is None or old.get("planDate") != today
     if not state or state.get("planDate") != today:
         try:
             rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))
@@ -1755,13 +1806,23 @@ def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: timezone, n
     #
     # 但告警先攒着、不立刻投递：状态写入可能冲突，而契约（#4 §11）要求冲突时
     # stdout 必须为空。先喊一嗓子「有事」再发现压根没写进账本，等于对用户撒谎。
+    recovery_line = ""
+    if recovery_report.outage and not recovery_report.already_handled:
+        for line in errors:
+            print(f"due: 恢复归档跳过坏窗口（{line}）", file=sys.stderr)
+        recovery_line = _apply_recovery(state, routine, now, recovery_report, rebuilt=rebuilt)
+
     pending: list[tuple[str, str]] = []
 
     def flush_alerts() -> None:
         """状态操作定论之后再投递；冲突路径不调用它（PR #79 复审 1）。"""
+        nonlocal recovery_line
         for key, line in pending:
             emit_alert_once(key, line, now)
         pending.clear()
+        if recovery_line:
+            print(recovery_line)
+            recovery_line = ""
 
     if not pause_covers(load_pause(), now.date()):
         skipped: list[str] = []
@@ -3010,6 +3071,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sd = sub.add_parser("due")
     sd.add_argument("--now")
+    sd.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="宿主重启后显式触发一次停摆恢复核对（agent 唤醒入口；不依赖心跳陈旧度）",
+    )
     sd.set_defaults(func=cmd_due)
 
     ssim = sub.add_parser("simulate", help="预演某一天会响几次（只读，不改任何文件）")
