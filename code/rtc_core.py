@@ -2120,8 +2120,38 @@ def cmd_check(args: argparse.Namespace) -> int:
 POSTPONE_REASON = "postponed"
 
 
-def _load_postpone_state() -> dict[str, Any] | None:
-    """Validate only ledger fields postpone consumes; leave other commands unchanged."""
+# 账本与今天的关系分类。postpone 只允许动「今天」的账本；口径见 cmd_postpone
+# 的陈旧账本分支（issue #87 第 2 条，方案 A）。换备选方案 B 时只改这一段分类与出口。
+_LEDGER_CURRENT = "current"
+_LEDGER_STALE = "stale"
+_LEDGER_INVALID = "invalid"
+
+
+def _classify_postpone_ledger_day(state: dict[str, Any], today_iso: str) -> str:
+    """账本属于今天、更早一天，还是日期字段不可用。
+
+    缺失/空账本由调用方按 None 处理，不进这里。
+    """
+    plan_date = state.get("planDate")
+    if not isinstance(plan_date, str) or not plan_date:
+        return _LEDGER_INVALID
+    try:
+        date.fromisoformat(plan_date)
+    except ValueError:
+        return _LEDGER_INVALID
+    if plan_date > today_iso:
+        return _LEDGER_INVALID
+    if plan_date < today_iso:
+        return _LEDGER_STALE
+    return _LEDGER_CURRENT
+
+
+def _load_postpone_state(today_iso: str | None = None) -> dict[str, Any] | None:
+    """Validate only ledger fields postpone consumes; leave other commands unchanged.
+
+    传 `today_iso` 时连带校验 `planDate`：缺字段 / 非法日期 / 相对今天是未来的账本，
+    在时刻表写入之前就拒绝，绝不被当成「昨天的旧账」静默放过（issue #87 第 2 条）。
+    """
     state = load_state()
     if not state:
         return None
@@ -2142,6 +2172,16 @@ def _load_postpone_state() -> dict[str, Any] | None:
             or not isinstance(window.get("state"), str)
         ):
             raise Validation("ledger windows require string id and state fields")
+    if today_iso is not None:
+        plan_date = state.get("planDate")
+        if not isinstance(plan_date, str) or not plan_date:
+            raise Validation("ledger planDate must be a YYYY-MM-DD string")
+        try:
+            date.fromisoformat(plan_date)
+        except ValueError as e:
+            raise Validation("ledger planDate must be YYYY-MM-DD") from e
+        if plan_date > today_iso:
+            raise Validation("ledger planDate is in the future relative to today")
     return state
 
 
@@ -2263,7 +2303,7 @@ def cmd_postpone(args: argparse.Namespace) -> int:
 
     # Validate the ledger before committing any schedule change.
     try:
-        _load_postpone_state()
+        _load_postpone_state(today.isoformat())
     except (OSError, Validation) as e:
         print(f"postpone: ledger preflight failed; schedule unchanged: {e}", file=sys.stderr)
         return 3
@@ -2293,14 +2333,21 @@ def cmd_postpone(args: argparse.Namespace) -> int:
 
     # Reload after the routine commit: plan/due may have created or changed the ledger.
     try:
-        state = _load_postpone_state()
+        state = _load_postpone_state(today.isoformat())
     except (OSError, Validation) as e:
         return partial_failure(e)
 
     # --- 2. 今天这一次不再响
+    # 账本必须属于今天才允许改当日条目：更早一天的旧账连 occurrence 带它那天的快照
+    # 都原样保留，不能把昨天的记录改成 skipped（issue #87 第 2 条）。
     outcome = "not_planned"
     history_error: Exception | None = None
-    if state:
+    ledger_day = (
+        _classify_postpone_ledger_day(state, today.isoformat()) if state is not None else _LEDGER_CURRENT
+    )
+    if state is not None and ledger_day == _LEDGER_STALE:
+        outcome = "stale_ledger"
+    if state is not None and ledger_day == _LEDGER_CURRENT:
         srev = int(state["rev"])
         hit = next((x for x in state.get("windows", []) if x["id"] == args.window), None)
         if hit is None:
@@ -2395,10 +2442,14 @@ def cmd_postpone(args: argparse.Namespace) -> int:
         )
         return 3
 
+    stale_date = state.get("planDate") if state is not None else "?"
     notes = {
         "skipped": "今天这一次已跳过",
         "already_fired": "今天这一轮已经结束，明天会再提醒一次",
         "not_planned": "今天没有这一次的计划，明天第一次响",
+        "stale_ledger": (
+            f"今日账本还是 {stale_date} 的旧账，未改动当日条目；时刻表已调整，等 plan 生成今天的安排"
+        ),
     }
     print(
         f"postpone: {args.window} → {target.isoformat()}（同一时刻），{notes[outcome]}",
