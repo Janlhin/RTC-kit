@@ -753,6 +753,24 @@ def register_cancel_intent(window: str, day_iso: str, now: datetime) -> None:
         print(f"intent: 取消意图登记失败 {e}", file=sys.stderr)
 
 
+def clear_cancel_intent(window: str, day_iso: str) -> None:
+    """账本真正落地取消后删掉对应意图；文件缺失 / 损坏都按无事处理。"""
+    raw = _read_intents_raw()
+    if not raw["intents"]:
+        return
+    entries = [
+        dict(item)
+        for item in raw["intents"]
+        if not (str(item.get("window")) == window and str(item.get("date")) == day_iso)
+    ]
+    if len(entries) == len(raw["intents"]):
+        return
+    try:
+        atomic_write(intents_path(), {"date": day_iso, "intents": entries}, expected_rev=None)
+    except OSError as e:
+        print(f"intent: 意图清理失败 {e}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------- 日程快照
 
 
@@ -3287,6 +3305,11 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             truncated = True  # 已经到期的安排，截断后等于不再生成
     if truncated:
         _write_routine(routine, digest)
+
+    # 账本已真正落到终态（changed 写入成功 / 本来就是终态）→ 意图落地，删掉记录。
+    # 冲突回 2、账本里没这个窗口（not_planned）时意图保留，留给 due 核对告警。
+    if outcome in {"changed", "already_final"}:
+        clear_cancel_intent(args.window, today)
 
     if outcome == "already_final":
         note = "这一轮已经结束了"
