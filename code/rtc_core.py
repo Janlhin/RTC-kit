@@ -709,6 +709,19 @@ def fill_snapshot_results(day_iso: str, results: dict[str, Any]) -> bool:
     return True
 
 
+def existing_snapshot_results(day_iso: str) -> dict[str, Any]:
+    """读回当天快照已有的 results：重建剩余计划时不抹掉无关的执行结果。"""
+    path = SCHEDULE_DIR / f"{day_iso}.json"
+    if not path.exists():
+        return {}
+    try:
+        snap = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    results = snap.get("results")
+    return results if isinstance(results, dict) else {}
+
+
 def write_schedule_snapshot(snap: dict[str, Any]) -> Path:
     """原子写一份每日快照。永久保留，不做清理。"""
     d = SCHEDULE_DIR
@@ -2146,6 +2159,16 @@ def _classify_postpone_ledger_day(state: dict[str, Any], today_iso: str) -> str:
     return _LEDGER_CURRENT
 
 
+def _is_postponed_today(window: dict[str, Any]) -> bool:
+    """当天被 postpone 推迟的窗口。
+
+    快照的 windows 是「剩余计划」：推迟的窗口从这里统一排除；它的执行结果仍
+    留在 results / history，证据不抹（issue #87 第 3 条）。只认 postponed 原因，
+    其它 skipped（停用 / 日期类型 / 过期等）保持可见。
+    """
+    return window.get("state") == "skipped" and window.get("missedReason") == POSTPONE_REASON
+
+
 def _load_postpone_state(today_iso: str | None = None) -> dict[str, Any] | None:
     """Validate only ledger fields postpone consumes; leave other commands unchanged.
 
@@ -2415,14 +2438,15 @@ def cmd_postpone(args: argparse.Namespace) -> int:
         # skipped 只在「今天有计划且该窗口还在跑」时才出现
         assert state is not None
         try:
-            rest = [
-                x
-                for x in state.get("windows", [])
-                if not (x["id"] == args.window and x.get("state") == "skipped")
-            ]
+            rest = [x for x in state.get("windows", []) if not _is_postponed_today(x)]
             write_schedule_snapshot(
                 schedule_snapshot(
-                    routine, state.get("planKind", "workday"), rest, state["planDate"], now.isoformat()
+                    routine,
+                    state.get("planKind", "workday"),
+                    rest,
+                    state["planDate"],
+                    now.isoformat(),
+                    results=existing_snapshot_results(state["planDate"]),
                 )
             )
         except OSError as e:
