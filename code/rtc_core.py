@@ -47,6 +47,9 @@ WORKSPACE = Path(os.environ.get("RTC_WORKSPACE") or Path.cwd())
 
 STATE = WORKSPACE / "state" / "alarms.json"
 
+# 预排的次日账本：今天仍用 STATE，跨日第一轮 due 把它激活。
+NEXT_STATE = WORKSPACE / "state" / "alarms.next.json"
+
 ROUTINE = WORKSPACE / "rules" / "routines.json"
 
 DB = WORKSPACE / "state" / "metrics.db"
@@ -104,9 +107,10 @@ def set_workspace(path: Path) -> None:
     所有派生路径必须在这里一起更新——漏掉任何一个，命令就会写到别处
     （曾经踩过：快照目录漏更新，结果写到进程 cwd 下）。
     """
-    global WORKSPACE, STATE, ROUTINE, DB, SCHEDULE_DIR
+    global WORKSPACE, STATE, ROUTINE, DB, SCHEDULE_DIR, NEXT_STATE
     WORKSPACE = path
     STATE = WORKSPACE / "state" / "alarms.json"
+    NEXT_STATE = WORKSPACE / "state" / "alarms.next.json"
     ROUTINE = WORKSPACE / "rules" / "routines.json"
     DB = WORKSPACE / "state" / "metrics.db"
     SCHEDULE_DIR = WORKSPACE / "state" / "schedule"
@@ -1498,6 +1502,154 @@ def cmd_delivery_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def _carry_windows_from_previous(
+    old: dict[str, Any] | None, windows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """把昨天的清单勾选与一次性 seq 带到新一天的窗口上。"""
+    prev_windows = {x["id"]: x for x in (old or {}).get("windows", [])}
+    for w in windows:
+        prev = prev_windows.get(w["id"]) or {}
+        _migrate_checklist(prev, w)
+        if prev.get("ocid") and prev["ocid"] == w.get("ocid"):
+            w["seq"] = int(prev.get("seq") or 0) + (1 if prev.get("start") != w.get("start") else 0)
+    return windows
+
+
+def _build_prebuilt_state(
+    routine: dict[str, Any],
+    target: date,
+    now: datetime,
+    old: dict[str, Any] | None,
+    prev_prebuilt: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    """构造 D+1 的账本，但先不激活；激活发生在跨日第一轮 due。"""
+    kind = plan_kind(target, routine)
+    errors: list[str] = []
+    fresh = [] if day_disabled(routine, kind) else build_windows(routine, target, kind, now, errors=errors)
+    windows = _carry_windows_from_previous(old, fresh)
+    state = {
+        "version": 1,
+        "rev": int((prev_prebuilt or {}).get("rev", 0)) + 1,
+        "timezone": routine.get("timezone", "Asia/Shanghai"),
+        "planDate": target.isoformat(),
+        "planKind": kind,
+        "generatedBy": "rtc-plan:prebuilt",
+        "generatedAt": now.isoformat(),
+        "windows": windows,
+        "history": list((old or {}).get("history", [])),
+    }
+    return state, errors
+
+
+def _write_prebuilt_plan(routine: dict[str, Any], target: date, now: datetime, *, quiet: bool = False) -> int:
+    """把 D+1 账本写到 NEXT_STATE；今天仍在用的 STATE 一根手指都不碰。"""
+    old = load_state()
+    prev_prebuilt = load_json(NEXT_STATE) if NEXT_STATE.exists() else None
+    if prev_prebuilt is not None and not isinstance(prev_prebuilt, dict):
+        raise Validation(f"{NEXT_STATE} 顶层应是对象")
+    state, errors = _build_prebuilt_state(routine, target, now, old, prev_prebuilt)
+    atomic_write(
+        NEXT_STATE,
+        state,
+        expected_rev=int(prev_prebuilt["rev"]) if prev_prebuilt else None,
+    )
+    if not quiet:
+        total = sum(int(w["expectFires"]) for w in state["windows"])
+        print(
+            f"plan: 已预排 {target.isoformat()} {state['planKind']} "
+            f"{len(state['windows'])} 窗口 / {total} 次（跨日第一轮 due 激活）",
+            file=sys.stderr,
+        )
+        for msg in errors:
+            print(f"⚠️ 预排时跳过了窗口（{msg}）：修好后重跑 plan --for-date", file=sys.stderr)
+    return 0
+
+
+def _prebuild_tomorrow_safely(routine: dict[str, Any], now: datetime) -> None:
+    """正常 plan 结束后顺手排明天；失败只留诊断，绝不影响今天。"""
+    try:
+        _write_prebuilt_plan(routine, now.date() + timedelta(days=1), now, quiet=True)
+    except (Conflict, Validation, OSError, ValueError, TypeError) as e:
+        print(f"plan: 预排次日失败（{type(e).__name__}: {e}），不影响今天", file=sys.stderr)
+
+
+def _promote_prebuilt_plan(routine: dict[str, Any], now: datetime) -> bool:
+    """跨日第一轮：把昨天的预排账本激活成今天的 STATE。"""
+    if not NEXT_STATE.exists():
+        return False
+    nxt = load_json(NEXT_STATE)
+    if not isinstance(nxt, dict):
+        raise Validation(f"{NEXT_STATE} 顶层应是对象")
+    today = now.date().isoformat()
+    nxt_date = nxt.get("planDate")
+    if not isinstance(nxt_date, str):
+        raise Validation(f"{NEXT_STATE} 的 planDate 不是字符串")
+    if nxt_date < today:
+        # 过期预排：留着只会挡住明天，直接丢掉。
+        NEXT_STATE.unlink(missing_ok=True)
+        return False
+    if nxt_date != today:
+        return False
+
+    old = load_state()
+    if old and old.get("planDate") == today:
+        # 今天已经有激活账本，预排是重复件，不覆盖。
+        return False
+
+    windows = _carry_windows_from_previous(old, list(nxt.get("windows") or []))
+    planned = windows
+    paused = pause_covers(load_pause(), now.date())
+    if paused:
+        windows = []
+
+    history = (
+        rollover(old, today) if old and old.get("planDate") != today else list((old or {}).get("history", []))
+    )
+    state = {
+        "version": 1,
+        "rev": int((old or {}).get("rev", 0)) + 1,
+        "timezone": nxt.get("timezone") or routine.get("timezone", "Asia/Shanghai"),
+        "planDate": today,
+        "planKind": nxt.get("planKind") or plan_kind(now.date(), routine),
+        "generatedBy": "rtc-plan:prebuilt",
+        "generatedAt": now.isoformat(),
+        "windows": windows,
+        "history": history,
+    }
+    try:
+        atomic_write(STATE, state, expected_rev=int(old["rev"]) if old else None)
+    except Conflict as e:
+        raise _DueConflict(str(e)) from e
+
+    with contextlib.suppress(OSError):
+        NEXT_STATE.unlink(missing_ok=True)
+    _record_history(state, routine, kind="plan", ts=now)
+
+    if old and old.get("planDate") != today:
+        prev_results = {
+            w["id"]: {
+                "state": w.get("state"),
+                "fires": w.get("fireCount", 0),
+                "ackedAt": w.get("ackedAt"),
+                "missedReason": w.get("missedReason"),
+                "label": w.get("label"),
+                "expect": w.get("expectFires", 0),
+            }
+            for w in old.get("windows", [])
+        }
+        if prev_results:
+            fill_snapshot_results(old["planDate"], prev_results)
+
+    try:
+        snap = schedule_snapshot(routine, state["planKind"], planned, today, now.isoformat())
+        if paused:
+            snap["paused"] = True
+        write_schedule_snapshot(snap)
+    except OSError as e:
+        print(f"schedule: 预排快照写入失败 {e}", file=sys.stderr)
+    return True
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     routine = load_routine()
     # 早报只能选一种输出方式：单窗口（due 直接出稿）或双窗口（模型先写 + 兜底）。
@@ -1513,9 +1665,22 @@ def cmd_plan(args: argparse.Namespace) -> int:
     now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
     today = now.date().isoformat()
 
+    for_date = getattr(args, "for_date", None)
+    if for_date:
+        try:
+            target = date.fromisoformat(for_date)
+        except ValueError:
+            print(f"plan: --for-date 不是合法日期：{for_date}", file=sys.stderr)
+            return 3
+        if target != now.date() + timedelta(days=1):
+            print("plan: --for-date 只支持预排明天（D+1），避免预排槽位被更远日期占住", file=sys.stderr)
+            return 3
+        return _write_prebuilt_plan(routine, target, now)
+
     old = load_state()
     if old and old.get("planDate") == today and not args.force:
         print(f"plan: {today} 已存在，跳过（rev={old.get('rev')}）", file=sys.stderr)
+        _prebuild_tomorrow_safely(routine, now)
         return 0
 
     # 暂停到期（或当天已过 until）就自动恢复，并把「停了多少」补报一次
@@ -1679,6 +1844,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             print(line)
     except (OSError, ValueError, TypeError, sqlite3.Error) as e:
         print(f"weekly: 周报生成失败 {type(e).__name__}: {e}", file=sys.stderr)
+    _prebuild_tomorrow_safely(routine, now)
     return 0
 
 
@@ -1726,6 +1892,16 @@ def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: timezone, n
     """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
     today = now.date().isoformat()
+    if not state or state.get("planDate") != today:
+        # 昨天 06:00 的 plan 会把今天的账本先预排好；跨日第一轮直接激活，
+        # 这样 00:xx 的窗口在 06:00 之前就已经存在（issue #75）。
+        try:
+            promoted = _promote_prebuilt_plan(routine, now)
+        except Validation as e:
+            print(f"due: 预排账本不可用（{e}），改为现场生成今天计划", file=sys.stderr)
+            promoted = False
+        if promoted:
+            state = load_state()
     if not state or state.get("planDate") != today:
         try:
             rc = cmd_plan(argparse.Namespace(now=now.isoformat(), force=False))
@@ -3003,9 +3179,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workspace", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("plan")
+    sp = sub.add_parser("plan", help="生成今天账本；默认顺手预排明天")
     sp.add_argument("--now")
     sp.add_argument("--force", action="store_true")
+    sp.add_argument("--for-date", help="只预排指定日期（只能是明天）")
     sp.set_defaults(func=cmd_plan)
 
     sd = sub.add_parser("due")
