@@ -20,8 +20,14 @@ try {
     $hits = @()
     foreach ($p in $patterns) {
         $found = & git grep -n -E -- $p
-        if ($LASTEXITCODE -eq 0 -and $found) {
-            $hits += $found
+        if ($LASTEXITCODE -eq 0) {
+            if ($found) { $hits += $found }
+        }
+        elseif ($LASTEXITCODE -gt 1) {
+            # git grep：1 = 没有匹配（正常），≥2 = 读取失败（仓库坏了 / 权限 / 锁）
+            # 读取失败不能当成「没有标记」放行，否则门禁在最需要它的时候失声。
+            [Console]::Error.WriteLine("git grep 读取失败（exit $LASTEXITCODE）：无法确认是否残留冲突标记")
+            exit 1
         }
     }
 
