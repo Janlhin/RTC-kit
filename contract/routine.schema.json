@@ -118,6 +118,11 @@
           "format": "date",
           "description": "该窗口到哪一天失效（含）。省略 = 无限期。一次性提醒 = validFrom 与 validUntil 同日"
         },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "事件版本号：一次性提醒改期时 +1，导出的 .ics SEQUENCE 用它。只由程序写入，不要手改"
+        },
         "checklist": {
           "type": "array",
           "items": {
