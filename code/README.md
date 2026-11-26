@@ -9,7 +9,7 @@
 | `rtc_archive.py` | 每日多盘 zip 备份、按天 git 归档 | 仅标准库 |
 | `rtc_metrics.py` | 指标账本：建表 / 同步 / 导出 / report | 仅标准库 |
 | `rtc_history.py` | 执行历史的唯一真相源：`state/history.db` 四表（windows / daily / checklist / events）、同步、事件、回填 | 仅标准库 |
-| `rtc_recovery.py` | 停摆恢复：陈旧心跳识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
+| `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 

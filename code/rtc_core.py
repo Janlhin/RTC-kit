@@ -3081,7 +3081,7 @@ def main(argv: list[str] | None = None) -> int:
     sd.add_argument(
         "--bootstrap",
         action="store_true",
-        help="宿主重启后显式触发一次停摆恢复核对（agent 唤醒入口；不依赖心跳陈旧度）",
+        help="宿主重启后显式触发一次停摆恢复核对（agent 唤醒入口；账本滞后才判停摆）",
     )
     sd.set_defaults(func=cmd_due)
 
