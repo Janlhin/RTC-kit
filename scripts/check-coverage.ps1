@@ -58,7 +58,10 @@ try {
 
     $bad = @()
     if ($stat -lt $statMin) { $bad += '语句覆盖率低于阈值' }
-    if ($branch -lt $branchMin) { $bad += '分支覆盖率低于阈值' }
+    # 分支用整数乘法比：210/300 = 69.999…%，直接比 70 会被浮点误差判成不达标
+    if ([double]$totals.covered_branches * 100 -lt $branchTotal * $branchMin) {
+        $bad += '分支覆盖率低于阈值'
+    }
     if ($bad.Count -gt 0) {
         [Console]::Error.WriteLine(($bad -join '；') + '：补用例，不要降阈值。')
         exit 1
