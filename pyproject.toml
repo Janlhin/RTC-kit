@@ -12,6 +12,8 @@ dev = [
     "mypy>=1.11",
     "coverage>=7.6",
     "vulture>=2.11",
+    # 仅测试层：Windows 上补 IANA 时区库；运行时不依赖它（见 docs/timezone.md §2）
+    "tzdata>=2024.1",
 ]
 
 [tool.ruff]
