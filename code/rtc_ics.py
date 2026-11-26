@@ -62,6 +62,7 @@ def uid_for(w: dict[str, Any], start: str) -> str:
         return f"{ocid}@rtc-kit"
     return f"{w.get('id', 'win')}-{local_to_ics(start)}@rtc-kit"
 
+
 def export_calendar(workspace: Path) -> str:
     """读当天状态，产出标准 VCALENDAR。源真相仍在 routines.json + alarms.json。"""
     state = None
