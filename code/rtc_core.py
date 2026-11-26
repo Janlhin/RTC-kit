@@ -332,6 +332,7 @@ _WINDOW_KEYS = frozenset(
         "intervalMin",
         "label",
         "oneOff",
+        "seq",
         "skipDates",
         "start",
         "validFrom",
@@ -926,7 +927,7 @@ def build_windows(
             {
                 "id": w["id"],
                 "ocid": occurrence_id(w, day_iso),
-                "seq": 0,
+                "seq": int(w.get("seq") or 0) if one_off else 0,
                 "label": label,
                 "type": window_type(w),
                 "review": is_review,
@@ -2248,6 +2249,12 @@ def cmd_postpone(args) -> int:
     if not changes:
         print(f"postpone: {args.window} 无需改动", file=sys.stderr)
         return 0
+
+    # 一次性窗口换了日期 = 同一事件的新版本：seq 要写回时刻表。
+    # 否则中间隔几天不排它，窗口重新出现时 seq 又从 0 开始，
+    # 日历会当成「从没更新过」（复现 #90 发现的 SEQUENCE 不涨）。
+    if w.get("oneOff") and ({"validFrom", "validUntil", "dueDate"} & set(changes)):
+        changes["seq"] = int(w.get("seq") or 0) + 1
 
     # Validate the ledger before committing any schedule change.
     try:

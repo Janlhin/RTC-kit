@@ -5146,6 +5146,35 @@ class TestOccurrenceIdentity(RtcCase):
         self.assertEqual(second["ocid"], first["ocid"], "换了日期仍是同一条提醒")
         self.assertEqual(second["seq"], 1)
 
+    def test_postpone_across_gap_bumps_seq(self):
+        routine = base_routine()
+        routine["alarmWindows"][0].update(oneOff=True, validFrom="2026-11-20", validUntil="2026-11-20")
+        self.write_routine(routine)
+        rc, _, err = self.cli("plan", now="2026-11-20T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        first = self.window("wake")
+        self.assertEqual(first["seq"], 0)
+
+        rc, _, err = self.cli(
+            "postpone",
+            "--window",
+            "wake",
+            "--to",
+            "2026-11-23",
+            now="2026-11-20T06:30:00+08:00",
+        )
+        self.assertEqual(rc, 0, err)
+
+        # 21、22 两天没有这个窗口（有效期已跳到 23）；seq 不能因此清零
+        rc, _, err = self.cli("plan", now="2026-11-21T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        rc, _, err = self.cli("plan", now="2026-11-23T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+
+        w = self.window("wake")
+        self.assertEqual(w["ocid"], first["ocid"], "改期不换身份")
+        self.assertEqual(w["seq"], 1, "改期后重排，日历要知道这是同一条的新版本")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
