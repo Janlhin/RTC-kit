@@ -139,6 +139,8 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
 
 ## 6. 演练记录（2026-11-17，真实执行）
 
+> 本节是把 zip 当**只读副本**试跑；真的删掉 `state/alarms.json` 再盖回的闭环演练见 6.1。
+
 用真实备份 `{{TARGET_DIR_1}}/RTC-20261116.zip` 解到一个临时目录当只读工作区：
 
 ```
@@ -157,6 +159,98 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
 
 同一轮演练还发现：`D:/E` 上另外两份 zip（`RTC-20260510.zip`、`RTC-20261117.zip`）的内容与实机工作区对不上，
 是测试沙箱写进来的假备份。它们**不可用于恢复**。污染源已修（issue #48 / PR #49）。
+
+---
+
+## 6.1 删除后恢复演练（2026-11-27，真实执行，对应 T-011）
+
+第 6 节是只读试跑；本节补上闭环：真的删掉 `state/alarms.json`，再按第 1–5 步盖回。
+演练全程在隔离临时工作区，脚本 / 技能 / 备份目标都指向临时目录，真实工作区零触碰。
+
+记号：`<WS>` 临时工作区，`<TARGET>` 临时备份目录，`<RESTORE>` 临时解压目录，
+`<CODE_DIR>` 仓库 `code/`。
+
+**步骤与命令**（退出码均为本次实测）：
+
+1. 安装器初始化工作区（脚本 / 技能重定向到临时目录）：
+
+   ```powershell
+   python install.py --workspace <WS> --harness-scripts-dir <TMP>/scripts --harness-skills-dir <TMP>/skills
+   ```
+
+   退出码 0。
+
+2. 固定时刻生成当天账本：
+
+   ```powershell
+   python <CODE_DIR>/rtc.py --workspace <WS> plan --now 2026-11-27T06:00:00+08:00
+   ```
+
+   退出码 0；输出 `plan: 2026-11-27 workday 4 窗口 / 25 次，rev=1`。
+
+3. 打备份（`plan` 每日自动打一份；手动复核用）：
+
+   ```powershell
+   python <CODE_DIR>/rtc.py --workspace <WS> backup --to <TARGET>
+   ```
+
+   退出码 0；zip 为 `RTC-20261127.zip`，标记 `state/.backup-last.json`：
+   `written=1, git=null, errors=[]`。
+
+4. 备份时刻基线：`planDate=2026-11-27`，`rev=1`，4 条窗口
+   （`wake` / `meds-am` / `meds-noon` / `meds-pm`）。`state/alarms.json` 的
+   SHA256 本次实测为 `FD10587C…`（各人各时刻不同；复跑时以「恢复后指纹 == 备份时刻
+   指纹」为准，不要照抄这个哈希值）。
+
+5. 按第 1 步开 zip 核对：`planDate=2026-11-27`、`rev=1`、窗口数 4，时刻表 id 与
+   账本窗口对得上。
+
+6. 按第 2 步解压到 `<RESTORE>`，按第 3 步只读试跑：
+
+   ```powershell
+   python <CODE_DIR>/rtc.py --workspace <RESTORE> status
+   ```
+
+   退出码 0；`rev=1`，4 条窗口与基线一致。
+
+7. 真删 `state/alarms.json`；再跑：
+
+   ```powershell
+   python <CODE_DIR>/rtc.py --workspace <WS> status
+   ```
+
+   退出码 0；输出 `尚无计划。先跑：python rtc.py plan`（账本已丢，与预期一致）。
+
+8. 按第 4 步盖回：`<RESTORE>/state` 整个盖进 `<WS>/`，再盖回 `rules/routines.json`、
+   `rules/backup.json`。
+
+9. 恢复后对账：
+
+   ```powershell
+   python <CODE_DIR>/rtc.py --workspace <WS> status
+   python <CODE_DIR>/rtc.py --workspace <WS> status --json
+   python <CODE_DIR>/rtc.py --workspace <WS> history --month 2026-11
+   python <CODE_DIR>/rtc.py --workspace <WS> schedule --month 2026-11
+   ```
+
+   四条退出码均为 0。
+
+**比对字段与结果**（备份时刻 → 恢复后）：
+
+| 字段 | 备份时刻 | 恢复后 | 一致 |
+|---|---|---|---|
+| `planDate` | 2026-11-27 | 2026-11-27 | ✅ |
+| `rev` | 1 | 1 | ✅ |
+| 窗口数 | 4 | 4 | ✅ |
+| 窗口 `id` / `label` / `state` / `fireCount` / `expectFires` | 4 条逐项 | 4 条逐项 | ✅ |
+| `state/alarms.json` SHA256 | 备份时刻指纹 | 同一指纹（字节一致） | ✅ |
+
+结论：按本文档第 1–5 步，删除 `state/alarms.json` 后可从当日 zip 完整恢复；`status`
+与备份时刻一致。「一致」的机器判据是上表五项，不是肉眼看起来差不多。
+
+> 说明：`history --month 2026-11` 在这份全新演练工作区里没有已归档执行结果，属预期；
+> 每日快照在 `state/schedule/2026-11-27.json`，`schedule --month 2026-11` 打出当天
+> 4 窗口 / 25 次。
 
 ---
 
