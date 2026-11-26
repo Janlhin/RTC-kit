@@ -43,6 +43,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_OFFSET = "+08:00"
@@ -169,7 +170,7 @@ def _ensure_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="replace")
 
 
-def _placeholders_for(code_dir: Path, workspace: Path) -> dict:
+def _placeholders_for(code_dir: Path, workspace: Path) -> dict[str, str]:
     """路径类占位符 → 真实绝对路径。都是「由部署决定」的值，安装时确定性填死。"""
     return {
         "{{CODE_DIR}}": str(code_dir),
@@ -179,7 +180,7 @@ def _placeholders_for(code_dir: Path, workspace: Path) -> dict:
     }
 
 
-def _normalize_separators(text: str, roots: list) -> str:
+def _normalize_separators(text: str, roots: list[str]) -> str:
     """把 Windows 绝对路径里残留的正斜杠统一成 ``os.sep``。
 
     模板写作 ``{{CODE_DIR}}/rtc.py``，只做字符串替换会拼出
@@ -208,7 +209,7 @@ def substitute_skill(template: str, code_dir: Path, workspace: Path) -> str:
     return _normalize_separators(template, list(values.values()))
 
 
-def remaining_placeholders(text: str) -> list:
+def remaining_placeholders(text: str) -> list[str]:
     """还剩哪些 ``{{XXX}}``。
 
     路径类占位符已由本脚本填死；剩下的都是 `docs/contributing.md` 里「由部署 / 用户
@@ -219,7 +220,7 @@ def remaining_placeholders(text: str) -> list:
 
 def install_skills(
     repo: Path, skills_dir: Path, scripts_dir: Path, workspace: Path, dry_run: bool, category: str = "rtc"
-) -> list:
+) -> list[str]:
     """把仓库里**所有**带 SKILL.md 的技能接地后写进 Harness。
 
     只装 alarm-clock 是不够的：daily-routine / daily-task-prep / daily-task-manager /
@@ -249,7 +250,7 @@ def install_skills(
     return installed
 
 
-def default_routine() -> dict:
+def default_routine() -> dict[str, Any]:
     """开箱默认时刻表。**不是空白模板**——装完就能响，用户第一分钟能看到效果。"""
     return copy.deepcopy(DEFAULT_ROUTINE)
 
@@ -261,7 +262,7 @@ def _write_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def backup_targets_for(workspace: Path) -> list:
+def backup_targets_for(workspace: Path) -> list[str]:
     """除源盘以外的固定盘，各给一个备份目录。POSIX 上没有这个概念，返回空。"""
     src = workspace.drive.upper() if workspace.drive else ""
     out = []
@@ -277,7 +278,7 @@ def backup_targets_for(workspace: Path) -> list:
 
 def scaffold_workspace(
     repo: Path, code_dir: Path, workspace: Path, dry_run: bool, force: bool = False
-) -> dict:
+) -> dict[str, str]:
     """搭工作区骨架。已存在的**用户文件**一律不覆盖（除非 force）。
 
     返回 {相对路径: "created" | "skipped" | "planned" | "overwritten"}，供打印与测试。
@@ -331,7 +332,7 @@ def smoke_target(now: datetime) -> str:
     return (now + timedelta(minutes=SMOKE_LEAD_MIN)).strftime("%H:%M")
 
 
-def timetable_summary(routine: dict) -> dict:
+def timetable_summary(routine: dict[str, Any]) -> dict[str, Any]:
     """时刻表体检：日常窗口几个、一次性几个。纯函数，便于测试。"""
     total = 0
     one_off = 0
@@ -364,7 +365,7 @@ def smoke_blocked_reason(workspace: Path) -> str | None:
     return None
 
 
-def _run_quiet(cmd: list) -> subprocess.CompletedProcess:
+def _run_quiet(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -490,19 +491,10 @@ def run(args: argparse.Namespace) -> int:
     print("\n[install] 1/5 安装入口脚本")
     if not dry_run:
         scripts_dir.mkdir(parents=True, exist_ok=True)
-    to_copy = [
-        "rtc.py",
-        "rtc_core.py",
-        "rtc_archive.py",
-        "rtc_metrics.py",
-        "rtc_brief.py",
-        "rtc_history.py",
-        "rtc_plan.py",
-        "rtc_due.py",
-        "rtc_once.py",
-        "rtc_report.py",  # 早报素材（agent 模式 cron 注入 prompt，issue #60 方案 B）
-        "metrics.mjs",  # 可选旁路统计；不拷会让技能里的 node metrics.mjs 调用摸空
-    ]
+    # 拷贝清单按 code/ 实际 *py 枚举，不再手写：模块会新增，手写清单必然漏
+    # （`rtc_ics.py` 就这么漏过一次——装完宿主的 `ics` 命令直接没有）。`metrics.mjs`
+    # 是可选旁路统计，不是 .py 但同样必须拷，否则技能里的 node 调用摸空。
+    to_copy = sorted(p.name for p in code_src.glob("*.py")) + ["metrics.mjs"]
     for fname in to_copy:
         src = code_src / fname
         if not src.is_file():

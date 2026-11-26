@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
 import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import rtc_core as core
 import rtc_history as history
@@ -15,7 +17,9 @@ import rtc_history as history
 # ---------------------------------------------------------------- 历史日程查询
 
 
-def preview_schedule(routine: dict, day_iso: str, errors: list[str] | None = None) -> dict | None:
+def preview_schedule(
+    routine: dict[str, Any], day_iso: str, errors: list[str] | None = None
+) -> dict[str, Any] | None:
     """按配置推算某天的安排——用于未来日期（那时还没有快照）。
 
     快照回答「那天实际是什么」，推算回答「那天将会是什么」。两者不混。
@@ -37,7 +41,7 @@ def preview_schedule(routine: dict, day_iso: str, errors: list[str] | None = Non
     return core.schedule_snapshot(routine, kind, windows, day_iso, "")
 
 
-def outcome_text(r: dict) -> str:
+def outcome_text(r: dict[str, Any]) -> str:
     """把一条执行结果说成人话。"""
     st = str(r.get("state") or "")
     reason = str(r.get("missedReason") or "")
@@ -66,7 +70,7 @@ def outcome_text(r: dict) -> str:
     return base
 
 
-def cmd_schedule(args) -> int:
+def cmd_schedule(args: argparse.Namespace) -> int:
     """查历史某天（或某月）的日程安排。
 
     读的是每日快照目录 state/schedule/，永久保留，不受 14 天截断影响。
@@ -175,7 +179,7 @@ def cmd_schedule(args) -> int:
 # ---------------------------------------------------------------- 执行结果查询
 
 
-def cmd_history(args) -> int:
+def cmd_history(args: argparse.Namespace) -> int:
     """查某天（或某月）每个提醒的实际结果。
 
     先读 `state/history.db`（唯一真相源）；库里没有这一天时才退回旧快照——
@@ -274,7 +278,7 @@ def cmd_history(args) -> int:
     return 0
 
 
-def cmd_events(args) -> int:
+def cmd_events(args: argparse.Namespace) -> int:
     """看某个窗口（或全部）的状态迁移轨迹。"""
     rows = history.events(args.window, args.since, args.until)
     if not rows:
@@ -291,7 +295,7 @@ def cmd_events(args) -> int:
     return 0
 
 
-def cmd_stats(args) -> int:
+def cmd_stats(args: argparse.Namespace) -> int:
     """按窗口 / 日期 / 月份聚合执行结果。"""
     try:
         rows = history.stats(args.group_by, args.missed_only)
@@ -315,7 +319,7 @@ def cmd_stats(args) -> int:
 # ---------------------------------------------------------------- 状态与指标
 
 
-def _backup_status() -> dict | None:
+def _backup_status() -> dict[str, Any] | None:
     """备份是附属品：读不到/读坏了都返回 None，绝不抛，也绝不影响退出码。"""
     mark = core.WORKSPACE / "state" / ".backup-last.json"
     if not mark.is_file():
@@ -327,7 +331,7 @@ def _backup_status() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _backup_line(backup: dict | None) -> str:
+def _backup_line(backup: dict[str, Any] | None) -> str:
     """把「到底备了没」压成一行，用户不用去翻文件。"""
     if not backup:
         return "  备份  尚未备份（python rtc.py archive backup 可手动跑一次）"
@@ -346,7 +350,7 @@ def _backup_line(backup: dict | None) -> str:
     return f"  备份  {at}  本地 {written} 处 · {git} · 最近无错误"
 
 
-def cmd_status(args) -> int:
+def cmd_status(args: argparse.Namespace) -> int:
     routine = core.load_routine()
     state = core.load_state()
     if not state:
@@ -481,7 +485,7 @@ def _span(minutes: int) -> str:
     return f"{m} 分钟"
 
 
-def _recurring_count(routine: dict) -> int:
+def _recurring_count(routine: dict[str, Any]) -> int:
     """时刻表里「每天会响」的窗口数：一次性（`oneOff` / `once-*`）不算。"""
     n = 0
     for w in routine.get("alarmWindows") or []:
@@ -491,7 +495,7 @@ def _recurring_count(routine: dict) -> int:
     return n
 
 
-def _timetable_summary(routine: dict) -> dict:
+def _timetable_summary(routine: dict[str, Any]) -> dict[str, Any]:
     """时刻表体检：日常窗口几个、一次性几个。日常 0 个 = 明天不会自动排。"""
     one_off = 0
     total = 0
@@ -502,7 +506,7 @@ def _timetable_summary(routine: dict) -> dict:
     return {"total": total, "recurring": total - one_off, "oneOff": one_off}
 
 
-def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
+def render_brief(routine: dict[str, Any], state: dict[str, Any] | None, now: datetime) -> list[str]:
     """一页行程：现在在响什么、有没有欠着没结的、接下来是什么、今天的账。"""
     weekday = "一二三四五六日"[now.weekday()]
     head = f"今日行程（{now.strftime('%m-%d')} 周{weekday}）"
@@ -521,7 +525,7 @@ def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
     if not windows:
         return [head, *alert, "今天没有安排。"]
 
-    def key(w: dict) -> str:
+    def key(w: dict[str, Any]) -> str:
         return w.get("start") or ""
 
     ringing = [w for w in windows if w.get("state") == "ringing"]
@@ -583,11 +587,11 @@ def render_brief(routine: dict, state: dict | None, now: datetime) -> list[str]:
     return lines
 
 
-def brief_text(routine: dict, state: dict | None, now: datetime) -> str:
+def brief_text(routine: dict[str, Any], state: dict[str, Any] | None, now: datetime) -> str:
     return "\n".join(render_brief(routine, state, now))
 
 
-def sync_brief_block(routine: dict, state: dict | None, now: datetime) -> str:
+def sync_brief_block(routine: dict[str, Any], state: dict[str, Any] | None, now: datetime) -> str:
     """把简报写进 AGENTS.md 的标记区块，返回结果供调用方打印。
 
     只替换两个标记之间的内容，标记外的用户原文一个字都不动；没有标记就
@@ -621,7 +625,7 @@ def sync_brief_block(routine: dict, state: dict | None, now: datetime) -> str:
     return "updated"
 
 
-def cmd_brief(args) -> int:
+def cmd_brief(args: argparse.Namespace) -> int:
     routine = core.load_routine()
     tz = core.tz_of(routine["tzOffset"])
     now = core.parse_iso(args.now, tz) if args.now else core.now_tz(routine["tzOffset"])
@@ -661,9 +665,9 @@ def _tasks_today() -> list[str]:
     return items
 
 
-def _window_tally(state: dict) -> dict:
+def _window_tally(state: dict[str, Any]) -> dict[str, Any]:
     wins = state.get("windows") or []
-    tally: dict = {"windows": len(wins), "fires": 0, "acked": [], "missed": [], "pending": []}
+    tally: dict[str, Any] = {"windows": len(wins), "fires": 0, "acked": [], "missed": [], "pending": []}
     for w in wins:
         # 早报兜底窗口是技术性守卫（防模型没交付），不是给人看的提醒，不进统计
         if w.get("format") == "report-fallback":
@@ -680,7 +684,7 @@ def _window_tally(state: dict) -> dict:
     return tally
 
 
-def _tomorrow_line(routine: dict, today: date) -> str:
+def _tomorrow_line(routine: dict[str, Any], today: date) -> str:
     """明日预告：复用 simulate 的「给定一天算窗口」，没有窗口就说不响。"""
     data = core.simulate_day(routine, today + timedelta(days=1))
     if not data["windows"]:
@@ -689,7 +693,7 @@ def _tomorrow_line(routine: dict, today: date) -> str:
     return "、".join(parts)
 
 
-def _label_plain(w: dict, icon: str) -> str:
+def _label_plain(w: dict[str, Any], icon: str) -> str:
     """实机窗口的 label 常自带同样的表情（「📋晚总结」），别让它和版式头撞成两个。"""
     label = str(w.get("label") or w.get("id") or "")
     if label.startswith(icon):
@@ -700,7 +704,7 @@ def _label_plain(w: dict, icon: str) -> str:
 _REASON_WORD = {"window_expired": "没确认", "late_plan": "生成得太晚", "paused": "休假静音"}
 
 
-def _reason_text(w: dict) -> str:
+def _reason_text(w: dict[str, Any]) -> str:
     reason = w.get("missedReason")
     return _REASON_WORD.get(str(reason), str(reason or "没确认"))
 
@@ -750,7 +754,7 @@ def report_delivered(day: date) -> bool:
     return False
 
 
-def _static_report(routine: dict, state: dict, now: datetime) -> list[str]:
+def _static_report(routine: dict[str, Any], state: dict[str, Any], now: datetime) -> list[str]:
     """模型没写出汇报时的静态版本：只说账本里确凿的事，不推测、不编造。
 
     这是 issue #60 的「零回归」要求——模型失败 / 没写 / 写空，9 点照常有话说。
@@ -796,7 +800,9 @@ def _read_notes(day: date) -> list[str]:
     return [ln.strip("- ").strip() for ln in text.splitlines() if ln.strip()]
 
 
-def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[str]:
+def build_digest(
+    routine: dict[str, Any], state: dict[str, Any], hit: dict[str, Any], now: datetime
+) -> list[str]:
     """按 rules/formats.md 的「跟进」/「总结」/「汇报」版式现算文案。只读，不改任何文件。"""
     tally = _window_tally(state)
     stamp = _hhmm(hit.get("start")) or now.strftime("%H:%M")
@@ -859,7 +865,7 @@ def build_digest(routine: dict, state: dict, hit: dict, now: datetime) -> list[s
     return lines
 
 
-def _span_text(w: dict) -> str:
+def _span_text(w: dict[str, Any]) -> str:
     return _hhmm(w.get("start"))
 
 

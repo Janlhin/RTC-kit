@@ -19,24 +19,9 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import rtc_core as core
-
-SCHEMA_VERSION = 1
-
-WINDOW_COLUMNS = (
-    "window_id",
-    "routine_id",
-    "label",
-    "start",
-    "end",
-    "interval_min",
-    "one_off",
-    "valid_from",
-    "valid_until",
-    "first_seen",
-    "last_seen",
-)
 
 
 def history_db() -> Path:
@@ -118,7 +103,7 @@ def _tables(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_checklist_item ON checklist(item_id, date)")
 
 
-def routine_id(routine: dict | None) -> str:
+def routine_id(routine: dict[str, Any] | None) -> str:
     """时刻表的稳定身份。老文件没有顶层 id 时给一个固定占位，不编随机值。"""
     value = str((routine or {}).get("id") or "").strip()
     return value or "default"
@@ -128,7 +113,7 @@ def _hhmm(iso: str | None) -> str:
     return (iso or "")[11:16] or (iso or "")
 
 
-def sync_state(state: dict, routine: dict | None = None) -> None:
+def sync_state(state: dict[str, Any], routine: dict[str, Any] | None = None) -> None:
     """把当天状态灌进 DB。幂等：同一份状态重复同步结果相同。"""
     if not state:
         return
@@ -234,7 +219,7 @@ def log_event(
         con.close()
 
 
-def rows_for_day(day: str) -> list[dict]:
+def rows_for_day(day: str) -> list[dict[str, Any]]:
     con = _connect()
     try:
         cur = con.execute(
@@ -248,7 +233,7 @@ def rows_for_day(day: str) -> list[dict]:
         con.close()
 
 
-def rows_for_range(start: str, end: str) -> list[dict]:
+def rows_for_range(start: str, end: str) -> list[dict[str, Any]]:
     con = _connect()
     try:
         cur = con.execute(
@@ -262,7 +247,9 @@ def rows_for_range(start: str, end: str) -> list[dict]:
         con.close()
 
 
-def events(window_id: str | None = None, since: str | None = None, until: str | None = None) -> list[dict]:
+def events(
+    window_id: str | None = None, since: str | None = None, until: str | None = None
+) -> list[dict[str, Any]]:
     sql = (
         "SELECT ts, date, window_id, item_id, kind, from_date, to_date, note, actor, source "
         "FROM events WHERE 1=1"
@@ -291,7 +278,7 @@ def has_day(day: str) -> bool:
     return bool(rows_for_day(day))
 
 
-def results_for_day(day: str) -> dict:
+def results_for_day(day: str) -> dict[str, Any]:
     """按快照 `results` 的形状返回某天的结果，供 history 命令直接复用渲染。
 
     只有「真的有结果」的窗口才算：计划刚生成、一条都没响的 pending 行不算——
@@ -328,7 +315,7 @@ def days_in_month(month: str) -> list[str]:
         con.close()
 
 
-def stats(group_by: str = "window", missed_only: bool = False) -> list[dict]:
+def stats(group_by: str = "window", missed_only: bool = False) -> list[dict[str, Any]]:
     """按窗口 / 日期 / 月份聚合：响了多少次、确认多少、漏多少。"""
     key = {"window": "window_id", "date": "date", "month": "substr(date, 1, 7)"}.get(group_by)
     if key is None:
@@ -413,7 +400,7 @@ def backfill_from_snapshots() -> int:
     return filled
 
 
-def import_state_history(state: dict, routine: dict | None = None) -> None:
+def import_state_history(state: dict[str, Any], routine: dict[str, Any] | None = None) -> None:
     """`state.alarms.json` 里那 14 天的摘要也进 DB——它是老工作区唯一的历史。"""
     if not state:
         return
