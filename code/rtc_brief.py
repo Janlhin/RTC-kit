@@ -381,6 +381,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         expected = core.expected_today_ids(routine, now)
         if expected is not None:
             missing = sorted(expected - {w.get("id") for w in state.get("windows", [])})
+    stuck = core.pending_cancel_intents(state, now.date().isoformat())
+    stuck_ids = [it["window"] for it in stuck]
     if args.json:
         print(
             json.dumps(
@@ -389,6 +391,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "ledger_date": ledger_date,
                     "ledger_stale": ledger_stale,
                     "missing_window_ids": missing,
+                    "pending_intent_ids": stuck_ids,
                     "rev": state["rev"],
                     "timetable": timetable,
                     "backup": backup,
@@ -406,6 +409,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  ⚠ 账本是 {ledger_date} 的、不是今天——今天不会响；先跑一次 plan")
     if missing:
         print(f"  ⚠ 时刻表有 {'、'.join(missing)} 但账本里没有——这些提醒今天不会响")
+    if stuck_ids:
+        print(f"  ⚠ 未落地的意图：{len(stuck_ids)}（{'、'.join(stuck_ids)}）——取消没生效，需人工确认")
     if paused:
         print(f"  ⏸ 已暂停至 {paused['until']}（期间不会响；恢复用 resume）")
     if timetable["recurring"] == 0:

@@ -5505,6 +5505,24 @@ class TestIntentGuard(RtcCase):
         self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
         self.assertIn("意图", err.getvalue())
 
+    def test_status_lists_unlanded_intent(self):
+        self.cli("plan")
+        today = date.today().isoformat()
+        self._register("tea", today, f"{today}T08:00:00+08:00")
+        rc, out, _ = self.cli("status")
+        self.assertEqual(rc, 0)
+        self.assertIn("未落地的意图：1", out)
+        self.assertIn("tea", out)
+        data = json.loads(self.cli("status", "--json")[1])
+        self.assertEqual(data["pending_intent_ids"], ["tea"])
+
+    def test_status_clean_has_no_intent_line(self):
+        self.cli("plan")
+        _, out, _ = self.cli("status")
+        self.assertNotIn("未落地的意图", out)
+        data = json.loads(self.cli("status", "--json")[1])
+        self.assertEqual(data["pending_intent_ids"], [])
+
     def test_cancel_unknown_window_leaves_no_intent(self):
         rc, _, _ = self.cli("cancel", "--window", "nope", now="2026-11-13T08:00:00+08:00")
         self.assertEqual(rc, 4)
