@@ -106,3 +106,13 @@
 - **被否决**：① `--min-confidence 80`——首轮实测对真死函数零命中，等于没装；② 建 `vulture_whitelist.py`——多一个要维护的文件，且豁免项只有两条，命令行够用；③ 用 `pylint` 的未使用检查替代——为一条通道引入整套 pylint 与其配置，与「入口唯一」冲突。
 - **影响**：`pyproject.toml`（开发依赖）、`MANIFEST.md`（来源与许可）、`scripts/verify.ps1`、`.github/workflows/tests.yml`、`AGENTS.md`、`TASKS.md` T-005。
 - **复审条件**：豁免名单超过 3 条时，改为独立白名单文件；`vulture` 若出现回归版本，按依赖升级流程处理。
+
+## D-011 根目录登记 CHANGELOG.md 与 SECURITY.md
+
+- **日期**：2026-11-26
+- **决策**：根目录白名单新增 `CHANGELOG.md`（变更记录）与 `SECURITY.md`（安全政策）；贡献指南仍留在 `docs/contributing.md`，不回根目录（沿用 D-001）。
+- **背景**：治理骨架需要变更记录与私密报告入口；GitHub 对根级 `SECURITY.md` 有标准发现路径。两者都属根目录常设文档，不是临时补丁。
+- **被采纳**：两个文件进根目录，并同步 `scripts/check-root-whitelist.ps1` 的 `allowedFiles`。
+- **被否决**：① 把安全政策也挪进 `docs/`——`docs/incident-reporting.md` 只覆盖故障上报流程，不等于漏洞私密报告政策，且根级发现路径缺失；② 为两份文档新建子目录——单文件文档进子目录增加跳转成本。
+- **影响**：`CHANGELOG.md`、`SECURITY.md`、`scripts/check-root-whitelist.ps1`、`.github/dependabot.yml`、`.github/pull_request_template.md`、`docs/README.md`。
+- **复审条件**：无；随下次根目录布局评审一并复核。
