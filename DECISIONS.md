@@ -116,3 +116,13 @@
 - **被否决**：① 把安全政策也挪进 `docs/`——`docs/incident-reporting.md` 只覆盖故障上报流程，不等于漏洞私密报告政策，且根级发现路径缺失；② 为两份文档新建子目录——单文件文档进子目录增加跳转成本。
 - **影响**：`CHANGELOG.md`、`SECURITY.md`、`scripts/check-root-whitelist.ps1`、`.github/dependabot.yml`、`.github/pull_request_template.md`、`docs/README.md`。
 - **复审条件**：无；随下次根目录布局评审一并复核。
+
+## D-012 时间模型改存 IANA 时区名，旧固定偏移保留兼容回退（#91）
+
+- **日期**：2026-11-27
+- **决策**：时刻表时区以 `timezone`（IANA 名，标准库 `zoneinfo`）为准；`tzOffset`（`+HH:MM` 固定偏移）降级为缺 `timezone` 时的兼容回退。`.ics` 事件必须带时区（UTC 用 `Z`，本地用 `TZID` + `VTIMEZONE`），禁止浮动时间。
+- **背景**：旧实现全程按 `tzOffset` 固定偏移解析，不跟随夏令时；跨时区行程无法按目的地时区排。issue #91 要求时间模型存 IANA 名，同时存量固定偏移配置不能报错。
+- **被采纳**：① `resolve_tz` 回退链 = IANA 名 → `tzOffset` 固定偏移 → 默认 `+08:00`；② 缺 tzdata / 时区名非法时回退固定偏移，并往 `NOTICES` 留一条提示，不静默吞掉；③ `tzdata` 只进 dev/test 依赖与 CI 测试层，运行时零第三方依赖；④ `.ics` 无可用 IANA 时区时换算成 UTC 瞬时用 `Z` 输出，保证非浮动。
+- **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
+- **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
+- **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。

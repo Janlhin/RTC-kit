@@ -3,7 +3,8 @@
 > **全系统唯一的「何时响」真相源。** 机器可读版本见 `contract/routine.schema.json` 与 `contract/examples/routines.example.json`。
 > 所有 `{{...}}` 都要换成你自己的值。本文件不出现任何路径或平台命令。
 
-时区：`{{TIMEZONE}}`（`{{TZ_OFFSET}}`）。所有时间按本地时间理解。
+时区：`timezone` 填 IANA 名 `{{TIMEZONE}}`（如 `Asia/Shanghai`、`America/New_York`，跟随夏令时）；
+`tzOffset`（`{{TZ_OFFSET}}`）是旧格式固定偏移，仅作缺 `timezone` 时的兼容回退，不跟随夏令时。详见 `docs/timezone.md`。所有时间按本地时间理解。
 
 顶层建议加一个 `"id"`（`^[a-z0-9-]+$`，例如 `"id": "main"`）：执行历史按它归档，
 以后换文件、改文件名都不影响历史对齐；省略时按 `default` 处理。
@@ -87,7 +88,7 @@ cron 只能给一套触发表达式，**日期类型差异由技能按「星期 
 ## 五、日切生成规则
 
 1. 判今天的日期类型 → 决定窗口集与播报集
-2. 生成窗口，`start` / `end` 补齐年月日与 `{{TZ_OFFSET}}`
+2. 生成窗口，`start` / `end` 补齐年月日与时区偏移（IANA 时区按当时偏移，旧固定偏移用 `{{TZ_OFFSET}}`）
 3. `expectFires` = 窗口分钟数 ÷ 间隔 + 1
 4. `planDate` = 今天，`rev` + 1
 5. 昨天遗留的 `pending` / `ringing` 判 `missed`，压一行进 `history`（保留 14 天）
