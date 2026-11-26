@@ -93,7 +93,12 @@ class TestConflictMarkerGate(unittest.TestCase):
             (root / "README.md").write_text("<<<<<<< synthetic-marker\n", encoding="utf-8")
             for args in (["git", "init", str(root)], ["git", "-C", str(root), "add", "README.md"]):
                 self.assertEqual(subprocess.run(args, capture_output=True).returncode, 0)
-            env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory", GIT_CONFIG_VALUE_0=str(root))
+            env = dict(
+                os.environ,
+                GIT_CONFIG_COUNT="1",
+                GIT_CONFIG_KEY_0="safe.directory",
+                GIT_CONFIG_VALUE_0=str(root),
+            )
             result = run_pwsh(["-File", str(root / "scripts" / "check-conflict-markers.ps1")], env=env)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
