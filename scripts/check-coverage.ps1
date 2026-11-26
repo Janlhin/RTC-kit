@@ -41,7 +41,10 @@ try {
 
     # coverage 的 JSON 里有以空字符串为键的条目，ConvertFrom-Json 默认拒绝解析
     $totals = (Get-Content -LiteralPath $json -Raw | ConvertFrom-Json -AsHashtable).totals
-    $stat = [double]$totals.percent_covered
+    # percent_covered 是「语句 + 分支」的综合分，不能当语句覆盖率用：
+    # 79/100 行、分支全满时它仍显示 89.5，会放过语句不达标的改动。
+    $statTotal = [double]$totals.num_statements
+    $stat = if ($statTotal -gt 0) { [double]$totals.covered_lines / $statTotal * 100 } else { 100.0 }
     $branchTotal = [double]$totals.num_branches
     $branch = if ($branchTotal -gt 0) {
         [double]$totals.covered_branches / $branchTotal * 100
