@@ -5353,5 +5353,71 @@ class TestRecovery(RtcCase):
         self.assertEqual(bad.missed, [])
 
 
+class TestIntentGuard(RtcCase):
+    """#83：意图 vs 账本核对——取消意图的登记 / 幂等 / TTL。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "tea",
+                "label": "喝茶",
+                "start": "15:00",
+                "end": "15:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        ]
+        self.write_routine(r)
+        rtc.set_workspace(self.ws)
+
+    def intents(self) -> dict:
+        p = self.ws / "state" / "intents.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    def test_cancel_registers_intent_before_ledger(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, out, _ = self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "", "cancel 由用户触发，stdout 不该被投递出去")
+        entries = self.intents()["intents"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["window"], "tea")
+        self.assertEqual(entries[0]["date"], "2026-11-13")
+        self.assertIsNotNone(entries[0].get("requestedAt"))
+
+    def test_cancel_intent_idempotent_same_day(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        first = self.intents()["intents"][0]["requestedAt"]
+        self.cli("cancel", "--window", "tea", now="2026-11-13T08:05:00+08:00")
+        entries = self.intents()["intents"]
+        self.assertEqual(len(entries), 1, "同日重复 cancel 只记一条意图")
+        self.assertEqual(entries[0]["requestedAt"], first, "重复登记不得刷新请求时间")
+
+    def test_cancel_intent_reregistered_next_day(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.cli("plan", now="2026-11-14T06:00:00+08:00")
+        self.cli("cancel", "--window", "tea", now="2026-11-14T08:00:00+08:00")
+        dates = sorted(i["date"] for i in self.intents()["intents"])
+        self.assertEqual(dates, ["2026-11-13", "2026-11-14"], "跨日同窗口应另记一条")
+
+    def test_cancel_tolerates_corrupt_intents_file(self):
+        (self.ws / "state" / "intents.json").write_text("{坏 json", encoding="utf-8")
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        rc, _, _ = self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0, "坏意图文件不该让 cancel 崩掉")
+        entries = self.intents()["intents"]
+        self.assertEqual(len(entries), 1)
+
+    def test_cancel_unknown_window_leaves_no_intent(self):
+        rc, _, _ = self.cli("cancel", "--window", "nope", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertFalse((self.ws / "state" / "intents.json").exists(), "无匹配窗口不落意图")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

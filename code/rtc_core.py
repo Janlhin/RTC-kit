@@ -716,6 +716,43 @@ def emit_alert_once(key: str, line: str, now: datetime) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- 取消意图旁路（#83）
+
+
+def intents_path() -> Path:
+    return WORKSPACE / "state" / "intents.json"
+
+
+def _read_intents_raw() -> dict[str, list[dict[str, Any]]]:
+    """读意图旁路文件；坏文件 / 坏条目按空处理，绝不抛 Traceback 给调度器。"""
+    p = intents_path()
+    if not p.exists():
+        return {"intents": []}
+    try:
+        data = load_json(p)
+        if isinstance(data, dict) and isinstance(data.get("intents"), list):
+            return {"intents": [i for i in data["intents"] if isinstance(i, dict)]}
+    except (Validation, ValueError, TypeError, OSError):
+        pass
+    return {"intents": []}
+
+
+def register_cancel_intent(window: str, day_iso: str, now: datetime) -> None:
+    """cancel 第一件事：先把「用户要求取消」落账，账本 / 时刻表后续成败都不抹掉。
+
+    幂等键 = ``(window, date)``：同日重复 cancel 只留一条；跨日同窗口另记一条。
+    跨日旧条目留在文件里只作痕迹，读取侧按当天 TTL 过滤，不参与核对。
+    写失败只报 stderr，不阻断 cancel 本身（与心跳同一口径）。
+    """
+    entries = [dict(item) for item in _read_intents_raw()["intents"]]
+    if not any(str(i.get("window")) == window and str(i.get("date")) == day_iso for i in entries):
+        entries.append({"window": window, "date": day_iso, "kind": "cancel", "requestedAt": now.isoformat()})
+    try:
+        atomic_write(intents_path(), {"date": day_iso, "intents": entries}, expected_rev=None)
+    except OSError as e:
+        print(f"intent: 取消意图登记失败 {e}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------- 日程快照
 
 
@@ -3208,6 +3245,9 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             _write_routine(routine, digest)
             print(f"cancel: {args.window} 在 {target.isoformat()} 不再响", file=sys.stderr)
             return 0
+
+    # 意图先行：账本 / 时刻表后续成败都不抹掉这条取消请求（#83）。
+    register_cancel_intent(args.window, today, now)
 
     # 取消今天这一次
     state = load_state()
