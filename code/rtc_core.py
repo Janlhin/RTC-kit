@@ -832,7 +832,7 @@ def _check_window_arithmetic(w: dict[str, Any]) -> None:
         raise Validation(f"expectFires={w['expectFires']} 与算术值 {exp} 不符")
 
 
-def occurrence_id(w: dict, day_iso: str) -> str:
+def occurrence_id(w: dict[str, Any], day_iso: str) -> str:
     """这一次提醒的稳定身份（ocid），日历导出拿它当 UID。
 
     两类窗口身份不同：
