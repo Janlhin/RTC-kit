@@ -13,7 +13,8 @@ $PSNativeCommandUseErrorActionPreference = $false
 $allowedFiles = @(
     'README.md', 'AGENTS.md', 'DECISIONS.md', 'TASKS.md', 'MANIFEST.md',
     'LICENSE', 'pyproject.toml', '.python-version', '.gitignore',
-    '.gitattributes', '.editorconfig', 'install.py'
+    '.gitattributes', '.editorconfig', 'install.py',
+    'CHANGELOG.md', 'SECURITY.md'
 )
 $allowedDirs = @(
     '.github', '.husky', 'code', 'contract', 'docs', 'platform',
