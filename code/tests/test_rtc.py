@@ -2759,9 +2759,12 @@ class TestBrief(RtcCase):
         self.assertIn("本地 2 处 · git 已推送 · 最近无错误", out, out)
         self.assertIn("11-10 17:51", out, out)
         rc, out, err = self.cli("status", "--json")
+        self.assertEqual(rc, 0, err)
         data = json.loads(out)["backup"]
+        self.assertEqual(data["at"], "2026-11-10T17:51:38+08:00", out)
         self.assertEqual(data["written"], 2, out)
         self.assertTrue(data["git"], out)
+        self.assertEqual(data["errors"], [], out)
 
     def test_status_shows_backup_errors(self):
         """部分失败要写清哪一处、为什么，别只说「备份」两个字。"""
@@ -2777,6 +2780,13 @@ class TestBrief(RtcCase):
         rc, out, err = self.cli("status")
         self.assertEqual(rc, 0, err)
         self.assertIn("本地 1 处 · git 未推送 · 错误 1：E: 盘不可写", out, out)
+        rc, out, err = self.cli("status", "--json")
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)["backup"]
+        self.assertEqual(data["at"], "2026-11-10T17:51:38+08:00", out)
+        self.assertEqual(data["written"], 1, out)
+        self.assertFalse(data["git"], out)
+        self.assertEqual(data["errors"], ["E: 盘不可写"], out)
 
     def test_manual_backup_records_itself(self):
         """手动 backup 也要记账：15:09 跑完，status 不能还报凌晨那次。

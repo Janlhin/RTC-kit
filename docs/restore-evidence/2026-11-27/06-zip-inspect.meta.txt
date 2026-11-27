@@ -1,0 +1,4 @@
+name=06-zip-inspect
+exit=0
+elapsedMs=96
+argv=C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\probe_zip.py C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\target\RTC-20261127.zip

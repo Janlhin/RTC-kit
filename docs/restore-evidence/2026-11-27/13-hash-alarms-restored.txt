@@ -1,0 +1,3 @@
+file=C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\ws\state\alarms.json
+algorithm=SHA256
+hash=FD10587C45115478A68065434A92708987478D76DA5FC1DF79A421B84D3FE281

@@ -1,0 +1,4 @@
+file=C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\target\RTC-20261127.zip
+algorithm=SHA256
+length=9085
+hash=A77F16332E5F73CD7BA00B075D2BE484DF42E1E743AD55955D04AE4946FA5BF7

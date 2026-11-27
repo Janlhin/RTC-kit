@@ -1,0 +1,7 @@
+2026-11-27  workday  rev=1
+  调度器心跳：无成功判定
+  备份  尚未备份（python rtc.py archive backup 可手动跑一次）
+  起床       08:10-08:40  pending  0/7
+  早间事项     09:00-09:25  pending  0/6
+  午间事项     12:00-12:25  pending  0/6
+  晚间事项     19:00-19:25  pending  0/6

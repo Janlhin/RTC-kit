@@ -1,0 +1,51 @@
+[install] repo          = C:\Users\Janlhin\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38456938345562882\agents\s_000K0UXppAb\rtc-99\repo
+[install] code_src       = C:\Users\Janlhin\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38456938345562882\agents\s_000K0UXppAb\rtc-99\repo\code
+[install] scripts_dir    = C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\harness-scripts
+[install] skills_dir     = C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\harness-skills
+[install] workspace      = C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\ws
+
+[install] 1/5 安装入口脚本
+[install] 已拷贝 rtc.py
+[install] 已拷贝 rtc_archive.py
+[install] 已拷贝 rtc_brief.py
+[install] 已拷贝 rtc_core.py
+[install] 已拷贝 rtc_due.py
+[install] 已拷贝 rtc_history.py
+[install] 已拷贝 rtc_ics.py
+[install] 已拷贝 rtc_metrics.py
+[install] 已拷贝 rtc_once.py
+[install] 已拷贝 rtc_plan.py
+[install] 已拷贝 rtc_report.py
+[install] 已拷贝 metrics.mjs
+
+[install] 2/5 接地技能
+[install] 已写入技能 rtc/alarm-clock
+[install] 已写入技能 rtc/daily-routine
+[install] 提示：daily-routine 有需按你作息填的占位符：{{FOLLOW_HOUR_1}}、{{FOLLOW_HOUR_2}}、{{FOLLOW_HOUR_3}} 等 9 处（装完再改，不影响提醒本身）
+[install] 已写入技能 rtc/daily-task-manager
+[install] 提示：daily-task-manager 有需按你作息填的占位符：{{DATE_COMPACT}}、{{TIME_COMPACT}}（装完再改，不影响提醒本身）
+[install] 已写入技能 rtc/daily-task-prep
+[install] 提示：daily-task-prep 有需按你作息填的占位符：{{CUTOVER_TIME}}、{{EXPECTED_FIRES}}、{{TZ_OFFSET}} 等 5 处（装完再改，不影响提醒本身）
+[install] 已写入技能 rtc/deletion-gate
+[install] 技能共 5 个：alarm-clock、daily-routine、daily-task-manager、daily-task-prep、deletion-gate
+
+[install] 3/5 搭工作区骨架
+[install] rules/routines.json: 已生成
+[install] rules/backup.json: 已生成
+[install] AGENTS.md: 已生成
+[install] tasks.md: 已生成
+[install] errors.md: 已生成
+[install] 每日备份目标：D:\RTC-Backup、E:\RTC-Backup（每个盘留最近 30 份）
+[install] 默认时刻表已就位：起床 08:10、早间 09:00、午间 12:00、晚间 19:00（用 set-time 改，别手改 JSON）
+
+[install] 4/5 宿主项目登记：未要求（加 --with-host 可让验收更顺）
+
+[install] 5/5 链路自检：未要求（加 --smoke 可当场验证提醒真的会响）
+
+[install] 三条 cron（网关运行时执行；或加 --setup-cron 让本脚本执行）：
+  前两条是确定性链路（不调模型）；第三条是早报的模型生成，会突破「cron 恒定两条」的既有约束（issue #60 方案 B，需用户批准）。
+  hermes cron create "0 6 * * *" --name rtc-plan --no-agent --script rtc_plan.py --deliver <target> --failure-deliver <target> --catch-up on --timezone +08:00
+  hermes cron create "*/5 * * * *" --name rtc-due --no-agent --script rtc_due.py --deliver <target> --failure-deliver <target> --catch-up off --timezone +08:00
+  hermes cron create "0 9 * * *" --name rtc-report --script rtc_report.py --skill alarm-clock --deliver <target> --failure-deliver <target> --catch-up off --timezone +08:00
+  说明：<target> 换成你的投递渠道（如微信 iLink bot）；首次部署先 --deliver local 观察两天。
+  早报兜底：时刻表里配 09:10 的 `brief-morning-fallback` 窗口（format: report-fallback），别再配 09:00 的 format=report 窗口（plan 会拒绝同时启用）。09:00 模型写完并投递后记一条 `delivery-record --window report --result ok`；有回执兜底静默，没回执就补发（有文件发文件正文，没文件发静态汇报）。
