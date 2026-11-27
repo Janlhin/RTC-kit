@@ -398,6 +398,10 @@ class OnceScriptNluCase(unittest.TestCase):
         wins = self._registered_once_windows(proc)
         self.assertEqual(len(wins), 1)
         self.assertEqual(wins[0]["start"], "15:00")
+        # 缺省日期必须按时刻表时区取当天，与 plan 的清理基准一致；
+        # 不能用进程本地日期（UTC 运行机跨午夜会被误判过期清掉）。
+        expected_today = datetime.now(SH).date().isoformat()
+        self.assertEqual(wins[0]["validFrom"], expected_today)
 
 
 if __name__ == "__main__":

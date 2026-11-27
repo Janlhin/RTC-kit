@@ -112,31 +112,33 @@ def main() -> int:
     if not 1 <= args.window_min <= 30:
         return fail("--window-min 必须在 1..30 之间")
 
+    try:
+        routine_data = json.loads(routines.read_bytes().decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        return fail(f"时刻表读不出来：{exc}")
+    tz = _resolve_tz(routine_data)
+
     hh: int
     mm: int
     target: date
     clock_str: str
     date_iso: str
     if re.fullmatch(r"\d{1,2}:\d{2}", args.at):
-        # 既有 HH:MM 路径，行为逐字未改。
+        # 既有 HH:MM 路径。「今天」按工作区时区算，与 plan 的清理口径一致；
+        # 进程本地是 UTC 时不能用 date.today()，否则跨午夜后会被当成过期清掉。
         try:
             hh, mm = (int(x) for x in args.at.split(":"))
             if not (0 <= hh <= 23 and 0 <= mm <= 59):
                 raise ValueError
         except ValueError:
             return fail("时间必须是 24 小时制 HH:MM，例如 11:30")
-        target = date.today() if args.date is None else date.fromisoformat(args.date)
+        target = date.fromisoformat(args.date) if args.date is not None else datetime.now(tz).date()
         clock_str = f"{hh:02d}:{mm:02d}"
         date_iso = target.isoformat()
     else:
         # NLU L0/L1 路径：中文短语 → 结构化日期 + 时刻。
         if args.date is not None:
             return fail("自然语言短语与 --date 不能同时指定；日期已包含在短语里")
-        try:
-            routine_data = json.loads(routines.read_bytes().decode("utf-8"))
-        except (OSError, ValueError) as exc:
-            return fail(f"时刻表读不出来：{exc}")
-        tz = _resolve_tz(routine_data)
         now = datetime.now(tz)
         try:
             parsed = rtc_nlu.parse_phrase(args.at, now, tz)
