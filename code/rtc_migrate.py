@@ -35,9 +35,19 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rtc_calindex as calindex  # noqa: E402
 import rtc_events as events  # noqa: E402
+import rtc_ics as ics  # noqa: E402
 
-__all__ = ["plan_migration", "apply_migration", "rollback", "main"]
+__all__ = [
+    "plan_migration",
+    "apply_migration",
+    "rollback",
+    "plan_migration_to_ics",
+    "apply_migration_to_ics",
+    "rollback_ics",
+    "main",
+]
 
 ROUTINE_REL = Path("rules") / "routines.json"
 STATE_REL = Path("state") / "alarms.json"
@@ -205,19 +215,226 @@ def rollback(workspace: Path, backup_dir: Path) -> dict[str, Any]:
     return {"restored": True, "events_existed": restored, "backup_dir": str(backup_dir)}
 
 
+# ---------------------------------------------------------------------------
+# P2：旧数据 → .ics 源真相（.ics + SQLite 索引；旧文件留在原地作只读历史）
+# ---------------------------------------------------------------------------
+
+
+def _existing_alias_index(workspace: Path) -> dict[str, str]:
+    """现有 ``.ics`` 事件的 旧id → uid 别名映射；幂等重跑命中后保留原 uid。"""
+    index: dict[str, str] = {}
+    for ev in ics.load_all_events(workspace):
+        uid = str(ev["uid"])
+        for alias in ev.get("aliases") or []:
+            index[str(alias)] = uid
+    return index
+
+
+def _project_to_ics(workspace: Path, as_of: date | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """把旧 routine 窗口 + 当天账本投影成 Event 列表（不写盘）。
+
+    补齐 ``.ics`` 需要的 ``summary``（旧窗口 label）与 ``tzid``（IANA 时区名）。
+    已在现有 ``.ics`` 里按别名命中的事件跳过，不重生、不换 uid。
+    """
+    routine = _read_json(workspace / ROUTINE_REL)
+    state = _read_json(workspace / STATE_REL)
+    ledger = _ledger_index(state)
+    tz_offset = str((routine or {}).get("tzOffset") or events.DEFAULT_OFFSET)
+    tzid = str((routine or {}).get("timezone") or "").strip() or None
+    ledger_date = str(state.get("planDate")) if state and state.get("planDate") else None
+    ref_day = as_of or datetime.now().date()
+    existing = _existing_alias_index(workspace)
+
+    projected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    routine_ids: set[str] = set()
+    for w in (routine or {}).get("alarmWindows") or []:
+        if not isinstance(w, dict) or not w.get("id"):
+            continue
+        old_id = str(w["id"])
+        routine_ids.add(old_id)
+        existing_uid = existing.get(old_id)
+        if existing_uid:
+            skipped.append({"alias": old_id, "uid": existing_uid})
+            continue
+        ev = events.map_window(
+            w,
+            ledger.get(old_id),
+            as_of=ref_day,
+            tz_offset=tz_offset,
+            ledger_date=ledger_date,
+            existing_uid=existing_uid,
+        )
+        ev["summary"] = str(w.get("label") or ev["uid"])
+        if tzid:
+            ev["tzid"] = tzid
+        projected.append(ev)
+
+    unmatched = sorted(set(ledger) - routine_ids)
+    return projected, {"skipped_existing": skipped, "unmatched_ledger": unmatched}
+
+
+def plan_migration_to_ics(workspace: Path, *, as_of: date | None = None) -> dict[str, Any]:
+    """dry-run：只读旧文件，算出将写入 ``.ics`` 的事件清单，不写任何文件。"""
+    ref_day = as_of or datetime.now().date()
+    projected, meta = _project_to_ics(workspace, ref_day)
+    planned = [
+        {
+            "alias": ev["aliases"][0] if ev.get("aliases") else None,
+            "uid": ev["uid"],
+            "kind": ev["kind"],
+            "rrule": ev["rrule"],
+            "year": datetime.fromisoformat(str(ev["start"])).year,
+        }
+        for ev in projected
+    ]
+    return {"dry_run": True, "target": "ics", "as_of": ref_day.isoformat(), "planned": planned, **meta}
+
+
+def _backup_ics(workspace: Path, backup_dir: Path) -> Path:
+    """真跑前备份：calendar/ 目录、索引 db、影子账本原样拷走，旧文件留快照与哈希。"""
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+    dest = backup_dir / f"{stamp}-to-ics"
+    dest.mkdir()
+
+    manifest: dict[str, Any] = {
+        "createdAt": datetime.now().astimezone().isoformat(),
+        "workspace": str(workspace),
+        "files": {},
+        "dirs": {},
+        "restored": False,
+    }
+
+    cal = ics.calendar_dir(workspace)
+    if cal.exists():
+        shutil.copytree(cal, dest / "calendar")
+        manifest["dirs"]["calendar"] = True
+    else:
+        manifest["dirs"]["calendar"] = False
+
+    idx = calindex.index_path(workspace)
+    if idx.exists():
+        shutil.copyfile(idx, dest / "calendar-index.db.bak")
+        manifest["files"]["calendar-index.db"] = _sha256(idx)
+    else:
+        manifest["files"]["calendar-index.db"] = None
+
+    events_file = events.events_path(workspace)
+    if events_file.exists():
+        shutil.copyfile(events_file, dest / "events.json.bak")
+        manifest["files"]["events.json"] = _sha256(events_file)
+    else:
+        manifest["files"]["events.json"] = None
+
+    for rel, name in ((ROUTINE_REL, "routines.json.snapshot"), (STATE_REL, "alarms.json.snapshot")):
+        p = workspace / rel
+        if p.exists():
+            shutil.copyfile(p, dest / name)
+            manifest["files"][rel.as_posix()] = _sha256(p)
+
+    (dest / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
+    return dest
+
+
+def apply_migration_to_ics(workspace: Path, backup_dir: Path, *, as_of: date | None = None) -> dict[str, Any]:
+    """真跑：先备份，再投影写 ``.ics``，最后重建索引；旧文件不删不改。"""
+    plan = plan_migration_to_ics(workspace, as_of=as_of)
+    backup = _backup_ics(workspace, backup_dir)
+
+    projected, _meta = _project_to_ics(workspace, as_of or datetime.now().date())
+    by_uid: dict[str, dict[str, Any]] = {str(ev["uid"]): ev for ev in ics.load_all_events(workspace)}
+    for ev in projected:
+        by_uid[str(ev["uid"])] = ev
+
+    written = ics.write_events(workspace, list(by_uid.values()))
+    indexed = calindex.rebuild(workspace)
+
+    plan["dry_run"] = False
+    plan["backup_dir"] = str(backup)
+    plan["written_files"] = [str(p) for p in written]
+    plan["indexed"] = indexed
+    return plan
+
+
+def rollback_ics(workspace: Path, backup_dir: Path) -> dict[str, Any]:
+    """按备份目录恢复 ``calendar/`` 与索引；迁移前没有的，删除本次产物。
+
+    旧 ``routines.json`` / ``alarms.json`` 本工具从未改写，回滚不触碰它们。
+    """
+    manifest_p = backup_dir / "manifest.json"
+    if not manifest_p.exists():
+        raise FileNotFoundError(f"备份目录缺少 manifest.json：{backup_dir}")
+    manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+
+    cal = ics.calendar_dir(workspace)
+    cal_bak = backup_dir / "calendar"
+    if cal_bak.exists():
+        if cal.exists():
+            shutil.rmtree(cal)
+        shutil.copytree(cal_bak, cal)
+        calendar_existed = True
+    elif cal.exists():
+        shutil.rmtree(cal)
+        calendar_existed = False
+    else:
+        calendar_existed = False
+
+    idx = calindex.index_path(workspace)
+    idx_bak = backup_dir / "calendar-index.db.bak"
+    if idx_bak.exists():
+        idx.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(idx_bak, idx)
+    elif idx.exists():
+        idx.unlink()
+        for suffix in ("-wal", "-shm"):
+            side = Path(f"{idx}{suffix}")
+            if side.exists():
+                side.unlink()
+
+    events_file = events.events_path(workspace)
+    ev_bak = backup_dir / "events.json.bak"
+    if ev_bak.exists():
+        events_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ev_bak, events_file)
+    elif events_file.exists():
+        events_file.unlink()
+
+    manifest["restored"] = True
+    manifest_p.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
+    return {"restored": True, "calendar_existed": calendar_existed, "backup_dir": str(backup_dir)}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="rtc_migrate", description="L2 P1 迁移骨架：旧窗口投影到事件影子账本")
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--backup-dir", help="真跑前备份目录；缺省 <workspace>/state/migrate-backup")
     ap.add_argument("--apply", action="store_true", help="真跑；默认 dry-run 只打印计划")
-    ap.add_argument("--rollback", metavar="BACKUP_DIR", help="按备份目录恢复影子账本")
+    ap.add_argument("--rollback", metavar="BACKUP_DIR", help="按备份目录恢复影子账本 / .ics")
+    ap.add_argument(
+        "--to-ics",
+        action="store_true",
+        help="P2：迁移到 .ics 源真相 + 索引（默认仍投影 events.json 影子账本）",
+    )
     ap.add_argument("--as-of", help="模板级投影参考日 YYYY-MM-DD（默认今天）")
     args = ap.parse_args(argv)
 
     workspace = Path(args.workspace)
     try:
         as_of = date.fromisoformat(args.as_of) if args.as_of else None
-        if args.rollback:
+        if args.to_ics:
+            backup_dir = Path(args.backup_dir) if args.backup_dir else workspace / "state" / "migrate-backup"
+            if args.rollback:
+                result = rollback_ics(workspace, Path(args.rollback))
+            elif args.apply:
+                result = apply_migration_to_ics(workspace, backup_dir, as_of=as_of)
+            else:
+                result = plan_migration_to_ics(workspace, as_of=as_of)
+        elif args.rollback:
             result = rollback(workspace, Path(args.rollback))
         else:
             backup_dir = Path(args.backup_dir) if args.backup_dir else workspace / "state" / "migrate-backup"
