@@ -201,6 +201,189 @@ class UnsupportedExpressionCase(unittest.TestCase):
         self._assert_unsupported("每天早上8点吃药")
 
 
+class RecurringExpressionCase(unittest.TestCase):
+    """周期表达（recurring=True）：产出 RFC 5545 RRULE + 首个 occurrence 的 DTSTART。"""
+
+    def _parse(self, phrase: str, now: datetime = NOW) -> rtc_nlu.ParsedTime:
+        return rtc_nlu.parse_phrase(phrase, now, SH, recurring=True)
+
+    def test_weekly_wednesday_eight_pm(self):
+        # 2026-11-28 周六；下一个周三 = 2026-12-02，晚上八点 = 20:00。
+        r = self._parse("每周三晚上八点")
+        self.assertEqual(r.kind, "recurring")
+        self.assertEqual(r.rrule, "FREQ=WEEKLY;BYDAY=WE")
+        self.assertEqual(r.date_iso, "2026-12-02")
+        self.assertEqual(r.hhmm, "20:00")
+        self.assertEqual(r.dtstart, r.moment)
+        self.assertEqual(r.dtstart.isoformat(), "2026-12-02T20:00:00+08:00")
+
+    def test_weekly_monday_wednesday_friday(self):
+        r = self._parse("每周一三五")
+        self.assertEqual(r.kind, "recurring")
+        self.assertEqual(r.rrule, "FREQ=WEEKLY;BYDAY=MO,WE,FR")
+        # 三个命中日里最近的是周一 2026-11-30；缺时刻默认 09:00。
+        self.assertEqual(r.date_iso, "2026-11-30")
+        self.assertEqual(r.hhmm, "09:00")
+
+    def test_daily_eight_am(self):
+        # 今天 08:00 已过（now 10:15），首个 occurrence 顺到明天 08:00。
+        r = self._parse("每天早上八点")
+        self.assertEqual(r.kind, "recurring")
+        self.assertEqual(r.rrule, "FREQ=DAILY")
+        self.assertEqual(r.date_iso, "2026-11-29")
+        self.assertEqual(r.hhmm, "08:00")
+
+    def test_yearly_november_fifth(self):
+        # 今年 11 月 5 日已过，周年纪念顺到明年。
+        r = self._parse("每年11月5日")
+        self.assertEqual(r.kind, "recurring")
+        self.assertEqual(r.rrule, "FREQ=YEARLY;BYMONTH=11;BYMONTHDAY=5")
+        self.assertEqual(r.date_iso, "2027-11-05")
+        self.assertEqual(r.hhmm, "09:00")
+
+    def test_monthly_first_day(self):
+        r = self._parse("每月1号")
+        self.assertEqual(r.kind, "recurring")
+        self.assertEqual(r.rrule, "FREQ=MONTHLY;BYMONTHDAY=1")
+        self.assertEqual(r.date_iso, "2026-12-01")
+        self.assertEqual(r.hhmm, "09:00")
+
+    def test_every_n_days(self):
+        r = self._parse("每3天")
+        self.assertEqual(r.rrule, "FREQ=DAILY;INTERVAL=3")
+        self.assertEqual(r.date_iso, "2026-11-29")
+
+    def test_every_n_weeks(self):
+        r = self._parse("每2周")
+        self.assertEqual(r.rrule, "FREQ=WEEKLY;INTERVAL=2")
+        self.assertEqual(r.date_iso, "2026-12-05")
+
+    def test_every_n_months(self):
+        r = self._parse("每4个月")
+        self.assertEqual(r.rrule, "FREQ=MONTHLY;INTERVAL=4")
+        self.assertEqual(r.date_iso, "2026-12-28")
+
+    def test_interval_one_omitted(self):
+        # N=1 时不写 INTERVAL。
+        r = self._parse("每1天")
+        self.assertEqual(r.rrule, "FREQ=DAILY")
+
+    def test_daily_alias_every_day(self):
+        r = self._parse("每日")
+        self.assertEqual(r.rrule, "FREQ=DAILY")
+
+    def test_monthly_31_skips_short_months(self):
+        # 11 月没有 31 号，顺到 12 月 31 日。
+        r = self._parse("每月31号")
+        self.assertEqual(r.rrule, "FREQ=MONTHLY;BYMONTHDAY=31")
+        self.assertEqual(r.date_iso, "2026-12-31")
+
+    def test_recurring_crosses_year_monthly(self):
+        # 12 月 31 日说「每月 1 号」：下一次是次年 1 月 1 日。
+        dec31 = datetime(2026, 12, 31, 9, 0, tzinfo=SH)
+        r = rtc_nlu.parse_phrase("每月1号", dec31, SH, recurring=True)
+        self.assertEqual(r.rrule, "FREQ=MONTHLY;BYMONTHDAY=1")
+        self.assertEqual(r.date_iso, "2027-01-01")
+        self.assertEqual(r.hhmm, "09:00")
+
+    def test_recurring_crosses_year_yearly(self):
+        dec31 = datetime(2026, 12, 31, 9, 0, tzinfo=SH)
+        r = rtc_nlu.parse_phrase("每年11月5日", dec31, SH, recurring=True)
+        self.assertEqual(r.date_iso, "2027-11-05")
+
+    def test_recurring_repeat_parse_identical(self):
+        first = self._parse("每周三晚上八点")
+        second = self._parse("每周三晚上八点")
+        self.assertEqual(first, second)
+        self.assertEqual(first.dtstart, second.dtstart)
+
+    def test_daily_future_slot_stays_today(self):
+        early = datetime(2026, 11, 28, 7, 0, tzinfo=SH)
+        r = rtc_nlu.parse_phrase("每天早上八点", early, SH, recurring=True)
+        self.assertEqual(r.date_iso, "2026-11-28")
+        self.assertEqual(r.hhmm, "08:00")
+
+    def test_weekly_dedupes_repeated_day(self):
+        r = self._parse("每周一一")
+        self.assertEqual(r.rrule, "FREQ=WEEKLY;BYDAY=MO")
+
+    def test_oneoff_still_parsed_with_recurring_flag(self):
+        r = self._parse("明天下午三点")
+        self.assertEqual(r.kind, "once")
+        self.assertIsNone(r.rrule)
+        self.assertEqual(r.date_iso, "2026-11-29")
+
+    def test_invalid_yearly_date(self):
+        with self.assertRaises(rtc_nlu.NluError):
+            self._parse("每年2月30日")
+
+    def test_monthday_out_of_range(self):
+        with self.assertRaises(rtc_nlu.NluError):
+            self._parse("每月32号")
+
+    def test_year_month_out_of_range(self):
+        with self.assertRaises(rtc_nlu.NluError):
+            self._parse("每年13月5日")
+
+    def test_interval_zero_rejected(self):
+        with self.assertRaises(rtc_nlu.NluError):
+            self._parse("每0天")
+
+
+class RecurringRejectedShapeCase(unittest.TestCase):
+    """即使打开周期开关，需要工作日历 / BYSETPOS / 第 N 周定位的形状依旧明确拒绝。"""
+
+    def _assert_unsupported(self, phrase: str) -> None:
+        with self.assertRaises(rtc_nlu.UnsupportedExpression) as ctx:
+            rtc_nlu.parse_phrase(phrase, NOW, SH, recurring=True)
+        self.assertTrue(ctx.exception.reason.startswith("现有契约不支持："))
+
+    def test_monthly_last_workday(self):
+        self._assert_unsupported("每月最后一个工作日复盘")
+
+    def test_yearly_nth_weekday(self):
+        self._assert_unsupported("每年第3周的周三")
+
+    def test_workday_and_holiday(self):
+        self._assert_unsupported("工作日提醒")
+        self._assert_unsupported("节假日")
+
+    def test_alternate_week_rejected(self):
+        self._assert_unsupported("隔周锻炼")
+        self._assert_unsupported("每两周")
+
+
+class RecurringDisabledByDefaultCase(unittest.TestCase):
+    """入口一次性契约：不开 recurring 开关时，周期短语仍按既有契约拒绝（行为不变）。"""
+
+    def test_recurring_rejected_without_flag(self):
+        for phrase in ["每周三晚上八点", "每天早上八点", "每月1号", "每年11月5日", "每3天"]:
+            with self.subTest(phrase=phrase):
+                with self.assertRaises(rtc_nlu.UnsupportedExpression) as ctx:
+                    rtc_nlu.parse_phrase(phrase, NOW, SH)
+                self.assertTrue(ctx.exception.reason.startswith("现有契约不支持："))
+
+
+class OnceRegressionCase(unittest.TestCase):
+    """一次性短语逐字段回归：既有字段含义不变，新增 kind/rrule/dtstart 对齐 moment。"""
+
+    def test_required_phrases_once_shape(self):
+        cases = {
+            "明天下午三点": ("2026-11-29", "15:00"),
+            "3天后": ("2026-12-01", "10:15"),
+            "半小时后": ("2026-11-28", "10:45"),
+            "下个月1号": ("2026-12-01", "09:00"),
+        }
+        for phrase, (date_iso, hhmm) in cases.items():
+            with self.subTest(phrase=phrase):
+                r = _parse(phrase)
+                self.assertEqual(r.kind, "once")
+                self.assertIsNone(r.rrule)
+                self.assertEqual(r.dtstart, r.moment)
+                self.assertEqual(r.date_iso, date_iso)
+                self.assertEqual(r.hhmm, hhmm)
+
+
 class RejectedPhraseCase(unittest.TestCase):
     """落在封闭词表之外、或日期 / 时刻越界：抛 NluError，不许静默兜底。"""
 
