@@ -129,6 +129,28 @@ python rtc.py --workspace <dir> ack \
 - 恢复提示只有一条，走 `due` stdout；状态冲突未写成时不投递（沿用 due 静默口径）。
 - `due --bootstrap` 是宿主重启钩子的显式核对入口，不新增子命令；心跳新鲜或账本是今天时不伪造停摆。
 
+## 5c. 审计日志契约（`state/audit.jsonl`）
+
+- **定位**：JSON Lines、一行一条、**只追加**的事件溯源流，用于事后追溯与按时点回放重建。它与 `state/history.db` 分工不同：history.db 是可删可重建的派生执行索引（参与统计聚合）；audit.jsonl 落盘后既有行**永不重写、永不删除、永不原地修改**。
+- **谁写**：任何一次让 `rules/routines.json` 或 `state/alarms.json` 内容发生变化的成功写操作，都必须落一条记录。覆盖：`add` / `edit` / `set-time` / `postpone` / `cancel` / `complete` / `disable` / `enable`（时刻表侧），`plan` 账本生成、`due-fire` / `due-missed`、`ack` / `check` / `cancel` / `complete` / `disable`（账本侧），以及预排激活、恢复归档、自愈恢复底稿、过期一次性清理。纯文件搬运不记：备份、剪枝归档、快照导出、投递回执、指标库。
+- **字段**：
+
+  | 字段 | 含义 |
+  |---|---|
+  | `ts` | ISO8601 带时区偏移的时间戳（沿用工作区 IANA 时区） |
+  | `action` | 动作名：`plan` / `due-fire` / `due-missed` / `ack` / `check` / `cancel` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
+  | `target` | 逻辑作用对象：窗口 id；账本级事件用 `"-"`。**不记本机绝对路径** |
+  | `actor` | `program`（cron / 程序自动写）/ `user`（交互命令直接调用）/ `model`（模型或外部适配器代操作，如 `ack --source external`） |
+  | `source` | 哪个子命令（可带子路径，如 `postpone:state`、`due:promote`） |
+  | `old` / `new` | 变更前后关键值：窗口定义或窗口运行时快照；账本侧事件包 `{rev, window}`；账本级事件带顶层字段与窗口列表 |
+  | `reason` | 可空备注（撤销打勾、冲突回滚等），不写投递正文与个人信息 |
+
+- **原子与并发**：临界区内单次 `O_APPEND` 写完整行 + 换行 + `fsync`；多进程并发追加走与时刻表/账本同一套 sidecar 互斥锁，不允许半截行或撕裂缝。
+- **失败不阻断**：审计写失败只打 stderr 一行，绝不冒泡成 Traceback、不影响主操作——审计不参与判定（与心跳、history.db 同一口径）。
+- **回放边界**：`replay_state` / `replay_routine` 是纯函数，按 `ts <= 截止时点` 折叠事件流重建当时账本/时刻表。本批**仍以 `alarms.json` / `routines.json` 为唯一真相源**，审计流不是真相源；回放只用于核对与追溯。命令行暴露方式本批未加（仅库函数），后续若开放只允许给已有命令加参数，不新增子命令。
+- **隐私**：记录不含个人信息、绝对路径、token；`target` 只用逻辑 id。
+- **遗留**：日志轮转 / 压缩策略本批不做；Event 模型迁移另有独立 lane。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |
@@ -156,6 +178,8 @@ python rtc.py --workspace <dir> ack \
 | 清单勾选跨天延续 | `TestChecklist.test_checked_survives_next_day` |
 | 稳定 ID / orphaned 事件 | `TestStableIds` |
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
+| 审计只追加、并发无撕裂、失败不阻断 | `test_audit_jsonl.py` `AuditWriterCase` |
+| 审计流回放与真实账本逐字段相等（含 rev） | `test_audit_jsonl.py` `AuditReplayCase` |
 | 并发写不覆盖 | `TestPostponeRollbackPreservesConcurrentEdit`、`TestLockOwnership` |
 | 重启后按 `planDate` 补建 | `TestMainlineRegression` |
 

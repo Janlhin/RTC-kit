@@ -191,6 +191,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 | `templates/TOOLS.example.md` | `TOOLS.md` | 填本机事实 |
 | `templates/tasks.example.md` | `tasks.md` | 之后由你增删任务 |
 | `contract/examples/alarms.example.json` | `{{STATE_DIR}}/alarms.json` | 运行时状态，不入库 |
+| — | `{{STATE_DIR}}/audit.jsonl` | 只追加审计流（事件溯源），运行时生成，不入库；追溯/回放用，不是真相源 |
 | `contract/examples/tasks.example.json` | 可选 | 逻辑结构的机器可读示例 |
 | `code/rtc.py` | `{{CODE_DIR}}/rtc.py` | 提醒主链路：plan / due / ack / status / metrics / backup |
 | `code/metrics.mjs` | `{{CODE_DIR}}/metrics.mjs` | 统计旁路，可选 |
@@ -207,6 +208,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 - 覆盖率阈值已按实测基线收紧到语句 80% / 分支 70%（2026-11-20 实测 82% / 76%），但局部仍有空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%），见 `TASKS.md` T-003。
 - `mypy` 已全量收紧到 `--strict`（`[tool.mypy]` 顶层开关，2026-11-21），`code/` 与 `install.py` 零错误。
 - 执行历史在 `state/history.db`（`windows` / `daily` / `checklist` / `events` 四表，唯一真相源）；`state/schedule/*.json` 是它的人读副本，删掉整个目录历史照样查得到。查询用 `rtc.py history` / `history --range` / `events` / `stats`。
+- 变更审计在 `state/audit.jsonl`：只追加、不可变的事件流，记录谁在哪个子命令把哪个窗口从旧值改成新值；用于事后追溯与按时点回放重建，账本仍以 `alarms.json` / `routines.json` 为准。轮转 / 压缩策略暂未做。
 - 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天压一份 zip 到**其他本地盘**的 `RTC-Backup`（目标盘由 `rules/backup.json` 指定），也可按天提交进私有 git 仓库。恢复办法见 `docs/troubleshooting.md` §7 / §8。
 - 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文，详见 `docs/attribution.md`。
 

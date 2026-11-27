@@ -29,12 +29,14 @@ import sys
 import tempfile
 import time as _time
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import rtc_archive as archive
+import rtc_audit as audit
 import rtc_brief as brief
 import rtc_history as hist
 import rtc_metrics as metrics
@@ -330,6 +332,33 @@ def _record_history(
         print(f"history: 写库失败（{type(e).__name__}: {e}），本轮历史可能少一条", file=sys.stderr)
 
 
+def _audit_window(w: dict[str, Any] | None) -> dict[str, Any] | None:
+    """窗口留痕快照：深拷贝一份进审计流，避免后续原地修改污染已落盘的 old/new。"""
+    return deepcopy(w) if w is not None else None
+
+
+def _audit_state_change(state: dict[str, Any], hit: dict[str, Any] | None) -> dict[str, Any]:
+    """账本侧变更留痕：窗口快照 + 当前账本 rev，供回放重建时把 rev 也对上。"""
+    return {"rev": state.get("rev"), "window": _audit_window(hit)}
+
+
+def _audit_state_summary(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    """账本留痕摘要：顶层字段 + 窗口列表 + history，供回放重建当时账本。"""
+    if not state:
+        return None
+    return {
+        "version": state.get("version"),
+        "rev": state.get("rev"),
+        "planDate": state.get("planDate"),
+        "planKind": state.get("planKind"),
+        "timezone": state.get("timezone"),
+        "generatedBy": state.get("generatedBy"),
+        "generatedAt": state.get("generatedAt"),
+        "windows": deepcopy(state.get("windows") or []),
+        "history": deepcopy(state.get("history") or []),
+    }
+
+
 def _apply_recovery(
     state: dict[str, Any],
     routine: dict[str, Any],
@@ -357,6 +386,15 @@ def _apply_recovery(
         state["rev"] = rev + 1
         atomic_write(STATE, state, expected_rev=rev)
         _record_history(state, routine, kind="recovery", window="-", note=identity, ts=now)
+        audit.record(
+            "recovery",
+            "-",
+            actor=audit.ACTOR_PROGRAM,
+            source="due:recovery",
+            new=_audit_state_summary(state),
+            reason=identity,
+            ts=now,
+        )
         hist.import_state_history(state, routine)
     else:
         # 停摆但没有可归档的窗口（同日恢复 / 合法空日）：仍留一条事件作为证据。
@@ -539,6 +577,14 @@ def _restore_from_last_backup() -> str | None:
     except (OSError, Validation, ValueError):
         return None
     seal_routine()
+    audit.record(
+        "restore-backup",
+        "routines.json",
+        actor=audit.ACTOR_PROGRAM,
+        source="self-heal",
+        new={"windows": len(data.get("alarmWindows") or [])},
+        reason="时刻表损坏，从程序底稿恢复",
+    )
 
     windows = len(data.get("alarmWindows") or [])
     msg = f"⚠️ {ROUTINE.name} 被写坏了，已从程序底稿自动恢复（{windows} 个窗口），提醒继续正常"
@@ -1729,6 +1775,15 @@ def _promote_prebuilt_plan(routine: dict[str, Any], now: datetime) -> bool:
     with contextlib.suppress(OSError):
         NEXT_STATE.unlink(missing_ok=True)
     _record_history(state, routine, kind="plan", ts=now)
+    audit.record(
+        "plan",
+        "-",
+        actor=audit.ACTOR_PROGRAM,
+        source="due:promote",
+        old=_audit_state_summary(old),
+        new=_audit_state_summary(state),
+        ts=now,
+    )
 
     if old and old.get("planDate") != today:
         prev_results = {
@@ -1846,7 +1901,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "windows": windows,
         "history": history,
     }
+    old_plan_summary = _audit_state_summary(old)
     atomic_write(STATE, state, expected_rev=int((old or {}).get("rev", 0)) if old else None)
+    audit.record(
+        "plan",
+        "-",
+        actor=audit.ACTOR_PROGRAM,
+        source="plan",
+        old=old_plan_summary,
+        new=_audit_state_summary(state),
+        ts=now,
+    )
     # 第一次建库时把老快照与 alarms.json 里的历史摘要灌进去——换仓库形态，历史不丢。
     if not hist.history_db().exists():
         try:
@@ -1885,6 +1950,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
         removed = _prune_expired_oneoffs(rnow, today)
         if removed:
             _write_routine(rnow, rdigest)
+            audit.record(
+                "prune-expired",
+                "-",
+                actor=audit.ACTOR_PROGRAM,
+                source="plan",
+                new={"removed": removed},
+                reason="过期一次性提醒自动清理",
+                ts=now,
+            )
             print(f"plan: 已清理过期的一次性提醒 {', '.join(removed)}", file=sys.stderr)
     except (Conflict, Validation) as e:
         print(f"plan: 清理过期一次性提醒失败（{e}），不影响本次计划", file=sys.stderr)
@@ -2095,6 +2169,7 @@ def _due_eval(
 
     rev = int(state["rev"])
     changed = False
+    missed_changes: list[tuple[str, dict[str, Any]]] = []
 
     # 1) 过期未确认 → missed
     # 兜底窗口例外：过了点的兜底窗口，只要当天有「汇报已送达」的投递回执，
@@ -2103,6 +2178,7 @@ def _due_eval(
     for w in state["windows"]:
         end = datetime.fromisoformat(w["end"])
         if now > end and w["state"] in {"pending", "ringing"}:
+            prior = deepcopy(w)
             if w.get("format") == "report-fallback" and brief.report_delivered(now.date()):
                 # 没响过才叫 skipped；已经响过（fireCount>0）的兜底不能因为
                 # 回执晚到就被抹成「从未投递」，否则历史会失真。
@@ -2116,6 +2192,7 @@ def _due_eval(
                 w["state"] = "missed"
                 w["missedAt"] = now.isoformat()
                 w["missedReason"] = "window_expired"
+            missed_changes.append((w["id"], prior))
             changed = True
 
     # 2) 找命中窗口
@@ -2130,12 +2207,14 @@ def _due_eval(
             if w.get("format") == "report-fallback" and brief.report_delivered(now.date()):
                 # 没响过才叫 skipped；已经响过（fireCount>0）的兜底不能因为
                 # 回执晚到就被抹成「从未投递」，否则历史会失真。
+                prior = deepcopy(w)
                 if int(w.get("fireCount", 0)) > 0:
                     w["state"] = "delivered"
                     w.pop("missedReason", None)
                 else:
                     w["state"] = "skipped"
                     w["missedReason"] = "covered_by_receipt"
+                missed_changes.append((w["id"], prior))
                 changed = True
                 continue
             hit = w
@@ -2147,6 +2226,17 @@ def _due_eval(
             try:
                 atomic_write(STATE, state, expected_rev=rev)
                 _record_history(state, routine, ts=now)
+                for wid, prior in missed_changes:
+                    after = next((x for x in state["windows"] if x["id"] == wid), None)
+                    audit.record(
+                        "due-missed",
+                        wid,
+                        actor=audit.ACTOR_PROGRAM,
+                        source="due",
+                        old={"window": prior},
+                        new=_audit_state_change(state, after),
+                        ts=now,
+                    )
                 print("due: 已把过期窗口标为 missed", file=sys.stderr)
             except Conflict as e:
                 # 契约（issue #4 §11）：due 冲突保持静默，诊断走 stderr，
@@ -2169,6 +2259,7 @@ def _due_eval(
             flush_alerts()
             return 0
 
+    prior_hit = deepcopy(hit)
     hit["state"] = "ringing"
     hit["fireCount"] += 1
     hit["lastFiredAt"] = now.isoformat()
@@ -2186,6 +2277,15 @@ def _due_eval(
         print(f"due: 写入冲突（{e}），本次静默，下一 tick 重试", file=sys.stderr)
         raise _DueConflict() from e
     _record_history(state, routine, ts=now)
+    audit.record(
+        "due-fire",
+        hit["id"],
+        actor=audit.ACTOR_PROGRAM,
+        source="due",
+        old={"window": prior_hit},
+        new=_audit_state_change(state, hit),
+        ts=now,
+    )
     # 状态确实写下去了，才轮到投递攒着的对账告警
     flush_alerts()
 
@@ -2327,6 +2427,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
         print(f"ack: {hit['id']} 当前状态 {hit['state']}，不改写", file=sys.stderr)
         return 4
 
+    prior_hit = deepcopy(hit)
     hit["state"] = "acked"
     hit["ackedAt"] = now.isoformat()
     hit["ackText"] = args.text or ""
@@ -2342,6 +2443,15 @@ def cmd_ack(args: argparse.Namespace) -> int:
         return 2
     print(f"ack: {hit['id']} 已确认", file=sys.stderr)
     _record_history(state, routine, kind="ack", window=hit["id"], note=args.text, ts=now)
+    audit.record(
+        "ack",
+        hit["id"],
+        actor=audit.ACTOR_MODEL if args.source == "external" else audit.ACTOR_USER,
+        source="ack",
+        old={"window": prior_hit},
+        new=_audit_state_change(state, hit),
+        ts=now,
+    )
     res = brief.sync_brief_block(routine, state, now)
     if res.startswith(("read-failed", "write-failed")):
         print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
@@ -2393,6 +2503,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"check: 清单里没有「{args.item}」", file=sys.stderr)
         return 4
 
+    prior_hit = deepcopy(hit)
     checked = set(hit.get("checked") or [])
     if args.undo:
         checked.discard(target["id"])
@@ -2419,6 +2530,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         window=hit["id"],
         item=target["id"],
         note="undo" if args.undo else None,
+        ts=now,
+    )
+    audit.record(
+        "check",
+        hit["id"],
+        actor=audit.ACTOR_USER,
+        source="check",
+        old={"window": prior_hit},
+        new=_audit_state_change(state, hit),
+        reason="undo" if args.undo else None,
         ts=now,
     )
     verb = "已取消" if args.undo else "已打勾"
@@ -2642,6 +2763,7 @@ def cmd_postpone(args: argparse.Namespace) -> int:
         return 3
 
     old_values = {k: (k in w, w.get(k)) for k in changes}
+    prior_routine = deepcopy(w)
 
     # --- 1. 改时刻表（先改这个：明天有没有提醒取决于它）
     for k, v in changes.items():
@@ -2651,6 +2773,16 @@ def cmd_postpone(args: argparse.Namespace) -> int:
     except Conflict as e:
         print(f"postpone: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
+    audit.record(
+        "postpone",
+        args.window,
+        actor=audit.ACTOR_USER,
+        source="postpone",
+        old=prior_routine,
+        new=deepcopy(w),
+        reason=f"to {target.isoformat()}",
+        ts=now,
+    )
 
     # Reload after the routine commit: plan/due may have created or changed the ledger.
     try:
@@ -2663,6 +2795,7 @@ def cmd_postpone(args: argparse.Namespace) -> int:
     # 都原样保留，不能把昨天的记录改成 skipped（issue #87 第 2 条）。
     outcome = "not_planned"
     history_error: Exception | None = None
+    prior_hit: dict[str, Any] | None = None
     ledger_day = (
         _classify_postpone_ledger_day(state, today.isoformat()) if state is not None else _LEDGER_CURRENT
     )
@@ -2674,6 +2807,7 @@ def cmd_postpone(args: argparse.Namespace) -> int:
         if hit is None:
             outcome = "not_planned"
         elif hit["state"] in {"pending", "ringing"}:
+            prior_hit = deepcopy(hit)
             hit["state"] = "skipped"
             hit["missedAt"] = now.isoformat()
             hit["missedReason"] = POSTPONE_REASON
@@ -2698,6 +2832,16 @@ def cmd_postpone(args: argparse.Namespace) -> int:
                         w.pop(k, None)
                 try:
                     _write_routine(routine, post_digest)
+                    audit.record(
+                        "postpone",
+                        args.window,
+                        actor=audit.ACTOR_USER,
+                        source="postpone:rollback",
+                        old=prior_routine,
+                        new=deepcopy(w),
+                        reason="状态冲突回滚时刻表",
+                        ts=now,
+                    )
                 except Conflict as rb_err:
                     # 部分应用（退出码 3，与「校验失败」共用 3，但语义不同）：
                     # 时刻表已成功推迟到 {target}，但今日状态因并发编辑回滚失败、
@@ -2727,6 +2871,16 @@ def cmd_postpone(args: argparse.Namespace) -> int:
                 )
             except (OSError, Validation, ValueError, TypeError, AttributeError) as e:
                 history_error = e
+            audit.record(
+                "postpone",
+                args.window,
+                actor=audit.ACTOR_USER,
+                source="postpone:state",
+                old={"window": prior_hit},
+                new=_audit_state_change(state, hit),
+                reason=outcome,
+                ts=now,
+            )
         else:
             outcome = "already_fired"
 
@@ -2959,6 +3113,7 @@ def cmd_set_time(args: argparse.Namespace) -> int:
         print(f"set-time: end ({args.end or w['end']}) 必须晚于 start ({args.start})", file=sys.stderr)
         return 3
 
+    prior_w = deepcopy(w)
     w["start"] = args.start
     if args.end is not None:
         w["end"] = args.end
@@ -2972,6 +3127,14 @@ def cmd_set_time(args: argparse.Namespace) -> int:
     except Conflict as e:
         print(f"set-time: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
+    audit.record(
+        "set-time",
+        args.window,
+        actor=audit.ACTOR_USER,
+        source="set-time",
+        old=prior_w,
+        new=deepcopy(w),
+    )
     print(
         f"set-time: {args.window} 改为 {args.start}"
         + (f"–{args.end}" if args.end else "")
@@ -3016,6 +3179,7 @@ def cmd_add_window(args: argparse.Namespace) -> int:
         print(f"add-window: 窗口 {args.id} 不存在，--update 不能凭空创建", file=sys.stderr)
         return 4
 
+    prior_w = deepcopy(defs[idx]) if idx is not None else None
     w = dict(defs[idx]) if idx is not None else {"id": args.id}
     if args.label is not None:
         w["label"] = args.label
@@ -3147,6 +3311,14 @@ def cmd_add_window(args: argparse.Namespace) -> int:
     except Conflict as e:
         print(f"add-window: 时刻表已被改动（{e}），未写入", file=sys.stderr)
         return 2
+    audit.record(
+        "edit" if idx is not None else "add",
+        args.id,
+        actor=audit.ACTOR_USER,
+        source="add-window",
+        old=prior_w,
+        new=deepcopy(w),
+    )
     print(
         f"add-window: {args.id} 已写入（{w['start']}–{w['end']}，每 {interval} 分钟，"
         f"共 {computed} 次）；下次 plan 生效",
@@ -3176,6 +3348,7 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     if w is None:
         print(f"cancel: 时刻表里没有窗口 {args.window}", file=sys.stderr)
         return 4
+    prior_w = deepcopy(w)
     if w.get("disabled"):
         print(f"cancel: {args.window} 已经停用了", file=sys.stderr)
         return 4
@@ -3200,17 +3373,43 @@ def cmd_cancel(args: argparse.Namespace) -> int:
                 # 这个窗口只存在于那一天 → 整件事取消
                 w["disabled"] = True
                 _write_routine(routine, digest)
+                audit.record(
+                    "cancel",
+                    args.window,
+                    actor=audit.ACTOR_USER,
+                    source="cancel",
+                    old=prior_w,
+                    new=deepcopy(w),
+                    reason=f"date {target.isoformat()}",
+                    ts=now,
+                )
                 print(f"cancel: {args.window} 在 {target.isoformat()} 的那次已取消", file=sys.stderr)
                 return 0
             skip = set(w.get("skipDates") or [])
             skip.add(target.isoformat())
             w["skipDates"] = sorted(skip)
             _write_routine(routine, digest)
+            audit.record(
+                "cancel",
+                args.window,
+                actor=audit.ACTOR_USER,
+                source="cancel",
+                old=prior_w,
+                new=deepcopy(w),
+                reason=f"skip {target.isoformat()}",
+                ts=now,
+            )
             print(f"cancel: {args.window} 在 {target.isoformat()} 不再响", file=sys.stderr)
             return 0
 
     # 取消今天这一次
     state = load_state()
+    prior_hit = None
+    if state is not None:
+        prior_hit = next(
+            (deepcopy(x) for x in state.get("windows", []) if x.get("id") == args.window),
+            None,
+        )
     outcome = _mark_state(state, args.window, "cancelled", now, CANCELLED_REASON)
     if outcome == "changed":
         # _mark_state 只在 state 存在时返回 changed
@@ -3223,6 +3422,16 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             print(f"cancel: 状态冲突（{e}）", file=sys.stderr)
             return 2
         _record_history(state, routine, kind="cancel", window=args.window, ts=now)
+        after_hit = next((x for x in state["windows"] if x.get("id") == args.window), None)
+        audit.record(
+            "cancel",
+            args.window,
+            actor=audit.ACTOR_USER,
+            source="cancel",
+            old={"window": prior_hit},
+            new=_audit_state_change(state, after_hit),
+            ts=now,
+        )
 
     # 安排本身的去留
     # 一次性窗口：取消 = 这件事不做了 → 彻底停用（它本来也只存在于某一天）
@@ -3247,6 +3456,16 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             truncated = True  # 已经到期的安排，截断后等于不再生成
     if truncated:
         _write_routine(routine, digest)
+        audit.record(
+            "cancel",
+            args.window,
+            actor=audit.ACTOR_USER,
+            source="cancel:routine",
+            old=prior_w,
+            new=deepcopy(w),
+            reason="有效期截断，以后不再生成",
+            ts=now,
+        )
 
     if outcome == "already_final":
         note = "这一轮已经结束了"
@@ -3275,8 +3494,15 @@ def cmd_complete(args: argparse.Namespace) -> int:
     if w is None:
         print(f"complete: 时刻表里没有窗口 {args.window}", file=sys.stderr)
         return 4
+    prior_w = deepcopy(w)
 
     state = load_state()
+    prior_hit = None
+    if state is not None:
+        prior_hit = next(
+            (deepcopy(x) for x in state.get("windows", []) if x.get("id") == args.window),
+            None,
+        )
     outcome = _mark_state(state, args.window, "acked", now, args.text or "")
     if outcome == "changed":
         # _mark_state 只在 state 存在时返回 changed
@@ -3296,9 +3522,29 @@ def cmd_complete(args: argparse.Namespace) -> int:
             note=args.text,
             ts=now,
         )
+        after_hit = next((x for x in state["windows"] if x.get("id") == args.window), None)
+        audit.record(
+            "complete",
+            args.window,
+            actor=audit.ACTOR_USER,
+            source="complete",
+            old={"window": prior_hit},
+            new=_audit_state_change(state, after_hit),
+            ts=now,
+        )
 
     w["disabled"] = True
     _write_routine(routine, digest)
+    audit.record(
+        "complete",
+        args.window,
+        actor=audit.ACTOR_USER,
+        source="complete:routine",
+        old=prior_w,
+        new=deepcopy(w),
+        reason="永久停用",
+        ts=now,
+    )
 
     notes = {
         "changed": "已完成，以后不再提醒",
@@ -3326,12 +3572,19 @@ def cmd_disable(args: argparse.Namespace) -> int:
     if w is None:
         print(f"disable: 时刻表里没有窗口 {args.window}", file=sys.stderr)
         return 4
+    prior_w = deepcopy(w)
     if w.get("disabled"):
         print(f"disable: {args.window} 已经停用了", file=sys.stderr)
         return 4
 
     # 今天已生成的那次也不能再响
     state = load_state()
+    prior_hit = None
+    if state is not None:
+        prior_hit = next(
+            (deepcopy(x) for x in state.get("windows", []) if x.get("id") == args.window),
+            None,
+        )
     outcome = _mark_state(state, args.window, "cancelled", now, CANCELLED_REASON)
     if outcome == "changed":
         # _mark_state 只在 state 存在时返回 changed
@@ -3344,9 +3597,29 @@ def cmd_disable(args: argparse.Namespace) -> int:
             print(f"disable: 状态冲突（{e}）", file=sys.stderr)
             return 2
         _record_history(state, routine, kind="disable", window=args.window, ts=now)
+        after_hit = next((x for x in state["windows"] if x.get("id") == args.window), None)
+        audit.record(
+            "disable",
+            args.window,
+            actor=audit.ACTOR_USER,
+            source="disable",
+            old={"window": prior_hit},
+            new=_audit_state_change(state, after_hit),
+            ts=now,
+        )
 
     w["disabled"] = True
     _write_routine(routine, digest)
+    audit.record(
+        "disable",
+        args.window,
+        actor=audit.ACTOR_USER,
+        source="disable:routine",
+        old=prior_w,
+        new=deepcopy(w),
+        reason="永久停用",
+        ts=now,
+    )
     print(f"disable: {args.window} 已停用，以后不再提醒", file=sys.stderr)
     return 0
 
@@ -3360,11 +3633,20 @@ def cmd_enable(args: argparse.Namespace) -> int:
     if w is None:
         print(f"enable: 时刻表里没有窗口 {args.window}", file=sys.stderr)
         return 4
+    prior_w = deepcopy(w)
     if not w.get("disabled"):
         print(f"enable: {args.window} 本来就是启用的", file=sys.stderr)
         return 4
     w["disabled"] = False
     _write_routine(routine, digest)
+    audit.record(
+        "enable",
+        args.window,
+        actor=audit.ACTOR_USER,
+        source="enable",
+        old=prior_w,
+        new=deepcopy(w),
+    )
     with contextlib.suppress(sqlite3.Error, OSError, ValueError, TypeError):
         hist.log_event("enable", args.window)
     print(f"enable: {args.window} 已重新启用", file=sys.stderr)

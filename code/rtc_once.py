@@ -143,6 +143,17 @@ def main() -> int:
     # 我们也是程序：写完立刻盖章，否则下一次 plan 会把刚加的提醒报成「有人手改」。
     seal_routine(ws, routines)
 
+    # 审计留痕：一次性窗口进时刻表。审计写失败不影响提醒本身（与盖章同一口径）。
+    try:
+        sys.path.insert(0, str(HERE))
+        import rtc_audit as audit  # noqa: E402
+        import rtc_core as core  # noqa: E402
+
+        core.set_workspace(ws)
+        audit.record("add", wid, actor=audit.ACTOR_PROGRAM, source="once", new=windows[-1])
+    except (OSError, ValueError, TypeError, ImportError):
+        pass
+
     if proc.stderr.strip():
         print(proc.stderr.strip(), file=sys.stderr)
 
