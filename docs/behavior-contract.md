@@ -56,7 +56,7 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 |---|---|---|---|
 | `plan` | 空 | 0（含冲突）/ 3（配置非法） | stderr 一行 + `state/conflicts.jsonl` |
 | `due` | 正文或空（**冲突时为空**） | 0 / 3 | stderr + `state/conflicts.jsonl` |
-| `ack` | 空 | 0 / 2（重试耗尽）/ 3（外部回调参数不全）/ 4（找不到窗口或日期不符） | stderr + `state/conflicts.jsonl` |
+| `ack` | 空 | 0 / 2（重试耗尽）/ 3（外部回调参数不全、`--snooze` 非正整数或跨夜）/ 4（找不到窗口或日期不符） | stderr + `state/conflicts.jsonl` |
 | `check` / `cancel` / `postpone` / `complete` / `disable` / `enable` | 空 | 0 / 2 / 3 / 4 | stderr |
 | `history` / `events` / `stats` / `status` | 正文 | 0 / 4 | stderr |
 
@@ -109,6 +109,22 @@ python rtc.py --workspace <dir> ack \
 - 幂等键记在窗口的 `ackEventId` 上，和 `ackedAt` / `ackText` 同一次 `atomic_write` 落盘
 - 鉴权在适配器侧完成；RTC 只接收已经验过签的内部调用，不对外暴露无鉴权入口
 
+### 4.2 同日 snooze：`ack --snooze N`（FR-1.6）
+
+引用回复「推迟半小时」走已有 `ack` 子命令的可选参数 `--snooze <分钟>`，**不新增子命令**：
+
+```bash
+python rtc.py --workspace <dir> ack --window <id> --snooze 30 [--text "<原话>"]
+```
+
+- **只挪今天这一次**：账本里当天那次窗口的 `start` / `end` 整体后移 N 分钟，窗口内残余提醒点随窗口一起平移；`rules/routines.json` 时刻表不动，其他日子的 occurrence 由下次 `plan` 从时刻表原样重建。
+- **一次调用同时收口**：`--snooze` 与确认在同一次调用完成，不再要求先 `ack` 再 snooze；`ackedAt` 按 ack 既有口径写入，`lastFiredAt` / `fireCount` 不回退。
+- **幂等键**：窗口 id + 当天 `planDate` + 最近一次 `snoozeStep`（请求分钟数）。同一窗口、同一天、同一 `--snooze` 值重复调用 → 退出 `0`，stderr 一行「已生效，未重复平移」，不二次平移、不二次投递、不新增 history / 审计记录；账本累计值（`snoozeCount` / `snoozeMinutes` / `snoozeStep` / `snoozedAt`）不变，`rev` 不涨。
+- **不重复投递**：平移后旧时间点不再命中窗口；已投递过的这一次不会被当成新的一次再响，`fireCount` 不重复增加。
+- **跨日保护**：平移后的 `start` / `end` 必须仍落在当天 `planDate` 内；任一端跨过 24:00 即拒绝，退出 `3`，账本一字未改。`--snooze` 必须是正整数分钟；`0` / 负数同样退出 `3`（提前到更早时刻本批不支持）。
+- **留痕**：账本窗口记 `snoozeCount`（次数）/ `snoozeMinutes`（累计分钟）/ `snoozeStep`（最近一次请求分钟）/ `snoozedAt`（最近一次时刻）；`history.db` 记一条 `kind=snooze` 事件；审计流记一条 `action=snooze`，`old` / `new` 带平移前后的窗口起始时间。
+- **不带 `--snooze`**：`ack` 行为与改造前逐字节一致，不写任何 snooze 痕迹字段。
+
 ## 5. 空日契约
 
 空日（当天本来就没有该响的东西）**不是错误**，但必须留下痕迹：
@@ -132,13 +148,13 @@ python rtc.py --workspace <dir> ack \
 ## 5c. 审计日志契约（`state/audit.jsonl`）
 
 - **定位**：JSON Lines、一行一条、**只追加**的事件溯源流，用于事后追溯与按时点回放重建。它与 `state/history.db` 分工不同：history.db 是可删可重建的派生执行索引（参与统计聚合）；audit.jsonl 落盘后既有行**永不重写、永不删除、永不原地修改**。
-- **谁写**：任何一次让 `rules/routines.json` 或 `state/alarms.json` 内容发生变化的成功写操作，都必须落一条记录。覆盖：`add` / `edit` / `set-time` / `postpone` / `cancel` / `complete` / `disable` / `enable`（时刻表侧），`plan` 账本生成、`due-fire` / `due-missed`、`ack` / `check` / `cancel` / `complete` / `disable`（账本侧），以及预排激活、恢复归档、自愈恢复底稿、过期一次性清理。纯文件搬运不记：备份、剪枝归档、快照导出、投递回执、指标库。
+- **谁写**：任何一次让 `rules/routines.json` 或 `state/alarms.json` 内容发生变化的成功写操作，都必须落一条记录。覆盖：`add` / `edit` / `set-time` / `postpone` / `cancel` / `complete` / `disable` / `enable`（时刻表侧），`plan` 账本生成、`due-fire` / `due-missed`、`ack` / `snooze` / `check` / `cancel` / `complete` / `disable`（账本侧），以及预排激活、恢复归档、自愈恢复底稿、过期一次性清理。纯文件搬运不记：备份、剪枝归档、快照导出、投递回执、指标库。
 - **字段**：
 
   | 字段 | 含义 |
   |---|---|
   | `ts` | ISO8601 带时区偏移的时间戳（沿用工作区 IANA 时区） |
-  | `action` | 动作名：`plan` / `due-fire` / `due-missed` / `ack` / `check` / `cancel` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
+  | `action` | 动作名：`plan` / `due-fire` / `due-missed` / `ack` / `snooze` / `check` / `cancel` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
   | `target` | 逻辑作用对象：窗口 id；账本级事件用 `"-"`。**不记本机绝对路径** |
   | `actor` | `program`（cron / 程序自动写）/ `user`（交互命令直接调用）/ `model`（模型或外部适配器代操作，如 `ack --source external`） |
   | `source` | 哪个子命令（可带子路径，如 `postpone:state`、`due:promote`） |
@@ -180,6 +196,7 @@ python rtc.py --workspace <dir> ack \
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
 | 审计只追加、并发无撕裂、失败不阻断 | `test_audit_jsonl.py` `AuditWriterCase` |
 | 审计流回放与真实账本逐字段相等（含 rev） | `test_audit_jsonl.py` `AuditReplayCase` |
+| 同日 snooze 只挪今天这一次、幂等不二次平移、旧槽不重响、跨夜拒绝、无参 ack 零痕迹 | `TestAckSnooze` |
 | 并发写不覆盖 | `TestPostponeRollbackPreservesConcurrentEdit`、`TestLockOwnership` |
 | 重启后按 `planDate` 补建 | `TestMainlineRegression` |
 
