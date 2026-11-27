@@ -9,6 +9,7 @@
 | `routine.schema.json` | 时刻表：日期类型、提醒窗口、例行播报时点、相位 |
 | `alarm-state.schema.json` | 运行状态账本：窗口状态机、ack、missed、跨日归档 |
 | `task.schema.json` | 任务：ID、状态、截止日、分区 |
+| `event.schema.json` | L2 事件一等公民：稳定 uid、kind、起止、RRULE、owner、deadline、status、提醒策略预留、旧 id 别名（P1 影子账本；P2 起 `.ics` 为准） |
 | `examples/*.json` | 可直接校验的示例实例 |
 
 ## 怎么用
