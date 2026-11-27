@@ -68,6 +68,8 @@ npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json \
 | `dateTypes` | 哪种日期类型响（工作日 / 周末 / 节假日） | `["weekday"]` |
 | `validFrom` / `validUntil` | 哪一段时间内有效（闭区间） | `2026-11-10` – `2026-12-31` |
 | `oneOff` | 只响一次，送达即完成 | `true` |
+| `preRemind` | 当天 `start` 之前多久先响一次（可选） | `"30m"` / `"1h"` |
+| `ddlLadder` | 截止前的阶梯预警点（可选，仅倒计时窗口） | `["24h", "12h"]` |
 
 `oneOff: true` 时契约强制 `expectFires` 为 `1`；`validFrom` 与 `validUntil` 同日即为「只在那天出现」。
 `oneOff` 只对**闹钟窗口**有意义；`rollcalls`（例行播报）与 `weeklyChores`（周专项）由日期类型与星期决定，不看有效期。

@@ -17,7 +17,19 @@
       "end": "{{WAKE_END}}",
       "intervalMin": 5,
       "expectFires": 6,
-      "ackHints": ["{{ACK_WORD_A}}", "{{ACK_WORD_B}}"]
+      "ackHints": ["{{ACK_WORD_A}}", "{{ACK_WORD_B}}"],
+      "preRemind": "30m"
+    },
+    {
+      "id": "essay-draft",
+      "label": "截止事项",
+      "start": "{{EVENING_TIME}}",
+      "end": "{{EVENING_END}}",
+      "intervalMin": 5,
+      "expectFires": 1,
+      "ackHints": ["{{ACK_WORD_C}}"],
+      "dueDate": "{{DATE_DUE}}",
+      "ddlLadder": ["24h", "12h"]
     },
     {
       "id": "meds-am",
