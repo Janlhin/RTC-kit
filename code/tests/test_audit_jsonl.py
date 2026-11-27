@@ -261,6 +261,25 @@ class AuditReplayCase(unittest.TestCase):
         self.assertEqual(win["state"], "pending")
         self.assertEqual(win["fireCount"], 0)
 
+    def test_due_missed_writes_audit_record(self):
+        short = _base_routine()
+        short["alarmWindows"][0]["end"] = "07:05"
+        short["alarmWindows"][0]["expectFires"] = 2
+        (self.ws / "rules" / "routines.json").write_text(
+            json.dumps(short, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.cli("plan", now=f"{FIXED_DATE}T06:00:00+08:00")
+        # 窗口 07:00–07:05，07:10 才跑 due → 过期未确认，应标 missed 并留痕。
+        rc, out, err = self.cli("due", now=f"{FIXED_DATE}T07:10:00+08:00")
+        self.assertEqual(rc, 0, err)
+        events = audit.read_events()
+        missed = [e for e in events if e["action"] == "due-missed"]
+        self.assertEqual(len(missed), 1)
+        self.assertEqual(missed[0]["target"], "wake")
+        self.assertEqual(missed[0]["actor"], "program")
+        self.assertEqual(missed[0]["old"]["window"]["state"], "pending")
+        self.assertEqual(missed[0]["new"]["window"]["state"], "missed")
+
     def test_replay_routine_rebuilds_window_definition(self):
         rc, out, err = self.cli(
             "add-window",
