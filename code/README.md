@@ -12,6 +12,7 @@
 | `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
 | `rtc_events.py` | L2 事件模型：影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名（P1；离线投影，不进 tick 热路径） | 仅标准库 |
 | `rtc_migrate.py` | L2 P1 迁移骨架：dry-run / 写前备份 / 幂等 / 回滚；离线工具，不进 tick 热路径 | 仅标准库 |
+| `rtc_query.py` | L2 P6 只读查询：事件 + 旧窗口合并视图，日期/年份/区间与关键词/类型/归属筛选，`show` 单事件；不写状态、不进 tick 热路径 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 
@@ -34,6 +35,10 @@ python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日
 python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
 python rtc.py --workspace <dir> history  2026-12-15      # 查那天的执行结果
 python rtc.py --workspace <dir> history  --month 2026-12 # 那个月的结果汇总
+python rtc.py --workspace <dir> list --date 2026-12-15   # 那天的事件 + 旧窗口（只读合并视图）
+python rtc.py --workspace <dir> list --year 2026 --q 报告 --kind once --owner self
+python rtc.py --workspace <dir> show <uid 或旧 id>       # 单事件全字段（含别名/提醒策略/DDL/状态）
+python rtc.py --workspace <dir> export --ics <目录或文件> # .ics 导出（序列化层待 P2 接入）
 python rtc.py --workspace <dir> postpone travel --to 2026-12-16  # 把提醒挪到别的日子
 python rtc.py --workspace <dir> cancel   travel                # 取消一个安排
 python rtc.py --workspace <dir> complete travel --text "打完了"  # 完成 + 停用

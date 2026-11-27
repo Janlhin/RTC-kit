@@ -140,6 +140,24 @@ python rtc.py --workspace <dir> ack \
 - 热路径边界：`rtc_events` / `rtc_migrate` **不得**被 `plan` / `due` / `ack` tick 路径 import；有静态断言测试守住。
 - 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。
 
+## 5d. L2 P6 查询契约（`list` / `show` / `export` 占位）
+
+> 只读视图：不写任何状态文件，不接 plan/due/ack 判定。事件来源是 P1 影子账本，旧窗口来源沿用 `history.db` 既有读路径。
+
+- 区间三选一（互斥）：`--date YYYY-MM-DD` / `--year YYYY` / `--from A --to B`；缺区间、给两种区间、日期非法或 `--from` 晚于 `--to` → 退出 `4`，stdout 为空，诊断走 stderr。
+- 筛选（多条件 AND）：`--q <关键词>` 大小写不敏感子串匹配——事件检索 uid / owner / 别名 / 来源 routineId / 前向兼容标题字段，旧窗口检索 window_id / label / missed；中文按原字符、不分词。`--kind once|recurring` 精确匹配；`--owner self|other:<name>` 精确匹配。非法取值 → 退出 `4`。
+- 跨年归属规则：`once` 按 `start` 日期落年，只出现在 start 那天所在的区间；`recurring` 按「规则有效期与区间重叠」归属（start 不晚于区间末、UNTIL 不早于区间始），无 UNTIL 的周期事件跨年两年都列出。实例级逐条枚举待 P3 `rtc_rrule` 引擎接入，本阶段不展开 occurrence。
+- 来源列：`source=event`（影子账本事件）/ `source=window`（旧窗口执行行）；同一底层窗口两条来源并列展示、互不覆盖，不做去重。
+- 空结果退出 `0`（空数组），不当错误；`--json` 纯 JSON 到 stdout，诊断只走 stderr。
+- `show <uid|旧id>`：先按 uid 命中，未中再查别名表；找不到退出 `4`、stdout 为空。
+- 性能：先按日期 / 年份过滤再聚合；单次返回上限 `5000` 条，超限退出 `4` 并提示收窄范围，不一次全量展开。
+- `export --ics`：序列化复用 P2 的 `rtc_ics.py`，本阶段占位退出 `4`，不在本 PR 自写第二份 `.ics` 序列化。
+- 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 在无 `events.json` 的工作区上与 P1 基线逐字节一致（SHA256 diff=0）。
+
+### 5d.1 与 #112 的筛选语义对齐
+
+`list` 的筛选语义与 #112（`history` / `schedule` / `stats` 的 `--q` / `--kind`）对齐：关键词大小写不敏感子串、多条件 AND；两边实现待 #112 收敛后合并到同一匹配函数。P6 事件侧 `--kind` 取值为事件枚举 `once` / `recurring`；旧窗口行由 `type` 映射（`oneoff` / `appointment` → `once`，其余 → `recurring`）。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |
@@ -172,6 +190,11 @@ python rtc.py --workspace <dir> ack \
 | L2 P1 事件投影 / 别名 / 迁移四条性质 | `test_events_p1.py` 的 `TestWindowProjection`、`TestMigrationSkeleton` |
 | 迁移前后五条旧命令逐字节一致 | `TestGoldenRegression.test_five_commands_byte_identical_after_migration` |
 | tick 热路径不 import 事件栈 | `TestHotPathImportGuard` |
+| L2 P6 区间（日 / 年 / 区间）与跨年两侧归属 | `test_query_p6.py` 的 `TestListScopes` |
+| L2 P6 筛选 `--q` / `--kind` / `--owner` 与 AND 组合 | `TestListFilters` |
+| L2 P6 `show` 按 uid / 旧别名解析、未命中退出 4 | `TestShow` |
+| L2 P6 非法参数退出 4、stdout 为空；空结果退出 0、纯 JSON | `TestInvalidArgs`、`TestListScopes.test_empty_result_is_rc0_and_pure_json` |
+| L2 P6 五条旧命令对 P1 基线逐字节一致 | `TestOldCommandsByteIdentical` |
 
 ## 8. 明确不做
 

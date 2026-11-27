@@ -30,6 +30,7 @@
 | T-012 | todo | 外部审计提出的锁实现（持久 sidecar + 操作系统持锁）尚未合并与实机验证 | 先停旧写手，再按两套锁协议不可重叠的前提合并并实测 | 两个进程并发写同一 `alarms.json`，一成一败且无静默丢写 → 0 | 2026-11-16 | — |
 | T-013 | todo | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段 → 0 | 2026-11-16 | — |
 | T-016 | doing | L2 P1：事件一等公民模型、影子账本、旧窗口投影与迁移骨架 | 契约 `event.schema.json` + `rtc_events.py` + `rtc_migrate.py` + golden 比对；默认口径见 D-014 | 迁移前后五条命令（`status --json` / `history <date>` / `schedule <date>` / `due --now` / `report`）stdout+stderr+退出码 SHA256 逐字节 diff=0；现有测试一条不改全绿；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
+| T-021 | doing | L2 P6：事件 / 旧窗口只读查询（日 / 年 / 区间 / 跨年 / 筛选）与 `.ics` 导出位 | `rtc_query.py` + `list` / `show` 接线 + 筛选 / 跨年归属 / 上限保护；导出复用 P2 `rtc_ics.py`；口径见 D-019 | 按日 / 年 / 区间与跨年两侧用例通过；空结果 rc=0、`--json` 纯 JSON；非法参数 rc=4、stdout 空；五条旧命令对 P1 基线 SHA256 diff=0；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
 
 ## 待裁决台账
 
