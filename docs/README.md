@@ -8,6 +8,7 @@
 |---|---|---|
 | 架构说明 | 分层架构、职责边界与可移植性 | [architecture.md](architecture.md) |
 | 业务契约 | plan → due → ack → rollover 的状态转换、输出与退出码 | [behavior-contract.md](behavior-contract.md) |
+| 时区模型 | IANA 时区、旧固定偏移回退、DST 与双时区换算口径 | [timezone.md](timezone.md) |
 | 来源与许可边界 | 与上游项目的关系、许可结论 | [attribution.md](attribution.md) |
 
 ## 协作与故障处置
