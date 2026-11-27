@@ -6,7 +6,7 @@
   python rtc.py --workspace <dir> plan   [--now ISO] [--force]
   python rtc.py --workspace <dir> due    [--now ISO]
   python rtc.py --workspace <dir> ack    [--window ID] [--text TXT] [--now ISO]
-      [--date YYYY-MM-DD] [--source external --event-id ID]
+      [--date YYYY-MM-DD] [--source external --event-id ID] [--snooze N]
   python rtc.py --workspace <dir> status [--json]
   python rtc.py --workspace <dir> schedule <YYYY-MM-DD> | --month YYYY-MM [--json]
   python rtc.py --workspace <dir> history  <YYYY-MM-DD> | --month YYYY-MM | --range A..B [--json]

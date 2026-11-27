@@ -2399,6 +2399,11 @@ def cmd_ack(args: argparse.Namespace) -> int:
             print(f"ack: 事件 {args.event_id} 已处理，跳过", file=sys.stderr)
             return 0
 
+    snooze_min = getattr(args, "snooze", None)
+    if snooze_min is not None and snooze_min <= 0:
+        print(f"ack: --snooze 必须是正整数分钟，收到 {snooze_min}", file=sys.stderr)
+        return 3
+
     rev = int(state["rev"])
     cands = []
     for w in state["windows"]:
@@ -2412,7 +2417,10 @@ def cmd_ack(args: argparse.Namespace) -> int:
             if not (start <= now <= grace_end or (w["state"] == "missed" and same_day)):
                 continue
         if w["state"] in {"acked", "delivered"}:
-            continue
+            # snooze 重复回调：已收口的目标窗口仍要能被幂等命中，不二次平移
+            already_snoozed = snooze_min is not None and int(w.get("snoozeStep") or -1) == snooze_min
+            if not already_snoozed:
+                continue
         cands.append(w)
 
     if not cands:
@@ -2423,11 +2431,38 @@ def cmd_ack(args: argparse.Namespace) -> int:
     active = [w for w in cands if w["state"] in {"pending", "ringing"}]
     pool = active if active else cands
     hit = sorted(pool, key=lambda w: w["start"])[0]
+
+    # 幂等守卫：同一窗口 + 同一天 + 同一 --snooze 值已生效 → 无副作用，不再平移/投递/留痕
+    if snooze_min is not None and int(hit.get("snoozeStep") or -1) == snooze_min:
+        print(f"ack: {hit['id']} 已生效，未重复平移", file=sys.stderr)
+        return 0
+
     if hit["state"] not in {"pending", "ringing", "missed"}:
         print(f"ack: {hit['id']} 当前状态 {hit['state']}，不改写", file=sys.stderr)
         return 4
 
     prior_hit = deepcopy(hit)
+
+    if snooze_min is not None:
+        # 只平移今天这一次的账本窗口；时刻表不动，其他日子由下次 plan 从时刻表重建。
+        base_start = datetime.fromisoformat(hit["start"])
+        base_end = datetime.fromisoformat(hit["end"])
+        shifted_start = base_start + timedelta(minutes=snooze_min)
+        shifted_end = base_end + timedelta(minutes=snooze_min)
+        plan_day = date.fromisoformat(state["planDate"])
+        if shifted_start.date() != plan_day or shifted_end.date() != plan_day:
+            print(
+                f"ack: --snooze {snooze_min} 分钟会跨出 {state['planDate']}，当天内不允许跨夜平移",
+                file=sys.stderr,
+            )
+            return 3
+        hit["start"] = shifted_start.isoformat()
+        hit["end"] = shifted_end.isoformat()
+        hit["snoozeCount"] = int(hit.get("snoozeCount") or 0) + 1
+        hit["snoozeMinutes"] = int(hit.get("snoozeMinutes") or 0) + snooze_min
+        hit["snoozeStep"] = snooze_min
+        hit["snoozedAt"] = now.isoformat()
+
     hit["state"] = "acked"
     hit["ackedAt"] = now.isoformat()
     hit["ackText"] = args.text or ""
@@ -2441,17 +2476,35 @@ def cmd_ack(args: argparse.Namespace) -> int:
     except Conflict as e:
         print(f"ack: 写入冲突（{e}）", file=sys.stderr)
         return 2
-    print(f"ack: {hit['id']} 已确认", file=sys.stderr)
-    _record_history(state, routine, kind="ack", window=hit["id"], note=args.text, ts=now)
-    audit.record(
-        "ack",
-        hit["id"],
-        actor=audit.ACTOR_MODEL if args.source == "external" else audit.ACTOR_USER,
-        source="ack",
-        old={"window": prior_hit},
-        new=_audit_state_change(state, hit),
-        ts=now,
-    )
+
+    if snooze_min is not None:
+        note = f"+{snooze_min} 分钟"
+        if args.text:
+            note = f"{note}；{args.text}"
+        print(f"ack: {hit['id']} 已确认并推迟 {snooze_min} 分钟", file=sys.stderr)
+        _record_history(state, routine, kind="snooze", window=hit["id"], note=note, ts=now)
+        audit.record(
+            "snooze",
+            hit["id"],
+            actor=audit.ACTOR_MODEL if args.source == "external" else audit.ACTOR_USER,
+            source="ack:snooze",
+            old={"window": prior_hit},
+            new=_audit_state_change(state, hit),
+            reason=f"snooze {snooze_min} 分钟",
+            ts=now,
+        )
+    else:
+        print(f"ack: {hit['id']} 已确认", file=sys.stderr)
+        _record_history(state, routine, kind="ack", window=hit["id"], note=args.text, ts=now)
+        audit.record(
+            "ack",
+            hit["id"],
+            actor=audit.ACTOR_MODEL if args.source == "external" else audit.ACTOR_USER,
+            source="ack",
+            old={"window": prior_hit},
+            new=_audit_state_change(state, hit),
+            ts=now,
+        )
     res = brief.sync_brief_block(routine, state, now)
     if res.startswith(("read-failed", "write-failed")):
         print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
@@ -3713,6 +3766,11 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--date", help="只结束 YYYY-MM-DD 这一天的窗口（外部回调必填）")
     sa.add_argument("--source", choices=["external"], help="来源；外部平台适配器用 external")
     sa.add_argument("--event-id", dest="event_id", help="幂等键；同一事件重复回调只写一次")
+    sa.add_argument(
+        "--snooze",
+        type=int,
+        help="只把今天这一次的窗口后移 N 分钟；确认与推迟在同一次调用完成，不改动时刻表",
+    )
     sa.set_defaults(func=cmd_ack)
 
     schk = sub.add_parser("check")

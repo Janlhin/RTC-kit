@@ -62,6 +62,10 @@
           "description": "外部回调的幂等键；同一事件重复回调只写一次"
         },
         "missedAt": { "type": ["string", "null"], "format": "date-time" },
+        "snoozeCount": { "type": "integer", "minimum": 0, "description": "今天这一次被 ack --snooze 平移过几次；只记当天账本，跨日重建不保留" },
+        "snoozeMinutes": { "type": "integer", "minimum": 0, "description": "今天这一次累计平移的分钟数；幂等判定键的一部分" },
+        "snoozeStep": { "type": "integer", "minimum": 0, "description": "最近一次 --snooze 请求的分钟数；重复回调与它相等视为已生效" },
+        "snoozedAt": { "type": ["string", "null"], "format": "date-time", "description": "最近一次 snooze 的时刻" },
         "cancelledAt": { "type": ["string", "null"], "format": "date-time", "description": "被取消的时刻" },
         "disabled": { "type": "boolean", "description": "这个窗口已被永久停用（完成 / 永不提醒）" },
         "missedReason": { "type": ["string", "null"] },
