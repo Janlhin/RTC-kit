@@ -1,6 +1,6 @@
 # code — 确定性脚本
 
-这一层只放**不依赖模型**的代码。`rtc.py` 是入口，实现按职责分成五个模块 + 一个 Node 旁路：
+这一层只放**不依赖模型**的代码。`rtc.py` 是入口，实现按职责分成多个模块 + 一个 Node 旁路：
 
 | 文件 | 角色 | 依赖 |
 |---|---|---|
@@ -9,6 +9,10 @@
 | `rtc_archive.py` | 每日多盘 zip 备份、按天 git 归档 | 仅标准库 |
 | `rtc_metrics.py` | 指标账本：建表 / 同步 / 导出 / report | 仅标准库 |
 | `rtc_history.py` | 执行历史的唯一真相源：`state/history.db` 四表（windows / daily / checklist / events）、同步、事件、回填 | 仅标准库 |
+| `rtc_events.py` | L2 事件模型：旧窗口投影成一等公民 Event、双向别名表（P1 影子账本，P2 起 `.ics` 为准后转为只读缓存视图） | 仅标准库 |
+| `rtc_ics.py` | RFC 5545 iCalendar：旧当天状态只读导出；P2 双向层——`calendar/<YYYY>.ics` 序列化/解析、一年一文件、跨年交叉段 | 仅标准库 |
+| `rtc_calindex.py` | L2 事件 SQL 只读索引：`state/calendar-index.db`，`rebuild` 从全部 `.ics` 重建，与直扫逐条对账 | 仅标准库 |
+| `rtc_migrate.py` | 离线迁移工具：旧窗口 → 事件影子账本（P1）；`--to-ics` 迁到 `.ics` + 索引（P2，dry-run/备份/幂等/rollback） | 仅标准库 |
 | `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |

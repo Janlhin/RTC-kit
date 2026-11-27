@@ -126,3 +126,13 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-015 L2 事件台账以 `.ics` 为源真相，SQLite 仅作可重建只读索引（P2）
+
+- **日期**：2026-11-28
+- **决策**：L2 行程本的事件台账以 RFC 5545 `calendar/<YYYY>.ics` 为唯一真相；`state/calendar-index.db` 只是可删可重建的只读查询索引；旧 `routines.json` / `alarms.json` 迁移后留在原地作只读历史。
+- **背景**：NFR-2.5 跨代可读（30–40 年）是决定性约束——30 年后软件可能全死，数据必须仍是开放标准纯文本。SQLite 与私有 JSON 库不可人类直读、会被 schema 演进绑架，不能作真相。P1 的 `state/events.json` 只是过渡期派生影子副本，P2 起 `.ics` 为准。
+- **被采纳**：① 一年一个 `.ics`，按 `DTSTART` 年份归文件；跨年事件在相邻年份文件各留一段 `X-RTC-CROSS-YEAR` 交叉引用；② 索引 `rebuild` 从零扫描全部 `.ics` 灌入，查询结果与直扫 `.ics` 逐条对账；③ 冲突以 `.ics` 为准，索引陈旧只告警剔除、不反写真相；④ 迁移默认 dry-run，`--apply` 前自动备份（含 manifest 哈希），重跑幂等（别名命中保留原 UID），`--rollback` 按 manifest 恢复；⑤ RRULE 直接存 RFC 5545 标准字符串；owner / deadline / reminderPolicy / aliases / rev 等 RTC 专有字段走 `X-RTC-*` 扩展，未知属性原样保留带回。
+- **被否决**：① SQLite 作事件真相——跨代不可读，NFR-2.5 直接否决；② 单一大 `.ics` 文件——多年后单文件过大、折行与合并冲突难处理，按年份拆分；③ 索引不一致时自动重建并覆盖——历史教训（三套修复器互相重建清空数据，见 `docs/architecture.md` §5 规则 3），读取路径只告警不修复。
+- **影响**：`code/rtc_ics.py` 双向序列化/解析层、`code/rtc_calindex.py`、`code/rtc_migrate.py --to-ics`、`docs/architecture.md` §5、`docs/behavior-contract.md` §3.2、测试 `test_ics_p2.py` / `test_calindex.py` / `test_migrate_ics.py`。
+- **复审条件**：P3 RRULE 展开、P5 事件写路径接入后，复核迁移期双写口径；若后续做系统日历同步（NFR-3.6），单向导出副本另立决策，不回流改写 `.ics`。

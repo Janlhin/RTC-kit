@@ -29,6 +29,7 @@
 | T-011 | todo | 备份方案只差恢复文档：没有 `docs/RESTORE.md`，也没真删过 `alarms.json` 演练 | 写恢复文档并做一次删除恢复演练 | 删除 `state/alarms.json` 后按文档恢复，`rtc.py status` 与备份时刻一致 → 0 | 2026-11-16 | — |
 | T-012 | todo | 外部审计提出的锁实现（持久 sidecar + 操作系统持锁）尚未合并与实机验证 | 先停旧写手，再按两套锁协议不可重叠的前提合并并实测 | 两个进程并发写同一 `alarms.json`，一成一败且无静默丢写 → 0 | 2026-11-16 | — |
 | T-013 | todo | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段 → 0 | 2026-11-16 | — |
+| T-017 | doing | P2：`.ics` 成为事件台账源真相，SQLite 索引可删可重建，旧数据可迁移可回滚 | `rtc_ics` 双向 RFC 5545 序列化/解析（一年一文件、折行转义、未知属性保留）；`rtc_calindex` rebuild 从零重建并与直扫逐条对账；`rtc_migrate --to-ics` dry-run/备份/幂等/rollback，旧文件不删（见 D-015） | `pwsh -File scripts/verify.ps1` → 0；索引与直扫 `.ics` 逐条一致；迁移跑两次产物不变；rollback 恢复备份态 | 2026-11-28 | — |
 
 ## 待裁决台账
 

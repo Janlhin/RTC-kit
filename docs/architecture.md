@@ -169,6 +169,8 @@ cron（no-agent）
 | 某天到底怎么排的  | `state/schedule/YYYY-MM-DD.json` | `plan` 写一次，永久               | 权威存档（不可再算出来）   |
 | 统计查询      | `state/metrics.db`               | `metrics sync`              | **派生索引，可删可重建** |
 | 给模型看的今日行程 | `AGENTS.md` 的受控区块                | `plan` / `due` / `ack` 自动刷新 | **派生视图，可随时删**  |
+| L2 事件台账    | `calendar/<YYYY>.ics`            | 迁移工具 / 后续事件写路径       | **唯一真相（RFC 5545，跨代可读）** |
+| 事件 SQL 索引  | `state/calendar-index.db`         | `rtc_calindex.rebuild` 从 `.ics` 灌入 | **派生索引，可删可重建** |
 
 四条硬规则：
 
@@ -185,6 +187,13 @@ cron（no-agent）
 第 3 条是历史教训：曾有三套自动修复器各自判定对方是错的，互相重建，最终把全部定时任务清空。
 
 **坏文件怎么处理（v2 补充）**：`alarms.json` / `routines.json` 损坏时，代码给一行可读诊断（退出码 `3`、点名文件与行列号），**绝不覆盖原文**，也绝不抛栈退 `1`—— 因为 `rtc-due` 每 5 分钟跑一次，抛栈等于每 5 分钟给宿主留一条看不懂的失败。
+
+**L2 事件台账的真相口径（P2 / D-015）**：
+
+- `calendar/<YYYY>.ics`（RFC 5545 纯文本）是事件台账的**唯一真相**，按 `DTSTART` 年份一年一文件；跨年事件（12/31 起、次日结束）在相邻年份文件各留一段交叉引用。选 `.ics` 而不是 SQLite / 私有 JSON 作真相，是 NFR-2.5 跨代可读（30–40 年）的硬约束：纯文本任何日历软件都能打开，不被 schema 演进绑架。
+- `state/calendar-index.db` 只是查询用的**派生只读索引**：整个删掉，`rtc_calindex.rebuild()` 能从零扫描全部 `.ics` 重建；索引查询结果必须与「直接扫 `.ics`」逐条一致（有测试对账）。
+- **冲突以 `.ics` 为准**：索引里有、`.ics` 里没有的记录判为陈旧，读取时剔除并往 stderr 留一行可读告警；**不**反向改写 `.ics`（沿用规则 1 与规则 3）。索引损坏只需 rebuild，不触发任何真相修复。
+- 迁移期旧 `rules/routines.json` / `state/alarms.json` 留在原地作只读历史，迁移工具不删不改；回滚按备份 manifest 恢复 `.ics` 与索引。
 
 
 
