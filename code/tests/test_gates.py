@@ -73,6 +73,43 @@ class TestCoverageGate(unittest.TestCase):
 
 @unittest.skipUnless(PWSH and shutil.which("git"), "本机没有 PowerShell 或 Git")
 class TestConflictMarkerGate(unittest.TestCase):
+    def _separator_gate(self, payload: bytes) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory(prefix="gate-separator-") as temp:
+            root = Path(temp)
+            (root / "scripts").mkdir()
+            shutil.copy2(MARKERS, root / "scripts" / "check-conflict-markers.ps1")
+            # Keep raw CRLF bytes in the tracked worktree fixture on every OS.
+            (root / ".gitattributes").write_text("*.txt -text\n", encoding="utf-8")
+            (root / "sample.txt").write_bytes(payload)
+            for args in (
+                ["git", "init", str(root)],
+                ["git", "-C", str(root), "add", ".gitattributes", "sample.txt"],
+            ):
+                self.assertEqual(subprocess.run(args, capture_output=True).returncode, 0)
+            env = dict(
+                os.environ,
+                GIT_CONFIG_COUNT="1",
+                GIT_CONFIG_KEY_0="safe.directory",
+                GIT_CONFIG_VALUE_0=str(root),
+            )
+            result = run_pwsh(["-File", str(root / "scripts" / "check-conflict-markers.ps1")], env=env)
+            self.assertEqual((root / "sample.txt").read_bytes(), payload)
+            return result
+
+    def test_separator_blocks_with_lf_and_crlf(self):
+        for ending in (b"\n", b"\r\n"):
+            with self.subTest(ending=ending):
+                result = self._separator_gate(ending.join([b"first", b"=======", b"last", b""]))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("sample.txt:2:=======", result.stderr)
+
+    def test_separator_near_misses_stay_clean(self):
+        for ending in (b"\n", b"\r\n"):
+            with self.subTest(ending=ending):
+                payload = ending.join([b"======", b"========", b"=======x", b"======= ", b"plain", b""])
+                result = self._separator_gate(payload)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_git_read_error_is_not_treated_as_clean(self):
         with tempfile.TemporaryDirectory(prefix="gate-error-") as temp:
             wrapper = Path(temp) / "run.ps1"
