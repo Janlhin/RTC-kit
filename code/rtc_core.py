@@ -452,6 +452,7 @@ _WINDOW_KEYS = frozenset(
         "canceled",
         "checklist",
         "dateTypes",
+        "ddlLadder",
         "disabled",
         "dueDate",
         "end",
@@ -461,6 +462,7 @@ _WINDOW_KEYS = frozenset(
         "intervalMin",
         "label",
         "oneOff",
+        "preRemind",
         "seq",
         "skipDates",
         "start",
@@ -468,6 +470,47 @@ _WINDOW_KEYS = frozenset(
         "validUntil",
     }
 )
+
+# 提前量 / 阶梯时长：仅接受 Nm（分钟）/ Nh（小时），不接受天——
+# 天边界涉及时区与作息，本批不把这种歧义写进契约。
+_DURATION_RE = re.compile(r"^(\d+)([mh])$")
+
+
+def parse_duration_minutes(value: Any, *, field: str, window_id: str | None = None) -> int:
+    """把 ``"30m"`` / ``"1h"`` 解析成分钟数；非法形状抛 Validation。"""
+    if not isinstance(value, str):
+        raise Validation(
+            f"窗口 {window_id or '?'} 的 {field} 应为时长字符串（如 30m / 1h），实际是 {value!r}"
+        )
+    m = _DURATION_RE.match(value)
+    if not m:
+        raise Validation(f"窗口 {window_id or '?'} 的 {field} 时长格式不对：{value!r}（应为 Nm 或 Nh）")
+    n = int(m.group(1))
+    if n <= 0:
+        raise Validation(f"窗口 {window_id or '?'} 的 {field} 时长必须大于 0：{value!r}")
+    return n if m.group(2) == "m" else n * 60
+
+
+def _check_window_policy(w: dict[str, Any]) -> None:
+    """提前提醒 / 阶梯策略的形状校验。缺省字段不参与判定，旧配置行为不变。"""
+    wid = w.get("id")
+    if w.get("preRemind") is not None:
+        parse_duration_minutes(w["preRemind"], field="preRemind", window_id=wid)
+    ladder = w.get("ddlLadder")
+    if ladder is not None:
+        if not isinstance(ladder, list):
+            raise Validation(f'窗口 {wid or "?"} 的 ddlLadder 应为时长数组（如 ["24h","12h"]）')
+        seen: set[str] = set()
+        for label in ladder:
+            parse_duration_minutes(label, field="ddlLadder", window_id=wid)
+            if label in seen:
+                raise Validation(f"窗口 {wid or '?'} 的 ddlLadder 有重复阶梯：{label!r}")
+            seen.add(label)
+        if not w.get("dueDate"):
+            raise Validation(
+                f"窗口 {wid or '?'} 配了 ddlLadder 但没有 dueDate：阶梯锚定截止日，"
+                "普通窗口请改用 preRemind，或补上 dueDate。"
+            )
 
 
 def _check_window_keys(index: int, w: object) -> None:
@@ -544,6 +587,7 @@ def _validate_routine() -> dict[str, Any]:
         raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
     for i, w in enumerate(routine["alarmWindows"]):
         _check_window_keys(i, w)
+        _check_window_policy(w)
     return routine
 
 
@@ -1080,35 +1124,41 @@ def build_windows(
             if w.get("expectFires") and int(w["expectFires"]) != exp:
                 raise Validation(f"窗口 {w['id']} 的 expectFires={w['expectFires']} 与算术值 {exp} 不符")
         expired = now > end
-        out.append(
-            {
-                "id": w["id"],
-                "ocid": occurrence_id(w, day_iso),
-                "seq": int(w.get("seq") or 0) if one_off else 0,
-                "label": label,
-                "type": window_type(w),
-                "review": is_review,
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "intervalMin": interval,
-                "expectFires": exp,
-                "fireCount": 0,
-                "state": "skipped" if expired else "pending",
-                "lastFiredAt": None,
-                "ackedAt": None,
-                "ackText": None,
-                "missedAt": None,
-                "missedReason": "late_plan" if expired else None,
-                "ackHint": (w.get("ackHints") or ["知道了"])[0],
-                "format": w.get("format"),
-                "oneOff": one_off or is_review,
-                "dueDate": due,
-                "disabled": False,
-                "cancelledAt": None,
-                "checklist": _checklist_defs(items_def),
-                "checked": [],
-            }
-        )
+        entry: dict[str, Any] = {
+            "id": w["id"],
+            "ocid": occurrence_id(w, day_iso),
+            "seq": int(w.get("seq") or 0) if one_off else 0,
+            "label": label,
+            "type": window_type(w),
+            "review": is_review,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "intervalMin": interval,
+            "expectFires": exp,
+            "fireCount": 0,
+            "state": "skipped" if expired else "pending",
+            "lastFiredAt": None,
+            "ackedAt": None,
+            "ackText": None,
+            "missedAt": None,
+            "missedReason": "late_plan" if expired else None,
+            "ackHint": (w.get("ackHints") or ["知道了"])[0],
+            "format": w.get("format"),
+            "oneOff": one_off or is_review,
+            "dueDate": due,
+            "disabled": False,
+            "cancelledAt": None,
+            "checklist": _checklist_defs(items_def),
+            "checked": [],
+        }
+        # 策略字段只在配置了才落状态：旧配置的账本形状与旧版逐字节一致。
+        if w.get("preRemind"):
+            entry["preRemind"] = w["preRemind"]
+            entry["preRemindFiredAt"] = None
+        if w.get("ddlLadder"):
+            entry["ddlLadder"] = list(w["ddlLadder"])
+            entry["ladderFired"] = {}
+        out.append(entry)
     if not out:
         if errors:
             # 有窗口被跳过：账本为空这件事必须由调用方告警，不能被「空日」掩盖
@@ -1280,6 +1330,7 @@ def carry_forward(old: dict[str, Any] | None, fresh: list[dict[str, Any]]) -> li
         else:
             _migrate_checklist(p, w)
             _carry_occurrence_identity(p, w)
+            _carry_pre_fire_marks(p, w)
             merged.append(w)
     return merged
 
@@ -1293,6 +1344,15 @@ def _carry_occurrence_identity(old: dict[str, Any], new: dict[str, Any]) -> None
     if new.get("start") != old.get("start"):
         seq += 1
     new["seq"] = seq
+
+
+def _carry_pre_fire_marks(old: dict[str, Any], new: dict[str, Any]) -> None:
+    """同日重建时把提前类投递标记带过去，避免 plan --force 后同一阶梯/预提醒再响一遍。"""
+    if old.get("preRemindFiredAt"):
+        new["preRemindFiredAt"] = old["preRemindFiredAt"]
+    old_ladder = old.get("ladderFired")
+    if isinstance(old_ladder, dict) and old_ladder:
+        new["ladderFired"] = deepcopy(old_ladder)
 
 
 def rollover(old: dict[str, Any] | None, today_iso: str) -> list[dict[str, Any]]:
@@ -2030,6 +2090,59 @@ def cmd_plan(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- 到点判断
 
 
+_PRE_FIRE_STATES = {"pending", "ringing"}
+
+
+def _human_duration(mins: int) -> str:
+    """分钟数转口语时长：90 → "1 小时 30 分钟"，30 → "30 分钟"。"""
+    if mins < 60:
+        return f"{mins} 分钟"
+    hours, rest = divmod(mins, 60)
+    return f"{hours} 小时 {rest} 分钟" if rest else f"{hours} 小时"
+
+
+def _pre_fire_candidates(w: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """已到点且未投递的提前类候选（提前提醒 / 截止阶梯）。
+
+    候选锚点都在普通窗口区间 ``[start, end]`` 之外，所以走独立判定，不占
+    ``fireCount``。返回项：``kind`` / ``label``（配置原值）/ ``moment`` / ``mins``。
+
+    优先级：阶梯（临近截止，更紧急）> 提前提醒；同类里离 ``now`` 最近的排前。
+    终态窗口不复活；摘要 / 早报 / 复盘日实例不参与。
+    """
+    cands: list[dict[str, Any]] = []
+    if w.get("state") not in _PRE_FIRE_STATES:
+        return cands
+    if w.get("format") or w.get("review"):
+        return cands
+    start = datetime.fromisoformat(w["start"])
+
+    today = now.date()
+    pre = w.get("preRemind")
+    if pre and not w.get("preRemindFiredAt"):
+        mins = parse_duration_minutes(pre, field="preRemind", window_id=w.get("id"))
+        moment = start - timedelta(minutes=mins)
+        # 阶梯/预提醒点归属它自己那天的实例：跨日补建的账本不替昨天补响。
+        if moment.date() == today and moment <= now < start:
+            cands.append({"kind": "pre-remind", "label": pre, "moment": moment, "mins": mins})
+
+    ladder = w.get("ddlLadder") or []
+    due = w.get("dueDate")
+    if due and ladder:
+        deadline = datetime.combine(date.fromisoformat(due), start.time(), tzinfo=start.tzinfo)
+        fired = w.get("ladderFired") or {}
+        for label in ladder:
+            if label in fired:
+                continue
+            mins = parse_duration_minutes(label, field="ddlLadder", window_id=w.get("id"))
+            moment = deadline - timedelta(minutes=mins)
+            if moment.date() == today and moment <= now < deadline:
+                cands.append({"kind": "ladder", "label": label, "moment": moment, "mins": mins})
+
+    cands.sort(key=lambda c: (0 if c["kind"] == "ladder" else 1, -c["moment"].timestamp()))
+    return cands
+
+
 def cmd_due(args: argparse.Namespace) -> int:
     """due 入口：先进心跳 attemptAt，判定完整走完才补 lastOkAt。
 
@@ -2194,6 +2307,60 @@ def _due_eval(
                 w["missedReason"] = "window_expired"
             missed_changes.append((w["id"], prior))
             changed = True
+
+    # 1b) 提前提醒 / 截止阶梯：锚点在普通 [start, end] 区间之外，单独判定、
+    # 单独去重；不占 fireCount，也不改窗口终态（响完仍是 pending，等到点再走普通链路）。
+    pre_hit: dict[str, Any] | None = None
+    pre_cand: dict[str, Any] | None = None
+    for w in state["windows"]:
+        cands = _pre_fire_candidates(w, now)
+        if cands:
+            pre_hit, pre_cand = w, cands[0]
+            break
+
+    if pre_hit is not None and pre_cand is not None:
+        prior_pre = deepcopy(pre_hit)
+        if pre_cand["kind"] == "pre-remind":
+            pre_hit["preRemindFiredAt"] = now.isoformat()
+            audit_action = "due-pre-remind"
+            hist_kind = "pre-remind"
+        else:
+            pre_hit.setdefault("ladderFired", {})[pre_cand["label"]] = now.isoformat()
+            audit_action = "due-ladder"
+            hist_kind = "ladder"
+            # 阶梯点常落在当天普通到点槽位上（如 24h 前 = 前一天同一时刻）：
+            # 截止日之前的阶梯投递顶替当天普通到点，避免下一 tick 再响一遍；
+            # 截止日当天的阶梯（如 12h 早晨提醒）不压晚上的到点。
+            if str(pre_hit.get("dueDate")) and now.date().isoformat() < str(pre_hit["dueDate"]):
+                pre_hit["fireCount"] = int(pre_hit.get("expectFires", 1))
+        state["rev"] = rev + 1
+        try:
+            atomic_write(STATE, state, expected_rev=rev)
+        except Conflict as e:
+            print(f"due: 写入冲突（{e}），提前提醒本次静默，下一 tick 重试", file=sys.stderr)
+            raise _DueConflict() from e
+        _record_history(state, routine, kind=hist_kind, window=pre_hit["id"], note=pre_cand["label"], ts=now)
+        audit.record(
+            audit_action,
+            pre_hit["id"],
+            actor=audit.ACTOR_PROGRAM,
+            source="due",
+            old={"window": prior_pre},
+            new=_audit_state_change(state, pre_hit),
+            reason=pre_cand["label"],
+            ts=now,
+        )
+        flush_alerts()
+        res = brief.sync_brief_block(routine, state, now)
+        if res.startswith(("read-failed", "write-failed")):
+            print(f"brief: AGENTS.md 同步失败（{res}）", file=sys.stderr)
+        head = f"{pre_hit['label']} —— {now.strftime('%H:%M')}"
+        if hist_kind == "pre-remind":
+            head += f"（提前提醒：距开始还有 {_human_duration(pre_cand['mins'])}）"
+        else:
+            head += f"（截止前 {pre_cand['label']} 提醒）"
+        print(head)
+        return 0
 
     # 2) 找命中窗口
     # 早报兜底窗口（format=report-fallback）：当天已有「汇报送达」的回执时，

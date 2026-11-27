@@ -5353,5 +5353,237 @@ class TestRecovery(RtcCase):
         self.assertEqual(bad.missed, [])
 
 
+class TestPreRemind(RtcCase):
+    """FR-4.2 提前提醒：到 preRemind 时点响一次，不占普通到点次数。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+                "preRemind": "30m",
+            }
+        ]
+        self.write_routine(r)
+
+    def audit(self) -> list[dict]:
+        p = self.ws / "state" / "audit.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_pre_remind_fires_once_then_normal_fire(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+
+        rc, out, err = self.cli("due", now="2026-11-10T06:30:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("提前提醒", out)
+        self.assertIn("30 分钟", out)
+        w = self.window("wake")
+        self.assertTrue(w["preRemindFiredAt"], "提前提醒标记要落账")
+        self.assertEqual(w["fireCount"], 0, "提前提醒不占普通到点次数")
+
+        rc, out, _ = self.cli("due", now="2026-11-10T06:35:00+08:00")
+        self.assertEqual(out, "", "同一提前点只响一次")
+
+        rc, out, err = self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("提前提醒", out, "到点提醒不能再挂提前提醒的后缀")
+        self.assertEqual(self.window("wake")["fireCount"], 1)
+
+        actions = [a["action"] for a in self.audit()]
+        self.assertEqual(actions.count("due-pre-remind"), 1)
+        self.assertEqual(actions.count("due-fire"), 1)
+        kinds = [
+            r[0]
+            for r in sqlite3.connect(self.ws / "state" / "history.db").execute(
+                "SELECT kind FROM events WHERE kind='pre-remind'"
+            )
+        ]
+        self.assertEqual(len(kinds), 1, "history 里 kind 要能区别提前提醒")
+
+    def test_ack_same_day_suppresses_pre_remind(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, _, err = self.cli("ack", "--window", "wake", "--text", "起了", now="2026-11-10T06:05:00+08:00")
+        self.assertEqual(rc, 0, err)
+
+        rc, out, _ = self.cli("due", now="2026-11-10T06:30:00+08:00")
+        self.assertEqual(out, "", "已确认的窗口当天不再补提前提醒")
+        self.assertEqual(self.window("wake")["state"], "acked")
+        self.assertEqual([a for a in self.audit() if a["action"] == "due-pre-remind"], [])
+
+    def test_pre_remind_does_not_fire_after_start(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("提前提醒", out, "过了 start 就不再补发提前提醒")
+
+
+class TestDdlLadder(RtcCase):
+    """FR-1.5 截止阶梯：24h/12h 各响一次，跨日不补响，重复 due 不重复投递。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "draft",
+                "label": "写报告",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "ackHints": ["好了"],
+                "dueDate": "2026-12-02",
+                "validFrom": "2026-11-30",
+                "validUntil": "2026-12-02",
+                "ddlLadder": ["24h", "12h"],
+            }
+        ]
+        self.write_routine(r)
+
+    def audit(self) -> list[dict]:
+        p = self.ws / "state" / "audit.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_ladder_two_points_once_each_cross_day(self):
+        # 截止日 2026-12-02 20:00；24h 点 = 12-01 20:00，12h 点 = 12-02 08:00。
+        self.cli("plan", now="2026-12-01T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-12-01T20:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("截止前 24h", out)
+
+        for hhmm in ("20:05", "20:10"):
+            rc, out, _ = self.cli("due", now=f"2026-12-01T{hhmm}:00+08:00")
+            self.assertEqual(out, "", f"{hhmm} 不该再投 24h 阶梯")
+
+        self.cli("plan", now="2026-12-02T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-12-02T08:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("截止前 12h", out)
+        rc, out, _ = self.cli("due", now="2026-12-02T08:05:00+08:00")
+        self.assertEqual(out, "", "12h 阶梯只响一次")
+
+        rc, out, err = self.cli("due", now="2026-12-02T20:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("最后一天", out, "阶梯不含到点本身，截止日晚到点照常")
+
+        ladder = [a for a in self.audit() if a["action"] == "due-ladder"]
+        self.assertEqual(len(ladder), 2, "每个阶梯点恰好一条投递记录")
+        self.assertEqual(sorted(a["reason"] for a in ladder), ["12h", "24h"])
+        self.assertEqual([a["action"] for a in self.audit()].count("due-fire"), 1)
+        con = sqlite3.connect(self.ws / "state" / "history.db")
+        kinds = [r[0] for r in con.execute("SELECT kind FROM events WHERE kind='ladder'")]
+        self.assertEqual(len(kinds), 2, "history 里阶梯事件要可区分")
+
+    def test_stale_ladder_point_not_refired_next_day(self):
+        self.cli("plan", now="2026-12-01T06:00:00+08:00")
+        self.cli("due", now="2026-12-01T20:00:00+08:00")
+        self.cli("plan", now="2026-12-02T06:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-12-02T07:00:00+08:00")
+        self.assertNotIn("截止前", out, "昨天的 24h 点不在今天补响")
+
+    def test_ladder_requires_due_date(self):
+        r = base_routine()
+        r["alarmWindows"][0]["ddlLadder"] = ["24h", "12h"]
+        self.write_routine(r)
+        rc, _, err = self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.assertEqual(rc, 3, err)
+
+
+class TestPolicyValidation(RtcCase):
+    """提前量 / 阶梯时长的形状校验。"""
+
+    def _plan(self, window: dict) -> tuple[int, str]:
+        r = base_routine()
+        r["alarmWindows"] = [window]
+        self.write_routine(r)
+        rc, _, err = self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        return rc, err
+
+    def test_bad_pre_remind_shape_rejected(self):
+        rc, err = self._plan(
+            {
+                "id": "w",
+                "label": "x",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "preRemind": "30",
+            }
+        )
+        self.assertEqual(rc, 3, err)
+
+    def test_day_unit_rejected(self):
+        rc, err = self._plan(
+            {
+                "id": "w",
+                "label": "x",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "preRemind": "1d",
+            }
+        )
+        self.assertEqual(rc, 3, err)
+
+    def test_duplicate_ladder_labels_rejected(self):
+        rc, err = self._plan(
+            {
+                "id": "w",
+                "label": "x",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "dueDate": "2026-12-02",
+                "ddlLadder": ["12h", "12h"],
+            }
+        )
+        self.assertEqual(rc, 3, err)
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_schema_accepts_policy_fields(self):
+        import jsonschema
+
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        good = base_routine()
+        good["alarmWindows"][0].update({"preRemind": "1h"})
+        errs = list(jsonschema.Draft202012Validator(schema).iter_errors(good))
+        self.assertEqual(errs, [], f"合法 preRemind 不该被拒：{errs[:1]}")
+
+
+class TestOldConfigUnchanged(RtcCase):
+    """旧配置（不含新字段）：账本形状与输出都不允许变。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_routine(base_routine())
+
+    def test_state_has_no_policy_keys(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        w = self.window("wake")
+        for key in ("preRemind", "ddlLadder", "preRemindFiredAt", "ladderFired"):
+            self.assertNotIn(key, w, f"旧配置窗口不该出现 {key}")
+
+    def test_normal_output_has_no_policy_suffix(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("提前提醒", out)
+        self.assertNotIn("截止前", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

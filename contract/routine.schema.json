@@ -166,6 +166,17 @@
         "format": {
           "enum": ["follow", "summary", "report", "report-fallback"],
           "description": "摘要/早报窗口类型：follow=跟进、summary=总结、report=早报（due 直接读 state/reports/<日期>.md，缺失时静态兜底）、report-fallback=早报兜底窗口（有 result=ok 回执则静默，否则有文件补发文件、没文件发静态）。report 与 report-fallback 不能同时启用"
+        },
+        "preRemind": {
+          "type": "string",
+          "pattern": "^\\d+[mh]$",
+          "description": "提前提醒：在窗口当天 start 时刻之前多久先响一次，如 \"30m\" / \"1h\"。省略 = 不提前提醒，行为与旧版完全一致。锚点是当天 start，不含秒级精度；同一 (窗口, 日期) 只响一次"
+        },
+        "ddlLadder": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^\\d+[mh]$" },
+          "description": "截止阶梯预警：每个阶梯标签（如 \"24h\" / \"12h\"）在 deadline 之前对应时刻各响一次。只对带 dueDate 的倒计时窗口生效；锚点是截止日当天窗口 start 时刻（dueDate 本身无钟点，复用现有到点时刻）；阶梯不含到点本身。省略 = 不跑阶梯，行为与旧版完全一致"
         }
       },
       "allOf": [

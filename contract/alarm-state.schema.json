@@ -94,6 +94,16 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "已勾选的清单项 id"
+        },
+        "preRemindFiredAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "提前提醒（preRemind）本次实例已投递的时刻；空 = 还没响。去重键：(窗口 id, planDate)，不与普通到点共用 fireCount"
+        },
+        "ladderFired": {
+          "type": "object",
+          "description": "截止阶梯已投递记录：阶梯标签（如 \"24h\"）→ 投递时刻。去重键：(窗口 id, planDate, 阶梯标签)；未配置 ddlLadder 时为空对象",
+          "additionalProperties": { "type": "string", "format": "date-time" }
         }
       },
       "allOf": [
