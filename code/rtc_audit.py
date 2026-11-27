@@ -108,8 +108,8 @@ def record(
     """追加一条审计记录。任何失败都只打 stderr，不阻断主操作。
 
     ``action``：动作名（plan / due-fire / due-missed / ack / check / cancel /
-    complete / disable / enable / postpone / set-time / add / edit /
-    prune-expired / recovery / restore-backup …）。
+    cancel-undo / complete / disable / enable / postpone / set-time / add /
+    edit / prune-expired / recovery / restore-backup …）。
     ``target``：逻辑作用对象（窗口 id；账本级事件用 ``"-"``）。
     ``old`` / ``new``：变更前后的关键值（窗口定义 / 窗口运行时字段 / 账本摘要）。
     ``reason``：可空备注（如撤销打勾、冲突回滚），不写投递正文与个人信息。
