@@ -38,6 +38,7 @@ import rtc_archive as archive
 import rtc_brief as brief
 import rtc_history as hist
 import rtc_metrics as metrics
+import rtc_query as query
 import rtc_recovery as recovery
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -3539,6 +3540,26 @@ def main(argv: list[str] | None = None) -> int:
     ss = sub.add_parser("status")
     ss.add_argument("--json", action="store_true")
     ss.set_defaults(func=brief.cmd_status)
+
+    sl = sub.add_parser("list", help="L2 行程本查询：事件 + 旧窗口（只读）")
+    sl.add_argument("--date", help="YYYY-MM-DD，查这一天")
+    sl.add_argument("--year", help="YYYY，查这一年 1/1–12/31")
+    sl.add_argument("--from", dest="from_date", help="区间起点 YYYY-MM-DD（配 --to）")
+    sl.add_argument("--to", dest="to_date", help="区间终点 YYYY-MM-DD（配 --from）")
+    sl.add_argument("--q", help="关键词：标题/标识/owner/别名，大小写不敏感子串")
+    sl.add_argument("--kind", help="once / recurring")
+    sl.add_argument("--owner", help="self / other:<name>")
+    sl.add_argument("--json", action="store_true")
+    sl.set_defaults(func=query.cmd_list)
+
+    ssh = sub.add_parser("show", help="按 uid 或旧 id 看单条事件全字段")
+    ssh.add_argument("target", help="事件 uid，或影子账本别名表里的旧 id")
+    ssh.add_argument("--json", action="store_true")
+    ssh.set_defaults(func=query.cmd_show)
+
+    sexp = sub.add_parser("export", help="导出 .ics（序列化层待 P2 接入）")
+    sexp.add_argument("--ics", metavar="目录或文件", help="输出目录或 .ics 文件路径")
+    sexp.set_defaults(func=query.cmd_export)
 
     sb = sub.add_parser("brief")
     sb.add_argument("--now")
