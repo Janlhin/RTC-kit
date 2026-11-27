@@ -126,3 +126,14 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-013 L0/L1 中文时间解析用标准库自研，不引第三方 NLU 库
+
+- **日期**：2026-11-28
+- **决策**：交互入口的中文时间短语解析（NLU L0 词表 + L1 本地时间计算）落在新模块 `code/rtc_nlu.py`，纯标准库（`re` / `datetime` / `zoneinfo`），不接 LLM、运行时零第三方依赖；判定链路保持不依赖它。
+- **背景**：需求表 FR-1.1 / FR-1.2 要求「下周三下午 3 点」「半小时后」「下个月 1 号」这类相对时间可本地录入；NFR-4.2 要求高频动作不走 LLM，NFR-4.3 要求无网可用。既有架构里「把明天八点叫我解析成结构化操作」原本划给模型层，但封闭词表内的一次性时间点可以确定性算出来，不必每次唤醒模型。
+- **被采纳**：① 封闭词表 + 正则抽取日锚点 / 时刻 / 相对时长，日期算术走本地墙钟，时长叠加走 UTC 往返；② `now` 由调用方注入，模块内部不读系统时间，保证可回归、可复现；③ 周期 / 集合类表达明确抛 `UnsupportedExpression`，不降级成单次时刻；④ 只被 `rtc_once.py` import，tick 路径隔离有静态 + 运行时双重测试断言。
+- **被否决**：① 引入通用自然时间库（dateparser / chrono 系等）——带来运行时第三方依赖，与「tick 零第三方、无网可用」冲突，且库自身的歧义口径不可控；② 直接交给 LLM 解析——违背 NFR-4.2 / 4.3，同一输入不保证同一输出，不可回归；③ 在 `rtc_core` / `rtc_due` 内联解析逻辑——判定链路会染上交互层依赖，破坏单一入口与隔离边界。
+- **检索记录**：按「标准库 → 已有依赖 → 注册表」顺序评估；标准库 `re` + `zoneinfo` 已覆盖本轮封闭词表；仓库既有依赖（jsonschema / coverage 等）与时间解析无关；未从注册表安装任何新包。
+- **影响**：`code/rtc_nlu.py`、`code/rtc_once.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`docs/README.md`、`TASKS.md` 待补台账。
+- **复审条件**：若后续接 RRULE 周期事件、裸周几缺时刻的交互确认、或 L2 模型兜底，单独立项；开放表达不在本模块内消化。
