@@ -38,6 +38,7 @@ import rtc_archive as archive
 import rtc_brief as brief
 import rtc_history as hist
 import rtc_metrics as metrics
+import rtc_occurrence as occurrence
 import rtc_recovery as recovery
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -1631,6 +1632,9 @@ def _build_prebuilt_state(
     kind = plan_kind(target, routine)
     errors: list[str] = []
     fresh = [] if day_disabled(routine, kind) else build_windows(routine, target, kind, now, errors=errors)
+    fresh += occurrence.occurrence_windows(
+        WORKSPACE, now.tzinfo or resolve_tz(routine), target, now, errors=errors
+    )
     windows = _carry_windows_from_previous(old, fresh)
     state = {
         "version": 1,
@@ -1808,6 +1812,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if day_disabled(routine, kind)
         else build_windows(routine, now.date(), kind, now, errors=plan_errors)
     )
+    event_windows = occurrence.occurrence_windows(WORKSPACE, tz, now.date(), now, errors=plan_errors)
+    fresh += event_windows
 
     if old and old.get("planDate") == today:
         windows = carry_forward(old, fresh)
@@ -1871,7 +1877,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         for w in routine.get("alarmWindows") or []
         if not w.get("oneOff") and not str(w.get("id") or "").startswith("once-")
     )
-    if recurring == 0:
+    if recurring == 0 and not event_windows:
         print(
             "plan: 时刻表里只有一次性提醒，没有日常窗口——今天不会有日常提醒；改时刻表见 rules/routines.md",
             file=sys.stderr,
