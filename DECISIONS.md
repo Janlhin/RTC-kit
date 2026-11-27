@@ -137,3 +137,13 @@
 - **检索记录**：按「标准库 → 已有依赖 → 注册表」顺序评估；标准库 `re` + `zoneinfo` 已覆盖本轮封闭词表；仓库既有依赖（jsonschema / coverage 等）与时间解析无关；未从注册表安装任何新包。
 - **影响**：`code/rtc_nlu.py`、`code/rtc_once.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`docs/README.md`、`TASKS.md` 待补台账。
 - **复审条件**：若后续接 RRULE 周期事件、裸周几缺时刻的交互确认、或 L2 模型兜底，单独立项；开放表达不在本模块内消化。
+
+## D-017 周期中文表达产出 RFC 5545 RRULE，解析层开关门控写路径
+
+- **日期**：2026-11-28
+- **决策**：NLU 解析器增加周期分支。封闭词表内的天 / 周 / 月 / 年与每 N 周期，产出 RFC 5545 RRULE 字符串 + 首个 occurrence 的 DTSTART；周期解析由 `recurring` 开关门控，默认关闭，入口一次性契约行为不变。
+- **背景**：FR-1.4 要求周期事件可录入；#108（D-013）只解析一次性时间点，整类周期表达被拒绝。P4 上半段先把确定性解析做掉，落库与 occurrence 展开归 P3 / P5，本层不接写路径。
+- **被采纳**：① RRULE 直接存标准字符串（`FREQ` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `INTERVAL`），不自造 DSL；② DTSTART 取注入 now 之后的下一命中槽位，今天槽位已过则顺到下一周期；③ 周期表达缺时刻默认 09:00；④ 工作日历 / BYSETPOS / 相对月末 / 第 N 周定位 / 隔周等形状抛 `UnsupportedExpression`，不猜、不降级；⑤ 开关默认 `False`，`rtc_once.py` 零改动。
+- **被否决**：① 入口直接登记周期窗口——写路径与展开引擎未就绪，会把周期事件偷偷降级成单次；② 引入第三方自然时间库——破坏运行时零第三方依赖，且歧义口径不可控；③ 接 LLM 兜底——违背确定性与无网可用，同一输入不保证同一输出。
+- **影响**：`code/rtc_nlu.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`TASKS.md`（T-019 新增，T-014 收窄）。
+- **复审条件**：P3 展开引擎与 P5 写路径接线后，评估是否默认打开 `recurring`；BYSETPOS / 工作日历 / 节假日支持单独立项。
