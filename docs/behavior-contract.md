@@ -42,11 +42,11 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 | `pending` | `ringing` / `skipped` / `missed` / `cancelled` | `due` / `plan` / `cancel` |
 | `ringing` | `ringing`（下一 tick）/ `acked` / `delivered` / `missed` / `cancelled` | `due` / `ack` / `cancel` |
 | `acked` / `delivered` / `missed` / `skipped` | `pending`（**仅** `check --undo` 撤销打勾，清单未勾完） | `check` |
-| `cancelled` | 不动 | — |
+| `cancelled` | 取消前状态（**仅**当天 `cancel --undo` 按痕迹回退，见 §5d） | `cancel --undo` |
 
 三条不许发生的转换：
 
-1. 终态 → `ringing`（除 `check --undo` 那条受控回退）
+1. 终态 → `ringing`（除 `check --undo` / `cancel --undo` 两条受控回退）
 2. `acked` → 任何「重新响」
 3. 同一 `(window_id, 日期)` 同时存在两个状态
 
@@ -132,13 +132,13 @@ python rtc.py --workspace <dir> ack \
 ## 5c. 审计日志契约（`state/audit.jsonl`）
 
 - **定位**：JSON Lines、一行一条、**只追加**的事件溯源流，用于事后追溯与按时点回放重建。它与 `state/history.db` 分工不同：history.db 是可删可重建的派生执行索引（参与统计聚合）；audit.jsonl 落盘后既有行**永不重写、永不删除、永不原地修改**。
-- **谁写**：任何一次让 `rules/routines.json` 或 `state/alarms.json` 内容发生变化的成功写操作，都必须落一条记录。覆盖：`add` / `edit` / `set-time` / `postpone` / `cancel` / `complete` / `disable` / `enable`（时刻表侧），`plan` 账本生成、`due-fire` / `due-missed`、`ack` / `check` / `cancel` / `complete` / `disable`（账本侧），以及预排激活、恢复归档、自愈恢复底稿、过期一次性清理。纯文件搬运不记：备份、剪枝归档、快照导出、投递回执、指标库。
+- **谁写**：任何一次让 `rules/routines.json` 或 `state/alarms.json` 内容发生变化的成功写操作，都必须落一条记录。覆盖：`add` / `edit` / `set-time` / `postpone` / `cancel` / `complete` / `disable` / `enable`（时刻表侧），`plan` 账本生成、`due-fire` / `due-missed`、`ack` / `check` / `cancel` / `cancel-undo` / `complete` / `disable`（账本侧），以及预排激活、恢复归档、自愈恢复底稿、过期一次性清理。纯文件搬运不记：备份、剪枝归档、快照导出、投递回执、指标库。
 - **字段**：
 
   | 字段 | 含义 |
   |---|---|
   | `ts` | ISO8601 带时区偏移的时间戳（沿用工作区 IANA 时区） |
-  | `action` | 动作名：`plan` / `due-fire` / `due-missed` / `ack` / `check` / `cancel` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
+  | `action` | 动作名：`plan` / `due-fire` / `due-missed` / `ack` / `check` / `cancel` / `cancel-undo` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
   | `target` | 逻辑作用对象：窗口 id；账本级事件用 `"-"`。**不记本机绝对路径** |
   | `actor` | `program`（cron / 程序自动写）/ `user`（交互命令直接调用）/ `model`（模型或外部适配器代操作，如 `ack --source external`） |
   | `source` | 哪个子命令（可带子路径，如 `postpone:state`、`due:promote`） |
@@ -150,6 +150,17 @@ python rtc.py --workspace <dir> ack \
 - **回放边界**：`replay_state` / `replay_routine` 是纯函数，按 `ts <= 截止时点` 折叠事件流重建当时账本/时刻表。本批**仍以 `alarms.json` / `routines.json` 为唯一真相源**，审计流不是真相源；回放只用于核对与追溯。命令行暴露方式本批未加（仅库函数），后续若开放只允许给已有命令加参数，不新增子命令。
 - **隐私**：记录不含个人信息、绝对路径、token；`target` 只用逻辑 id。
 - **遗留**：日志轮转 / 压缩策略本批不做；Event 模型迁移另有独立 lane。
+
+### 5d 取消撤销契约（FR-3.4，`cancel --undo`）
+
+- **定位**：误取消当天可恢复。`cancel --undo` 不新增子命令，是既有 `cancel` 的受控回退；只恢复**今天账本里的这一次实例**，不是把安排永久复活。
+- **痕迹来源**：复用审计流里账本侧 `action=cancel`（`source="cancel"`）事件的 `old.window` 取消前快照，不另造撤销底稿。快照 = 窗口运行时全量字段（`state` / `fireCount` / `lastFiredAt` / `ackedAt` / `ackText` / `missedAt` / `missedReason` / `cancelledAt` / `start` / `end` / `checklist` / `checked` 等）；身份字段 `id` / `ocid` / `seq` 是 plan 分配的，撤销时保持现状不回写。
+- **有效期**：只认运行时区下**今天**的取消痕迹；昨天及更早的痕迹拒绝撤销（退出 `4`，一行说明）。账本 `planDate` 不是今天同样拒绝。
+- **恢复口径**：按快照逐字段还原当前账本实例。当前不是 `cancelled`、账本里已无该实例、找不到痕迹，都明确失败（退出 `4`），不许把任意窗口复活成 `pending`。
+- **不碰的东西**：不回滚 `cancel` 对时刻表的截断（一次性 `disabled` / 倒计时 `canceled`+`dueDate` / `validUntil` 截断）；不动同一事件的其它日期；不动 `disable` 设下的永久停用状态——永久停用没有 cancel 痕迹，undo 无法复活。需要连未来日期一起恢复的，走 `enable` / `add-window`。
+- **并发**：撤销写入走既有 `rev` 乐观锁与 sidecar 写锁；冲突按既有口径退出 `2`，不覆盖别人的写入，也不写撤销审计。
+- **留痕**：成功撤销写一条 `action=cancel-undo`（`old` = 取消态窗口快照，`new` = 恢复后窗口快照）+ history 事件 `kind=cancel-undo`。
+- **与 `disable` 的区别**：`cancel` 取消的是某次安排（当天误操作可撤销）；`disable` 关掉一类提醒（永久停用，只能 `enable` 恢复）。两者痕迹互不通用。
 
 ## 6. 三条硬规矩（跨类型）
 
@@ -176,6 +187,12 @@ python rtc.py --workspace <dir> ack \
 | 合法空日落盘、不误报 | `TestEmptyDaySemantics` |
 | 清单撤销回退（不留“已确认未勾完”） | `TestChecklist.test_undo_after_all_checked_restores_reminder` |
 | 清单勾选跨天延续 | `TestChecklist.test_checked_survives_next_day` |
+| 取消 → 撤销逐字段回到取消前状态 | `TestCancelUndo.test_undo_restores_window_field_by_field` |
+| 撤销后到点再次正常响 | `TestCancelUndo.test_undo_then_due_fires_again` |
+| 跨日 / 陈旧账本拒绝撤销 | `TestCancelUndo.test_undo_rejects_yesterday_trace`、`TestCancelUndo.test_undo_rejects_stale_ledger` |
+| 撤销冲突走既有 rev 语义、不丢写 | `TestCancelUndo.test_undo_conflict_keeps_concurrent_write` |
+| 无痕迹 / 永久停用不可凭空复活 | `TestCancelUndo.test_undo_without_trace_fails_cleanly`、`TestCancelUndo.test_undo_cannot_resurrect_disabled` |
+| cancel 与 cancel-undo 审计 old/new 可对照 | `TestCancelUndo.test_cancel_and_undo_audit_events_comparable` |
 | 稳定 ID / orphaned 事件 | `TestStableIds` |
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
 | 审计只追加、并发无撕裂、失败不阻断 | `test_audit_jsonl.py` `AuditWriterCase` |
