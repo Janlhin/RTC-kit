@@ -9,6 +9,7 @@
 | `rtc_archive.py` | 每日多盘 zip 备份、按天 git 归档 | 仅标准库 |
 | `rtc_metrics.py` | 指标账本：建表 / 同步 / 导出 / report | 仅标准库 |
 | `rtc_history.py` | 执行历史的唯一真相源：`state/history.db` 四表（windows / daily / checklist / events）、同步、事件、回填 | 仅标准库 |
+| `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 
@@ -22,6 +23,7 @@
 python rtc.py --workspace <dir> plan     # 生成/补建当天窗口（只增不改；顺手预排明天）
 python rtc.py --workspace <dir> plan --for-date 2026-12-16  # 只预排明天（D+1）的账本
 python rtc.py --workspace <dir> due      # 该响就打印文案，不该响就什么都不打印
+python rtc.py --workspace <dir> due --bootstrap  # 宿主重启后显式跑一次停摆恢复核对
 python rtc.py --workspace <dir> ack      # 写入确认
 python rtc.py --workspace <dir> status   # 人读 / --json 机器读
 python rtc.py --workspace <dir> metrics  # sync / report / schedule
@@ -242,7 +244,7 @@ metrics.db             统计索引，可缺失            ← 旁路
 | `acked` | 已确认 | — |
 | `skipped` | 被跳过 | `postponed` / `late_plan` |
 | `cancelled` | 被用户取消 | `cancelled` |
-| `missed` | 没响成 | `window_expired` / `day_rollover` |
+| `missed` | 没响成 | `window_expired` / `day_rollover` / `host_outage` |
 
 `skipped` / `cancelled` / `missed` 三者都保留原因——**推迟、取消、漏响是三种不同的事**，
 查账时要能分开看。

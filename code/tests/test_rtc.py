@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -5174,6 +5174,183 @@ class TestOccurrenceIdentity(RtcCase):
         w = self.window("wake")
         self.assertEqual(w["ocid"], first["ocid"], "改期不换身份")
         self.assertEqual(w["seq"], 1, "改期后重排，日历要知道这是同一条的新版本")
+
+
+class TestRecovery(RtcCase):
+    """issue #94：宿主停摆恢复——识别、补 planDate、过期窗口归档、一条恢复提示。"""
+
+    def two_window_routine(self) -> dict:
+        r = base_routine()
+        r["alarmWindows"].append(
+            {
+                "id": "tea",
+                "label": "喝水",
+                "start": "12:30",
+                "end": "12:40",
+                "intervalMin": 5,
+                "expectFires": 3,
+            }
+        )
+        return r
+
+    def write_hb(self, attempt: str) -> None:
+        (self.ws / "state" / "heartbeat.json").write_text(
+            json.dumps({"attemptAt": attempt, "lastOkAt": attempt, "at": attempt}), encoding="utf-8"
+        )
+
+    def q(self, sql: str, params: tuple = ()) -> list[tuple]:
+        con = sqlite3.connect(self.ws / "state" / "history.db")
+        try:
+            return con.execute(sql, params).fetchall()
+        finally:
+            con.close()
+
+    def test_recovery_archives_missed_and_rebuilds_plan(self):
+        self.write_routine(self.two_window_routine())
+        self.cli("plan", now="2026-11-09T06:00:00+08:00")
+        self.write_hb("2026-11-09T12:40:00+08:00")
+
+        rc, out, err = self.cli("due", now="2026-11-11T09:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+
+        state = self.state()
+        self.assertEqual(state["planDate"], "2026-11-11")
+        missed = [h for h in state["history"] if h["date"] == "2026-11-10"]
+        self.assertEqual({h["id"] for h in missed}, {"wake", "tea"})
+        self.assertTrue(all(h["state"] == "missed" for h in missed))
+        self.assertTrue(all(h["missedReason"] == "host_outage" for h in missed))
+        self.assertTrue(all(h["fires"] == 0 for h in missed))
+
+        daily = self.q("SELECT window_id, state, missed, fired FROM daily WHERE date='2026-11-10'")
+        self.assertEqual({r[0] for r in daily}, {"wake", "tea"})
+        self.assertTrue(all(r[1] == "missed" and r[2] == "host_outage" and r[3] == 0 for r in daily))
+
+        events = self.q("SELECT kind, note FROM events WHERE kind='recovery'")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1], "2026-11-09T12:40:00+08:00")
+
+        self.assertEqual(out.count("刚恢复"), 1, out)
+        self.assertIn("未送达", out)
+
+    def test_normal_ticks_never_enter_recovery(self):
+        self.write_routine(self.two_window_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        outs: list[str] = []
+        for ts in ("07:00", "07:06", "07:12"):
+            rc, out, err = self.cli("due", now=f"2026-11-16T{ts}:00+08:00")
+            self.assertEqual(rc, 0, err)
+            outs.append(out)
+        self.assertTrue(all("刚恢复" not in o for o in outs))
+        self.assertEqual(self.q("SELECT kind FROM events WHERE kind='recovery'"), [])
+        self.assertFalse(any(h.get("missedReason") == "host_outage" for h in self.state().get("history", [])))
+
+    def test_same_day_stale_heartbeat_is_not_recovery(self):
+        # 同一天里稀疏地手动跑 due，心跳陈旧但账本是今天：不算停摆，不归档不投递
+        self.write_routine(self.two_window_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.write_hb("2026-11-16T09:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-16T12:10:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("刚恢复", out)
+        self.assertEqual(self.q("SELECT kind FROM events WHERE kind='recovery'"), [])
+        self.assertFalse(any(h.get("missedReason") == "host_outage" for h in self.state().get("history", [])))
+
+    def test_bootstrap_on_fresh_heartbeat_is_silent(self):
+        self.write_routine(base_routine())
+        self.cli("plan", now="2026-11-16T06:00:00+08:00")
+        self.cli("due", now="2026-11-16T06:05:00+08:00")  # 先留下新鲜心跳
+        rc, out, err = self.cli("due", "--bootstrap", now="2026-11-16T06:10:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("刚恢复", out)
+        self.assertEqual(self.q("SELECT kind FROM events WHERE kind='recovery'"), [])
+
+    def test_recovery_skips_paused_days(self):
+        self.write_routine(self.two_window_routine())
+        self.cli("plan", now="2026-11-09T06:00:00+08:00")
+        (self.ws / "state" / "paused.json").write_text(
+            json.dumps({"from": "2026-11-09", "until": "2026-11-11"}), encoding="utf-8"
+        )
+        self.write_hb("2026-11-09T06:00:00+08:00")
+        rc, out, err = self.cli("due", now="2026-11-11T09:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(any(h["date"] == "2026-11-10" for h in self.state().get("history", [])))
+
+    def test_recovery_skips_disabled_weekend(self):
+        routine = self.two_window_routine()
+        routine["weekendAlarms"] = False
+        self.write_routine(routine)
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")  # 周五
+        self.write_hb("2026-11-13T12:40:00+08:00")
+        rc, _, err = self.cli("due", now="2026-11-16T09:00:00+08:00")  # 周一
+        self.assertEqual(rc, 0, err)
+        weekend = [h for h in self.state().get("history", []) if h["date"] in ("2026-11-14", "2026-11-15")]
+        self.assertEqual(weekend, [])
+
+    def test_recovery_is_idempotent_for_same_outage(self):
+        self.write_routine(self.two_window_routine())
+        self.cli("plan", now="2026-11-09T06:00:00+08:00")
+        self.write_hb("2026-11-09T12:40:00+08:00")
+        self.cli("due", now="2026-11-11T09:00:00+08:00")
+        before = json.dumps(self.state()["history"], ensure_ascii=False)
+        # 心跳又被拨回停摆前的同一身份：同一停摆已处理过，不重复归档、不重复投递
+        self.write_hb("2026-11-09T12:40:00+08:00")
+        rc, out, err = self.cli("due", "--bootstrap", now="2026-11-11T09:15:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.dumps(self.state()["history"], ensure_ascii=False), before)
+        self.assertNotIn("刚恢复", out)
+        self.assertEqual(len(self.q("SELECT id FROM events WHERE kind='recovery'")), 1)
+
+    def test_detect_outage_threshold(self):
+        import rtc_recovery as recovery
+
+        now = datetime.fromisoformat("2026-11-11T09:00:00+08:00")
+        fresh = now - timedelta(minutes=5)
+        stale = now - timedelta(minutes=120)
+        # 账本滞后（跨日）才是确定性证据
+        self.assertFalse(recovery.detect_outage(now, fresh, bootstrap=False, ledger_stale=True))
+        self.assertTrue(recovery.detect_outage(now, stale, bootstrap=False, ledger_stale=True))
+        self.assertFalse(recovery.detect_outage(now, None, bootstrap=False, ledger_stale=True))
+        self.assertTrue(recovery.detect_outage(now, None, bootstrap=True, ledger_stale=True))
+        self.assertFalse(recovery.detect_outage(now, fresh, bootstrap=True, ledger_stale=True))
+        # 账本是今天的：心跳再陈旧也不判停摆（同日稀疏 tick / 有意静默不算停摆）
+        self.assertFalse(recovery.detect_outage(now, stale, bootstrap=False, ledger_stale=False))
+        self.assertFalse(recovery.detect_outage(now, stale, bootstrap=True, ledger_stale=False))
+        self.assertFalse(recovery.detect_outage(now, None, bootstrap=True, ledger_stale=False))
+
+    def test_human_span_and_message_variants(self):
+        import rtc_recovery as recovery
+
+        self.assertEqual(recovery.human_span(8), "8 分钟")
+        self.assertEqual(recovery.human_span(65), "1 小时 5 分")
+        self.assertEqual(recovery.human_span(1500), "1 天 1 小时")
+        attempt = datetime.fromisoformat("2026-11-11T08:00:00+08:00")
+        rep = recovery.RecoveryReport(True, attempt, 60)
+        rep.missed = [
+            {"date": "2026-11-10", "id": "wake", "label": "起床"},
+            {"date": "2026-11-10", "id": "tea", "label": "喝水"},
+            {"date": "2026-11-10", "id": "run", "label": "跑步"},
+            {"date": "2026-11-10", "id": "read", "label": "阅读"},
+        ]
+        msg = recovery.format_message(rep, rebuilt=True)
+        self.assertIn("等 4 个", msg)
+        self.assertIn("计划已补建", msg)
+        bare = recovery.RecoveryReport(True, None, 0)
+        self.assertIn("显式唤醒", recovery.format_message(bare, rebuilt=False))
+
+    def test_build_report_tolerates_missing_or_bad_state(self):
+        import rtc_recovery as recovery
+
+        routine = self.two_window_routine()
+        now = datetime.fromisoformat("2026-11-11T09:00:00+08:00")
+        attempt = datetime.fromisoformat("2026-11-09T12:40:00+08:00")
+        missing = recovery.build_report(
+            routine, None, now, attempt, bootstrap=False, ledger_stale=True, errors=[]
+        )
+        self.assertEqual(missing.missed, [])
+        bad = recovery.build_report(
+            routine, {"planDate": "坏日期"}, now, attempt, bootstrap=False, ledger_stale=True, errors=[]
+        )
+        self.assertEqual(bad.missed, [])
 
 
 if __name__ == "__main__":

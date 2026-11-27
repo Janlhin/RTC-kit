@@ -106,6 +106,24 @@ raise SystemExit(rtc.main(["--workspace", r"C:\path\to\workspace", "due"]))
 
 `rtc.py status` 会分别打印「上次成功判定」与「其后是否又调过」两个时间，用于人工排查「调了但没判完」。
 
+## 停摆恢复（issue #94）
+
+宿主长时间不被调用时，`attemptAt` 停止刷新。重启后第一个 `due` 同时看到 `attemptAt` 陈旧超过两个 tick（10 分钟）**且**账本滞后于今天（旧 `planDate` 还没补建），才判定为「刚从停摆恢复」，确定性地做三件事：
+
+1. 把旧 `planDate` 与今天之间错过的窗口归档为 `missed`（原因 `host_outage`），写进 `state/alarms.json` 的 history 与 `state/history.db` 的 `daily` 表；暂停期与显式禁用日不算漏响。
+2. 补建当天计划（沿用既有 `plan` 路径）。
+3. stdout 输出**一条**恢复提示：停摆时长、上次运行时刻、错过几个窗口。
+
+同一停摆以停摆前最后一次 `attemptAt` 为身份，事件表 `events` 记一条 `kind=recovery`；重复核对不会二次归档、不会重复投递。心跳新鲜，或心跳虽陈旧但账本已是今天（同日稀疏 tick、有意静默），都不会进入这条路径。
+
+宿主重启钩子可以显式触发一次核对（不必等下一个 5 分钟 tick）：
+
+```bash
+python rtc.py --workspace <dir> due --bootstrap
+```
+
+`--bootstrap` 只是不等下一个 cron tick、现在就跑核对；心跳新鲜，或账本已是今天，都说明宿主一直在跑，不会伪造停摆。
+
 ## 已验证的事实（2026-11，Hermes v0.23.0 / Windows）
 
 - `--no-agent` 任务在没有任何模型凭据的情况下也能跑；stdout 原样成为投递内容，空 stdout 不投递
