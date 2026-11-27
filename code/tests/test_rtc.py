@@ -2049,6 +2049,208 @@ class TestExternalAck(RtcCase):
         self.assertIn("--event-id", err)
 
 
+class TestAckSnooze(RtcCase):
+    """FR-1.6：ack --snooze 只平移今天这一次，不重排整个重复事件。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "late",
+                "label": "夜猫",
+                "start": "23:40",
+                "end": "23:55",
+                "intervalMin": 5,
+                "expectFires": 4,
+                "ackHints": ["睡了"],
+            },
+        ]
+        self.write_routine(r)
+
+    def audit_events(self) -> list[dict]:
+        p = self.ws / "state" / "audit.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def snooze_events(self) -> list[tuple]:
+        con = sqlite3.connect(self.ws / "state" / "history.db")
+        try:
+            return con.execute(
+                "SELECT kind, note FROM events WHERE window_id=? ORDER BY id", ("wake",)
+            ).fetchall()
+        finally:
+            con.close()
+
+    def test_snooze_shifts_only_todays_occurrence(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        rc, out, err = self.cli(
+            "ack",
+            "--window",
+            "wake",
+            "--snooze",
+            "30",
+            "--text",
+            "再躺会",
+            now="2026-11-10T07:06:00+08:00",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "", "交互命令 stdout 必须为空")
+        w = self.window("wake")
+        self.assertEqual(w["state"], "acked")
+        self.assertEqual(w["start"], "2026-11-10T07:30:00+08:00")
+        self.assertEqual(w["end"], "2026-11-10T07:55:00+08:00")
+        # 已投递的这一次不回退：fireCount / lastFiredAt 保留
+        self.assertEqual(w["fireCount"], 1)
+        self.assertEqual(w["lastFiredAt"], "2026-11-10T07:00:00+08:00")
+        self.assertIsNotNone(w["ackedAt"])
+        # 账本痕迹：次数 / 累计分钟 / 最近一次时间
+        self.assertEqual(w["snoozeCount"], 1)
+        self.assertEqual(w["snoozeMinutes"], 30)
+        self.assertEqual(w["snoozeStep"], 30)
+        self.assertIsNotNone(w["snoozedAt"])
+        # 时刻表一字未动：其他日子由下次 plan 从时刻表重建
+        routine = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
+        wake_def = next(x for x in routine["alarmWindows"] if x["id"] == "wake")
+        self.assertEqual((wake_def["start"], wake_def["end"]), ("07:00", "07:25"))
+
+    def test_next_day_occurrence_is_byte_identical_to_baseline(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.cli("ack", "--window", "wake", "--snooze", "30", now="2026-11-10T07:06:00+08:00")
+        # 次日 plan：窗口回到时刻表基线，不带今天的平移痕迹
+        self.cli("plan", now="2026-11-11T06:00:00+08:00")
+        w = self.window("wake")
+        self.assertEqual(w["start"], "2026-11-11T07:00:00+08:00")
+        self.assertEqual(w["end"], "2026-11-11T07:25:00+08:00")
+        self.assertEqual(w["fireCount"], 0)
+        self.assertNotIn("snoozeMinutes", w)
+        self.assertNotIn("snoozeCount", w)
+
+    def test_snooze_is_idempotent_on_repeat(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        rc, _, err = self.cli("ack", "--window", "wake", "--snooze", "30", now="2026-11-10T07:06:00+08:00")
+        self.assertEqual(rc, 0, err)
+        before = self.window("wake")
+        rev_before = self.state()["rev"]
+
+        rc, out, err = self.cli("ack", "--window", "wake", "--snooze", "30", now="2026-11-10T07:07:00+08:00")
+        self.assertEqual(rc, 0, "同一窗口 + 同一天 + 同一 snooze 值重复调用应成功")
+        self.assertEqual(out, "")
+        self.assertIn("未重复平移", err)
+        after = self.window("wake")
+        # 累计值 / 次数 / 步长 / 起止时刻全部不变，rev 不涨
+        self.assertEqual(after["snoozeMinutes"], before["snoozeMinutes"])
+        self.assertEqual(after["snoozeCount"], before["snoozeCount"])
+        self.assertEqual(after["snoozeStep"], before["snoozeStep"])
+        self.assertEqual(after["start"], before["start"])
+        self.assertEqual(after["end"], before["end"])
+        self.assertEqual(self.state()["rev"], rev_before)
+        # 不重复留痕：审计流 / history 各只有一条 snooze
+        snooze_audit = [e for e in self.audit_events() if e["action"] == "snooze"]
+        self.assertEqual(len(snooze_audit), 1)
+        self.assertEqual([k for k, _ in self.snooze_events()], ["snooze"])
+
+    def test_old_slot_does_not_refire_after_snooze(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.cli("ack", "--window", "wake", "--snooze", "30", now="2026-11-10T07:06:00+08:00")
+        fired_before = self.window("wake")["fireCount"]
+        # 拨回旧开火点 07:10：窗口已平移到 07:30–07:55，旧槽必须静默、不重复计数
+        rc, out, _ = self.cli("due", now="2026-11-10T07:10:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "", "旧时间点不得再次投递")
+        self.assertEqual(self.window("wake")["fireCount"], fired_before)
+
+    def test_cross_midnight_snooze_rejected(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T23:40:00+08:00")
+        rc, _, err = self.cli("ack", "--window", "late", "--snooze", "30", now="2026-11-10T23:41:00+08:00")
+        self.assertEqual(rc, 3, err)
+        w = self.window("late")
+        self.assertEqual(w["state"], "ringing")
+        self.assertEqual(w["start"], "2026-11-10T23:40:00+08:00")
+        self.assertEqual(w["end"], "2026-11-10T23:55:00+08:00")
+        self.assertNotIn("snoozeMinutes", w)
+        self.assertFalse(any(e["action"] == "snooze" for e in self.audit_events()))
+
+    def test_non_positive_snooze_rejected(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, _, _ = self.cli("ack", "--window", "wake", "--snooze", "0", now="2026-11-10T07:06:00+08:00")
+        self.assertEqual(rc, 3)
+        rc, _, _ = self.cli("ack", "--window", "wake", "--snooze", "-5", now="2026-11-10T07:06:00+08:00")
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.window("wake")["state"], "pending")
+
+    def test_plain_ack_leaves_no_snooze_trace(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        rc, out, _ = self.cli("ack", "--window", "wake", "--text", "起了", now="2026-11-10T07:06:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        w = self.window("wake")
+        self.assertEqual(w["state"], "acked")
+        for key in ("snoozeCount", "snoozeMinutes", "snoozeStep", "snoozedAt"):
+            self.assertNotIn(key, w, f"不带 --snooze 的 ack 不得留下 {key}")
+        self.assertFalse(any(e["action"] == "snooze" for e in self.audit_events()))
+
+    def test_snooze_writes_audit_and_history_records(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.cli(
+            "ack", "--window", "wake", "--snooze", "30", "--text", "再躺会", now="2026-11-10T07:06:00+08:00"
+        )
+        events = self.audit_events()
+        snooze = [e for e in events if e["action"] == "snooze"]
+        self.assertEqual(len(snooze), 1)
+        rec = snooze[0]
+        self.assertEqual(rec["target"], "wake")
+        self.assertEqual(rec["old"]["window"]["start"], "2026-11-10T07:00:00+08:00")
+        self.assertEqual(rec["new"]["window"]["start"], "2026-11-10T07:30:00+08:00")
+        self.assertEqual(rec["reason"], "snooze 30 分钟")
+        hist = self.snooze_events()
+        self.assertEqual([k for k, _ in hist], ["snooze"])
+        self.assertIn("+30", hist[0][1])
+
+    def test_snooze_on_pending_window_keeps_fire_count_zero(self):
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        rc, _, err = self.cli("ack", "--window", "wake", "--snooze", "10", now="2026-11-10T06:55:00+08:00")
+        self.assertEqual(rc, 0, err)
+        w = self.window("wake")
+        self.assertEqual(w["state"], "acked")
+        self.assertEqual(w["start"], "2026-11-10T07:10:00+08:00")
+        self.assertEqual(w["end"], "2026-11-10T07:35:00+08:00")
+        self.assertEqual(w["fireCount"], 0)
+        self.assertIsNone(w["lastFiredAt"])
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_snoozed_state_still_matches_contract(self):
+        import jsonschema
+
+        self.cli("plan", now="2026-11-10T06:00:00+08:00")
+        self.cli("due", now="2026-11-10T07:00:00+08:00")
+        self.cli("ack", "--window", "wake", "--snooze", "30", now="2026-11-10T07:06:00+08:00")
+        schema = json.loads((REPO / "contract" / "alarm-state.schema.json").read_text(encoding="utf-8"))
+        errs = list(
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER
+            ).iter_errors(self.state())
+        )
+        self.assertEqual(errs, [], f"snooze 后的状态违反契约：{errs[:1]}")
+
+
 class TestAddWindow(RtcCase):
     """add-window：新增/更新周期窗口走命令，不再手改 routines.json。"""
 
