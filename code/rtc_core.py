@@ -29,9 +29,10 @@ import sys
 import tempfile
 import time as _time
 from collections.abc import Iterator
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import rtc_archive as archive
 import rtc_brief as brief
@@ -82,23 +83,68 @@ class _DueConflict(Exception):
 # ---------------------------------------------------------------- 基础设施
 
 
-def now_tz(tz_offset: str) -> datetime:
-    sign = 1 if tz_offset[0] == "+" else -1
-    hh, mm = tz_offset[1:].split(":")
-    return datetime.now(timezone(sign * timedelta(hours=int(hh), minutes=int(mm))))
+DEFAULT_TZ_NAME = "Asia/Shanghai"
+DEFAULT_OFFSET = "+08:00"
 
 
-def parse_iso(s: str, fallback_tz: timezone) -> datetime:
+def _fixed_offset(offset: str) -> timezone:
+    """旧格式：把 ``+HH:MM`` 解析成固定偏移时区。新配置走 IANA 名，这里只做回退兼容。"""
+    sign = 1 if offset[0] == "+" else -1
+    hh, mm = offset[1:].split(":")
+    return timezone(sign * timedelta(hours=int(hh), minutes=int(mm)))
+
+
+def parse_iso(s: str, fallback_tz: tzinfo) -> datetime:
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=fallback_tz)
     return dt
 
 
-def tz_of(offset: str) -> timezone:
-    sign = 1 if offset[0] == "+" else -1
-    hh, mm = offset[1:].split(":")
-    return timezone(sign * timedelta(hours=int(hh), minutes=int(mm)))
+def _load_zoneinfo(name: str) -> ZoneInfo | None:
+    """按 IANA 名取时区；缺 tzdata / 键不存在 / 名字非法时返回 None，不抛栈。"""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, KeyError, ValueError, OSError):
+        return None
+
+
+def resolve_tz(routine: dict[str, Any]) -> tzinfo:
+    """解析时刻表运行时区：优先 IANA 名，回退旧固定偏移。
+
+    回退链（顺序即优先级）：
+
+    1. ``timezone``（IANA 名，如 ``America/New_York``）能加载 → 跟随 DST 的 ZoneInfo；
+    2. 否则 ``tzOffset``（``+08:00`` 旧格式）→ 固定偏移，行为与改造前逐字节一致；
+    3. 两者都缺 → 默认 ``+08:00``。
+
+    Windows 等环境缺 tzdata 时 ZoneInfo 找不到键；此时不抛栈、也不静默吞掉：
+    记一条 NOTICES（plan/brief 播一次），再回退到固定偏移。
+    """
+    name = str(routine.get("timezone") or "").strip()
+    if name:
+        zi = _load_zoneinfo(name)
+        if zi is not None:
+            return zi
+        offset = routine.get("tzOffset")
+        fallback = offset if isinstance(offset, str) and offset else DEFAULT_OFFSET
+        NOTICES.append(f"时区 {name} 不可用（缺 tzdata 或不是合法 IANA 名），回退固定偏移 {fallback}")
+        return _fixed_offset(fallback)
+    offset = routine.get("tzOffset")
+    if isinstance(offset, str) and offset:
+        return _fixed_offset(offset)
+    return _fixed_offset(DEFAULT_OFFSET)
+
+
+def now_for(routine: dict[str, Any]) -> datetime:
+    return datetime.now(resolve_tz(routine))
+
+
+def zone_label(routine: dict[str, Any]) -> str:
+    """写进状态/快照的时区标识：优先 IANA 名，旧配置退回偏移字符串。"""
+    return str(routine.get("timezone") or routine.get("tzOffset") or DEFAULT_TZ_NAME)
 
 
 def set_workspace(path: Path) -> None:
@@ -320,7 +366,7 @@ def atomic_write(
     return new_digest
 
 
-_ROUTINE_KEYS = ("version", "timezone", "tzOffset", "alarmWindows", "dateTypes")
+_ROUTINE_KEYS = ("version", "alarmWindows", "dateTypes")
 
 # contract/routine.schema.json 的 alarmWindow.properties 全集（additionalProperties: false）。
 # 运行时只认这些键：多出来的字段是「空气开关」——写了不报错、也永远不生效。
@@ -398,7 +444,7 @@ def load_routine(read_only: bool = False) -> dict[str, Any]:
 def _validate_routine() -> dict[str, Any]:
     """读时刻表并做最小形状校验。
 
-    「JSON 合法但结构不对」（整个文件被写成 `[]`、少了 tzOffset）同样会让
+    「JSON 合法但结构不对」（整个文件被写成 `[]`、缺时区标识）同样会让
     plan/due 在后续几行抛 KeyError/TypeError。这里提前拦下来，给一句
     能照着修的诊断，而不是一个栈。
     """
@@ -413,6 +459,11 @@ def _validate_routine() -> dict[str, Any]:
     missing = [k for k in _ROUTINE_KEYS if k not in routine]
     if missing:
         raise Validation(f"{ROUTINE} 缺字段：{', '.join(missing)}；参考 rules/routines.example.md")
+    if not routine.get("timezone") and not routine.get("tzOffset"):
+        raise Validation(
+            f"{ROUTINE} 缺时区：至少给 timezone（IANA 名，如 Asia/Shanghai）"
+            "或 tzOffset（旧格式固定偏移，如 +08:00）；参考 rules/routines.example.md"
+        )
     if not isinstance(routine.get("alarmWindows"), list):
         raise Validation(f"{ROUTINE} 的 alarmWindows 应是数组")
     for i, w in enumerate(routine["alarmWindows"]):
@@ -430,6 +481,8 @@ def _restore_from_last_backup() -> str | None:
     except (Validation, ValueError, TypeError, OSError):
         return None
     if not isinstance(data, dict) or any(k not in data for k in _ROUTINE_KEYS):
+        return None
+    if not data.get("timezone") and not data.get("tzOffset"):
         return None
 
     bdir = WORKSPACE / "state" / BACKUP_DIR
@@ -660,7 +713,7 @@ def schedule_snapshot(
     return {
         "date": day_iso,
         "planKind": kind,
-        "timezone": routine.get("timezone"),
+        "timezone": zone_label(routine),
         "generatedAt": generated_at,
         "results": results or {},
         "windows": [
@@ -711,6 +764,19 @@ def fill_snapshot_results(day_iso: str, results: dict[str, Any]) -> bool:
     except OSError:
         return False
     return True
+
+
+def existing_snapshot_results(day_iso: str) -> dict[str, Any]:
+    """读回当天快照已有的 results：重建剩余计划时不抹掉无关的执行结果。"""
+    path = SCHEDULE_DIR / f"{day_iso}.json"
+    if not path.exists():
+        return {}
+    try:
+        snap = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    results = snap.get("results")
+    return results if isinstance(results, dict) else {}
 
 
 def write_schedule_snapshot(snap: dict[str, Any]) -> Path:
@@ -868,7 +934,7 @@ def build_windows(
     提醒不该把一整天的账本都清空（issue #75）。其他调用方不传，保持 fail fast：
     抛的也是 Validation（不是裸 ValueError），所以只读视图只会「报错」不会抛栈。
     """
-    tz = tz_of(routine["tzOffset"])
+    tz = resolve_tz(routine)
     day_iso = d.isoformat()
     # 第一步：按有效期筛选。全部落空 = 这段时间本来就没有该响的东西（合法空日）
     # 永久停用的窗口：任何日期都不生成（「以后别提醒我了」/「这件事完成了」）
@@ -1205,7 +1271,7 @@ def simulate_day(routine: dict[str, Any], d: date, paused: dict[str, Any] | None
     唯一差别是把"现在"钉在那天的 00:00——这样计划里的窗口不会被判成"已过期"。
     """
     kind = plan_kind(d, routine)
-    tz = tz_of(routine["tzOffset"])
+    tz = resolve_tz(routine)
     day_start = datetime.combine(d, time(0, 0), tzinfo=tz)
     day_iso = d.isoformat()
 
@@ -1277,8 +1343,8 @@ def render_simulate(data: dict[str, Any]) -> list[str]:
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     if args.date:
         try:
             d = date.fromisoformat(args.date)
@@ -1358,8 +1424,9 @@ def pause_summary(p: dict[str, Any]) -> str:
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
-    tz = tz_of(load_routine()["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(load_routine()["tzOffset"])
+    routine = load_routine()
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     until = None
     if args.until:
         try:
@@ -1472,7 +1539,7 @@ def delivery_summary(day: str) -> dict[str, Any]:
 
 
 def cmd_delivery(args: argparse.Namespace) -> int:
-    day = args.date or now_tz("+08:00").date().isoformat()
+    day = args.date or datetime.now(_fixed_offset(DEFAULT_OFFSET)).date().isoformat()
     if not delivery_log().exists():
         print(
             "delivery: 还没有投递回执（state/delivery.log 不存在）——"
@@ -1495,8 +1562,8 @@ def cmd_delivery_record(args: argparse.Namespace) -> int:
     if args.result not in ("ok", "fail"):
         print(f"delivery-record: --result 只能是 ok / fail，收到 {args.result}", file=sys.stderr)
         return 3
-    tz = tz_of("+08:00")
-    at = parse_iso(args.at, tz) if args.at else now_tz("+08:00")
+    tz = _fixed_offset(DEFAULT_OFFSET)
+    at = parse_iso(args.at, tz) if args.at else datetime.now(_fixed_offset(DEFAULT_OFFSET))
     record_delivery(args.window or "-", args.target, args.result, args.error, at)
     print(f"delivery-record: 已记 {at.isoformat()} {args.result}")
     return 0
@@ -1661,8 +1728,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "format=report-fallback（模型先写 + 回执兜底），不能同时配置"
         )
     hand_edit = audit_routine(routine)
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     today = now.date().isoformat()
 
     for_date = getattr(args, "for_date", None)
@@ -1733,7 +1800,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     state = {
         "version": 1,
         "rev": int((old or {}).get("rev", 0)) + 1,
-        "timezone": routine.get("timezone", "Asia/Shanghai"),
+        "timezone": zone_label(routine),
         "planDate": today,
         "planKind": kind,
         "generatedBy": "rtc-plan",
@@ -1861,8 +1928,8 @@ def cmd_due(args: argparse.Namespace) -> int:
     routine = load_routine()
     for line in take_notices():
         print(line)
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     # 先记下「本次刷新之前」的心跳：自检要看的是上一次到底有没有判完，
     # 不能拿自己刚写的 attemptAt 冒充证据。
     hb_before = read_heartbeat()
@@ -1888,7 +1955,7 @@ def cmd_due(args: argparse.Namespace) -> int:
     return rc
 
 
-def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: timezone, now: datetime) -> int:
+def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: tzinfo, now: datetime) -> int:
     """due 的判定主体。返回 0 表示「判定完整走完」（含正确判为静默）。"""
     state = load_state()
     today = now.date().isoformat()
@@ -2117,8 +2184,8 @@ def _due_eval(args: argparse.Namespace, routine: dict[str, Any], tz: timezone, n
 
 def cmd_ack(args: argparse.Namespace) -> int:
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     state = load_state()
     if not state:
         print("ack: 今天还没有计划", file=sys.stderr)
@@ -2223,8 +2290,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     结果看退出码（0 成功），细节在 stderr。
     """
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     state = load_state()
     if not state:
         print("check: 今天还没有计划", file=sys.stderr)
@@ -2296,8 +2363,48 @@ def cmd_check(args: argparse.Namespace) -> int:
 POSTPONE_REASON = "postponed"
 
 
-def _load_postpone_state() -> dict[str, Any] | None:
-    """Validate only ledger fields postpone consumes; leave other commands unchanged."""
+# 账本与今天的关系分类。postpone 只允许动「今天」的账本；口径见 cmd_postpone
+# 的陈旧账本分支（issue #87 第 2 条，方案 A）。换备选方案 B 时只改这一段分类与出口。
+_LEDGER_CURRENT = "current"
+_LEDGER_STALE = "stale"
+_LEDGER_INVALID = "invalid"
+
+
+def _classify_postpone_ledger_day(state: dict[str, Any], today_iso: str) -> str:
+    """账本属于今天、更早一天，还是日期字段不可用。
+
+    缺失/空账本由调用方按 None 处理，不进这里。
+    """
+    plan_date = state.get("planDate")
+    if not isinstance(plan_date, str) or not plan_date:
+        return _LEDGER_INVALID
+    try:
+        date.fromisoformat(plan_date)
+    except ValueError:
+        return _LEDGER_INVALID
+    if plan_date > today_iso:
+        return _LEDGER_INVALID
+    if plan_date < today_iso:
+        return _LEDGER_STALE
+    return _LEDGER_CURRENT
+
+
+def _is_postponed_today(window: dict[str, Any]) -> bool:
+    """当天被 postpone 推迟的窗口。
+
+    快照的 windows 是「剩余计划」：推迟的窗口从这里统一排除；它的执行结果仍
+    留在 results / history，证据不抹（issue #87 第 3 条）。只认 postponed 原因，
+    其它 skipped（停用 / 日期类型 / 过期等）保持可见。
+    """
+    return window.get("state") == "skipped" and window.get("missedReason") == POSTPONE_REASON
+
+
+def _load_postpone_state(today_iso: str | None = None) -> dict[str, Any] | None:
+    """Validate only ledger fields postpone consumes; leave other commands unchanged.
+
+    传 `today_iso` 时连带校验 `planDate`：缺字段 / 非法日期 / 相对今天是未来的账本，
+    在时刻表写入之前就拒绝，绝不被当成「昨天的旧账」静默放过（issue #87 第 2 条）。
+    """
     state = load_state()
     if not state:
         return None
@@ -2318,6 +2425,16 @@ def _load_postpone_state() -> dict[str, Any] | None:
             or not isinstance(window.get("state"), str)
         ):
             raise Validation("ledger windows require string id and state fields")
+    if today_iso is not None:
+        plan_date = state.get("planDate")
+        if not isinstance(plan_date, str) or not plan_date:
+            raise Validation("ledger planDate must be a YYYY-MM-DD string")
+        try:
+            date.fromisoformat(plan_date)
+        except ValueError as e:
+            raise Validation("ledger planDate must be YYYY-MM-DD") from e
+        if plan_date > today_iso:
+            raise Validation("ledger planDate is in the future relative to today")
     return state
 
 
@@ -2334,8 +2451,8 @@ def cmd_postpone(args: argparse.Namespace) -> int:
     # 摘要先取，再读内容：这样「读取之后被改过」一定会被发现
     digest = file_digest(ROUTINE)
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     today = now.date()
 
     defs = routine.get("alarmWindows") or []
@@ -2439,7 +2556,7 @@ def cmd_postpone(args: argparse.Namespace) -> int:
 
     # Validate the ledger before committing any schedule change.
     try:
-        _load_postpone_state()
+        _load_postpone_state(today.isoformat())
     except (OSError, Validation) as e:
         print(f"postpone: ledger preflight failed; schedule unchanged: {e}", file=sys.stderr)
         return 3
@@ -2469,14 +2586,21 @@ def cmd_postpone(args: argparse.Namespace) -> int:
 
     # Reload after the routine commit: plan/due may have created or changed the ledger.
     try:
-        state = _load_postpone_state()
+        state = _load_postpone_state(today.isoformat())
     except (OSError, Validation) as e:
         return partial_failure(e)
 
     # --- 2. 今天这一次不再响
+    # 账本必须属于今天才允许改当日条目：更早一天的旧账连 occurrence 带它那天的快照
+    # 都原样保留，不能把昨天的记录改成 skipped（issue #87 第 2 条）。
     outcome = "not_planned"
     history_error: Exception | None = None
-    if state:
+    ledger_day = (
+        _classify_postpone_ledger_day(state, today.isoformat()) if state is not None else _LEDGER_CURRENT
+    )
+    if state is not None and ledger_day == _LEDGER_STALE:
+        outcome = "stale_ledger"
+    if state is not None and ledger_day == _LEDGER_CURRENT:
         srev = int(state["rev"])
         hit = next((x for x in state.get("windows", []) if x["id"] == args.window), None)
         if hit is None:
@@ -2544,14 +2668,15 @@ def cmd_postpone(args: argparse.Namespace) -> int:
         # skipped 只在「今天有计划且该窗口还在跑」时才出现
         assert state is not None
         try:
-            rest = [
-                x
-                for x in state.get("windows", [])
-                if not (x["id"] == args.window and x.get("state") == "skipped")
-            ]
+            rest = [x for x in state.get("windows", []) if not _is_postponed_today(x)]
             write_schedule_snapshot(
                 schedule_snapshot(
-                    routine, state.get("planKind", "workday"), rest, state["planDate"], now.isoformat()
+                    routine,
+                    state.get("planKind", "workday"),
+                    rest,
+                    state["planDate"],
+                    now.isoformat(),
+                    results=existing_snapshot_results(state["planDate"]),
                 )
             )
         except OSError as e:
@@ -2571,10 +2696,14 @@ def cmd_postpone(args: argparse.Namespace) -> int:
         )
         return 3
 
+    stale_date = state.get("planDate") if state is not None else "?"
     notes = {
         "skipped": "今天这一次已跳过",
         "already_fired": "今天这一轮已经结束，明天会再提醒一次",
         "not_planned": "今天没有这一次的计划，明天第一次响",
+        "stale_ledger": (
+            f"今日账本还是 {stale_date} 的旧账，未改动当日条目；时刻表已调整，等 plan 生成今天的安排"
+        ),
     }
     print(
         f"postpone: {args.window} → {target.isoformat()}（同一时刻），{notes[outcome]}",
@@ -2971,8 +3100,8 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     """
     digest = file_digest(ROUTINE)
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
     today = now.date().isoformat()
 
     w = _find_window(routine, args.window)
@@ -3071,8 +3200,8 @@ def cmd_complete(args: argparse.Namespace) -> int:
     """
     digest = file_digest(ROUTINE)
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
 
     w = _find_window(routine, args.window)
     if w is None:
@@ -3122,8 +3251,8 @@ def cmd_disable(args: argparse.Namespace) -> int:
     """
     digest = file_digest(ROUTINE)
     routine = load_routine()
-    tz = tz_of(routine["tzOffset"])
-    now = parse_iso(args.now, tz) if args.now else now_tz(routine["tzOffset"])
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
 
     w = _find_window(routine, args.window)
     if w is None:

@@ -35,7 +35,7 @@ def preview_schedule(
     kind = core.plan_kind(d, routine)
     if core.day_disabled(routine, kind):
         return None
-    tz = core.tz_of(routine["tzOffset"])
+    tz = core.resolve_tz(routine)
     now = datetime.combine(d, time(0, 0), tzinfo=tz)
     windows = core.build_windows(routine, d, kind, now, strict=False, errors=errors)
     return core.schedule_snapshot(routine, kind, windows, day_iso, "")
@@ -373,7 +373,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     backup = _backup_status()
     paused = core.load_pause()
     delivery = core.delivery_summary(state["planDate"])
-    now = core.now_tz(routine["tzOffset"])
+    now = core.now_for(routine)
     ledger_date = state["planDate"]
     ledger_stale = ledger_date != now.date().isoformat()
     missing: list[str] = []
@@ -627,8 +627,8 @@ def sync_brief_block(routine: dict[str, Any], state: dict[str, Any] | None, now:
 
 def cmd_brief(args: argparse.Namespace) -> int:
     routine = core.load_routine()
-    tz = core.tz_of(routine["tzOffset"])
-    now = core.parse_iso(args.now, tz) if args.now else core.now_tz(routine["tzOffset"])
+    tz = core.resolve_tz(routine)
+    now = core.parse_iso(args.now, tz) if args.now else core.now_for(routine)
     state = core.load_state()
     if args.sync:
         result = sync_brief_block(routine, state, now)
