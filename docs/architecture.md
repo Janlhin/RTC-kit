@@ -84,6 +84,7 @@
 │ ③ 内容层（文件）                                         │
 │   rules/routines.json   时刻表（人写）                   │
 │   state/alarms.json     今天的账本（只有代码写）          │
+│   state/alarms.next.json 次日预排账本（06:00 plan 写）    │
 │   state/history.db      执行历史（四表，唯一真相源）      │
 │   state/schedule/*.json 每日快照（代码写，人读的派生副本）│
 │   state/metrics.db      统计索引（旁路，可缺失）          │
@@ -91,7 +92,7 @@
 └─────────────────────────────────────────────────────────┘
 
 ④ 宿主调度（cron）= 每 5 分钟叫一次 ②，**不叫 ①**
-   rtc-plan  0 6 * * *      每天重建当天时间表
+   rtc-plan  0 6 * * *      每天重建当天时间表，并预排次日账本
    rtc-due   */5 * * * *    判断该不该响，命中就打印文案
 ```
 
@@ -164,6 +165,7 @@ cron（no-agent）
 | --------- | -------------------------------- | --------------------------- | -------------- |
 | 何时响       | `rules/routines.json`            | 人（经 `rtc.py set-time` 等）    | 配置             |
 | 今天的账本     | `state/alarms.json`              | **只有** `rtc.py`             | **唯一真相**       |
+| 次日预排账本    | `state/alarms.next.json`         | `plan` 06:00 写，跨日 `due` 激活 | 临时槽位，激活后删除      |
 | 某天到底怎么排的  | `state/schedule/YYYY-MM-DD.json` | `plan` 写一次，永久               | 权威存档（不可再算出来）   |
 | 统计查询      | `state/metrics.db`               | `metrics sync`              | **派生索引，可删可重建** |
 | 给模型看的今日行程 | `AGENTS.md` 的受控区块                | `plan` / `due` / `ack` 自动刷新 | **派生视图，可随时删**  |

@@ -67,6 +67,13 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 成一条失败通知。正常竞态不是失败，因此 `due` / `plan` 冲突**退出 0**；
 只有 `ack` 在 3 次重读都写不进去时才退出 2。
 
+### 3.1 时区口径（#91）
+
+- 时刻表时区以 `timezone`（IANA 名）为准；缺省回退旧格式 `tzOffset` 固定偏移，再缺省回退 `+08:00`。回退链与 Windows 缺 tzdata 的限制见 `docs/timezone.md`。
+- 运行时只用标准库 `zoneinfo`；`tzdata` 只在 dev/test 与 CI 测试层，不进运行时依赖。
+- `.ics` 导出必须带时区：UTC 瞬时用 `Z` 后缀，本地事件用 `TZID` + `VTIMEZONE`，**不允许浮动时间**。
+- `schedule --json` 仍是纯 JSON 到 stdout；退出码语义（0 / 3 / 4 等）不变。
+
 ## 4. 冲突策略（乐观锁）
 
 写入前读 `rev`，写入时比对，不符即放弃：
@@ -181,6 +188,14 @@ python rtc.py --workspace <dir> ack \
 ### Postpone storage failures
 
 `postpone` checks the existing ledger's JSON, revision, windows list and window id/state fields before changing the routine. A missing ledger or empty `{}` retains the existing no-plan semantics. Invalid required fields in a nonempty ledger reject the operation before the schedule write. This is scoped validation for postpone, not exhaustive schema validation. After the schedule commits, the ledger is read and checked again so a concurrent plan is not missed.
+
+### Postpone ledger day match
+
+`postpone` mutates only the ledger that belongs to today (calendar date compared in the routine timezone). A missing ledger or empty `{}` keeps the existing schedule-only semantics: the routine moves, and no ledger, snapshot or occurrence history is fabricated. A nonempty ledger whose `planDate` is an earlier date is left byte-identical: neither its occurrence nor that day's snapshot is rewritten. The routine still moves; the command returns `0` with empty stdout and an explicit stderr note, and the normal `plan` generates today's ledger. A nonempty ledger with a missing, malformed or future `planDate` is rejected before any routine write (exit `3`). After the routine commits the ledger is reloaded and the date rechecked: a plan that appeared meanwhile is updated under the existing conflict protection, and a different day's ledger is never mutated on retry.
+
+### Postpone snapshot exclusion
+
+When postpone rebuilds today's snapshot, its `windows` list is the remaining schedule: every ledger occurrence that is `skipped` with `missedReason: postponed` is excluded, across successive postponements — not only the window just postponed. Other skipped reasons (disabled, date-type filtered, expired, cancelled, acked) stay visible with their reason. Existing snapshot `results` are preserved on rebuild; postponed outcomes remain recorded in `results` / history with their original day identity and reason.
 
 If the routine commits but the subsequent state write raises an I/O or validation error, the command returns `3`, keeps stdout empty, and reports partial application on stderr. Today's existing occurrence may still fire. Inspect and repair the storage/state problem first, then retry using the same explicit `--window`, `--to` date and `--deadline` mode (when used) printed in the diagnostic. Do not blindly retry a relative date after the day has changed.
 

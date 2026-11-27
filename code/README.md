@@ -20,7 +20,8 @@
 主链路的确定性实现。把「读状态 → 判断 → 写回」从模型手里拿走，宿主只负责按时调用、把 stdout 投递出去。
 
 ```
-python rtc.py --workspace <dir> plan     # 生成/补建当天窗口（只增不改）
+python rtc.py --workspace <dir> plan     # 生成/补建当天窗口（只增不改；顺手预排明天）
+python rtc.py --workspace <dir> plan --for-date 2026-12-16  # 只预排明天（D+1）的账本
 python rtc.py --workspace <dir> due      # 该响就打印文案，不该响就什么都不打印
 python rtc.py --workspace <dir> due --bootstrap  # 宿主重启后显式跑一次停摆恢复核对
 python rtc.py --workspace <dir> ack      # 写入确认
@@ -49,7 +50,22 @@ python rtc.py --workspace <dir> enable   tea                   # 又想起来了
 
 适配示例见 `platform/hermes.md`。
 
-## 日程存档
+## 预排次日（issue #75）
+
+如果每天只在 06:00 跑一次 `plan`，当天 00:30–00:35 的窗口在生成时早就过期了，
+会被判成 `skipped / late_plan`，永远不会响。现在的做法是：
+
+- 06:00 的 `plan` 生成**今天**账本后，顺手把**明天**的账本写到
+  `state/alarms.next.json`；明天 00:xx 的窗口在预排时还是 `pending`。
+- 跨日后的第一轮 `due` 发现 `alarms.next.json` 的 `planDate` 是今天，
+  就直接把它激活成 `state/alarms.json`，不再现场重算（`generatedBy` 记为
+  `rtc-plan:prebuilt`）。
+- `plan --for-date <YYYY-MM-DD>` 可以单独预排，但只允许 **D+1**；更远的日期
+  会退 `3`，避免一个预排槽位被占住。
+- 预排失败或某天的配置坏了，只影响 `alarms.next.json`，不影响今天的账本；
+  过期预排会在下一次 `due` 时丢掉。正常 `plan` 仍然只增不改今天已存在的账本。
+
+
 
 `state/alarms.json` 只保存**当天**的计划加最近 14 天的执行摘要。想查一年前某天的日程安排，
 靠的是另一份东西：**每日快照**。
@@ -210,6 +226,7 @@ python rtc.py history  2026-11-13 --json    # 机器可读
 
 ```
 state/alarms.json      当天状态 + 14 天执行摘要   ← 主链路当前状态
+state/alarms.next.json 次日预排账本（跨日 due 激活）← 临时槽位
 state/schedule/*.json  每日完整快照（计划 + 结果）  ← 永久历史存档
 metrics.db             统计索引，可缺失            ← 旁路
 ```

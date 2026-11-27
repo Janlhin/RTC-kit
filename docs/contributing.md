@@ -15,8 +15,8 @@
 
 | 占位符 | 含义 | 示例性质 |
 |---|---|---|
-| `{{TIMEZONE}}` | IANA 时区 | 任意合法时区名 |
-| `{{TZ_OFFSET}}` | UTC 偏移 | 如 `+00:00` |
+| `{{TIMEZONE}}` | IANA 时区（首选） | 任意合法时区名，如 `Asia/Shanghai` |
+| `{{TZ_OFFSET}}` | 旧格式固定 UTC 偏移（兼容回退） | 如 `+00:00`，不跟随夏令时 |
 | `{{WAKE_TIME}}` | 第一个窗口起点 | 任意本地时刻 |
 | `{{ALARM_WINDOWS}}` | 提醒窗口列表 | 见 `contract/examples/` |
 | `{{ROLLCALL_HOURS}}` | 例行播报时点 | 任意小时集合 |
