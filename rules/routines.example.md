@@ -337,6 +337,7 @@ python rtc.py postpone --window travel --deadline --to 2026-06-01  # 移动截�
 ```bash
 python rtc.py cancel   --window travel              # 取消今天这个安排
 python rtc.py cancel   --window travel --date 2027-03-01   # 取消未来某天那次
+python rtc.py cancel   --window travel --undo       # 反悔：撤销今天那次取消（当天有效）
 python rtc.py complete --window pack --text "打完了"  # 完成 + 停用
 python rtc.py disable  --window tea                  # 永不提醒
 python rtc.py enable   --window tea                  # 又想起来了
@@ -353,6 +354,9 @@ python rtc.py enable   --window tea                  # 又想起来了
 
 最后一行是重点：周期窗口没有「这件事」可以取消——它每天都在。
 要永久停用请用 `disable`。
+
+当天误取消可用 `cancel --undo` 按审计痕迹把今天这次恢复到取消前状态；痕迹只在
+当天有效，跨日不可撤销，也不会把 `disable` 永久停用的窗口复活。
 
 `complete` 与 `ack` 的区别：
 

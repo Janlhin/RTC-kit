@@ -126,3 +126,13 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-013 取消撤销的痕迹复用审计流，只恢复当天账本实例（FR-3.4）
+
+- **日期**：2026-11-28
+- **决策**：`cancel --undo` 的取消前快照直接取审计流里账本侧 `cancel` 事件的 `old.window`，不另建撤销底稿文件；撤销只还原今天账本里的这一次实例，不回滚 `cancel` 对时刻表的截断，也不动 `disable` 永久停用状态。
+- **背景**：FR-3.4 要求误取消当天可恢复。审计层（`feat/audit-log`，PR #110）已经在每次账本侧 `cancel` 落了 `old`/`new` 窗口快照；再存一份撤销痕迹会形成两份可能漂移的真相源。
+- **被采纳**：① 痕迹 = 审计流中最近一条 `action=cancel` / `source=cancel` 且 `old.window` 齐备的事件，按运行时区日历日判当天有效；② 恢复时逐字段还原快照，身份字段 `id` / `ocid` / `seq` 保持现状；③ 写入走既有 `rev` 乐观锁，冲突退出 2；④ 成功撤销落 `action=cancel-undo` 审计 + `kind=cancel-undo` history 事件。
+- **被否决**：① 新建 `state/cancel-traces.json` 专门存撤销底稿——与审计流重复，且多一份需要并发维护与清理的状态文件；② 撤销同时回滚时刻表截断（一次性 `disabled` / 倒计时 `canceled` / `validUntil`）——会把「只恢复今天这次」扩大成「复活整段安排」，与 I1 不复活、I3 不误消的口径冲突；未来日期要恢复走 `enable` / `add-window`；③ 给撤销开独立子命令——违反命令面稳定约定，挂在既有 `cancel --undo` 上。
+- **影响**：`code/rtc_core.py`、`code/rtc.py`、`code/rtc_audit.py`、`docs/behavior-contract.md`、测试 `code/tests/test_cancel_undo.py`。
+- **复审条件**：若后续要求跨日撤销、或撤销连带恢复未来日期，单独立项重开本决策；当前有效期口径为「当天」。

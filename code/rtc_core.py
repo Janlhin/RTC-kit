@@ -2938,6 +2938,75 @@ def cmd_postpone(args: argparse.Namespace) -> int:
 
 CANCELLED_REASON = "cancelled"
 
+# 撤销今天那次取消的审计动作名。痕迹直接复用审计流里账本侧 cancel 事件的
+# old.window 快照，不另造一份撤销底稿（见 docs/behavior-contract.md §5d）。
+CANCEL_UNDO_ACTION = "cancel-undo"
+
+# 撤销恢复时保持现状的身份字段：plan 分配之后不许改写（日历 UID 与版本号）。
+_CANCEL_UNDO_KEEP_KEYS = frozenset({"id", "ocid", "seq"})
+
+
+def _cancel_trace_day(event: dict[str, Any], tz: tzinfo) -> str | None:
+    """把审计事件时间戳换算成运行时区下的日历日（YYYY-MM-DD）；坏时间戳返回 None。"""
+    stamp = event.get("ts")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    return dt.astimezone(tz).date().isoformat()
+
+
+def _find_cancel_trace(
+    events: list[dict[str, Any]], wid: str, today_iso: str, tz: tzinfo
+) -> tuple[str, dict[str, Any] | None]:
+    """找该窗口最近一次账本侧 cancel 痕迹，供撤销恢复取取消前快照。
+
+    只认 ``source="cancel"`` 的账本侧事件：时刻表侧 ``cancel:routine`` 不带运行时
+    快照；``disable`` 的账本侧事件 ``source="disable"``，不能拿来复活被永久停用的
+    窗口。返回 ``(status, snapshot)``，status ∈ ``found`` / ``expired`` / ``absent``。
+    """
+    expired: dict[str, Any] | None = None
+    for event in reversed(events):
+        if event.get("action") != "cancel" or event.get("target") != wid:
+            continue
+        if event.get("source") != "cancel":
+            continue
+        old = event.get("old")
+        if not isinstance(old, dict) or not isinstance(old.get("window"), dict):
+            continue
+        snap = old["window"]
+        if "state" not in snap or "fireCount" not in snap:
+            continue
+        day = _cancel_trace_day(event, tz)
+        if day == today_iso:
+            return "found", snap
+        if expired is None:
+            expired = event
+    if expired is not None:
+        old = expired.get("old")
+        snap = old.get("window") if isinstance(old, dict) else None
+        return "expired", snap if isinstance(snap, dict) else None
+    return "absent", None
+
+
+def _restore_window_from_trace(hit: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """按取消前快照还原窗口运行时字段；身份字段（id / ocid / seq）保持现状不动。
+
+    快照里没有的取消痕迹字段（cancelledAt / missedAt / missedReason）一并清掉，
+    不能留在还原后的窗口上冒充取消状态。
+    """
+    for key, value in snapshot.items():
+        if key in _CANCEL_UNDO_KEEP_KEYS:
+            continue
+        hit[key] = deepcopy(value)
+    for stale in ("cancelledAt", "missedAt", "missedReason"):
+        if stale not in snapshot:
+            hit.pop(stale, None)
+
 
 def _write_routine(routine: dict[str, Any], digest: str | None) -> str:
     """写时刻表。内容摘要做守卫——routines.json 是人会手改的文件。
@@ -3327,6 +3396,96 @@ def cmd_add_window(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cancel_undo(args: argparse.Namespace) -> int:
+    """撤销今天那次取消：按审计流里的取消前快照，把今天账本实例还原回去。
+
+    口径（见 docs/behavior-contract.md §5d）：
+      - 只认今天（运行时区日历日）留下的账本侧 cancel 痕迹；昨天及更早拒绝；
+      - 只还原今天账本里的这一次实例，不动时刻表截断、不动其它日期、不动
+        `disable` 永久停用状态；
+      - 找不到痕迹 / 当前不是 cancelled / 账本已无该实例 → 明确失败，不凭空复活；
+      - 写入走既有 rev 乐观锁，冲突按既有口径退出 2，不覆盖别人的写入。
+
+    stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
+    """
+    routine = load_routine()
+    tz = resolve_tz(routine)
+    now = parse_iso(args.now, tz) if args.now else now_for(routine)
+    today = now.date().isoformat()
+
+    if args.date:
+        print("cancel: --undo 只撤销今天的取消，不接受 --date", file=sys.stderr)
+        return 3
+
+    state = load_state()
+    if not state:
+        print("cancel: 今天还没有计划，没有可撤销的取消", file=sys.stderr)
+        return 4
+    if state.get("planDate") != today:
+        print(
+            f"cancel: 当前账本属于 {state.get('planDate')}，不是今天；跨日不能撤销取消",
+            file=sys.stderr,
+        )
+        return 4
+
+    try:
+        events = audit.read_events()
+    except (OSError, ValueError, TypeError) as e:
+        print(f"cancel: 审计痕迹读不出来（{type(e).__name__}: {e}），按无痕迹处理", file=sys.stderr)
+        return 4
+    status, snapshot = _find_cancel_trace(events, args.window, today, tz)
+    if status == "absent":
+        print(
+            f"cancel: {args.window} 今天没有可撤销的取消记录（从未取消过，或痕迹已过期）",
+            file=sys.stderr,
+        )
+        return 4
+    if status == "expired":
+        print(
+            f"cancel: {args.window} 的取消发生在昨天及更早，撤销痕迹只在当天有效",
+            file=sys.stderr,
+        )
+        return 4
+    assert snapshot is not None
+
+    hit = next((w for w in state.get("windows", []) if w["id"] == args.window), None)
+    if hit is None:
+        print(f"cancel: 账本里已没有 {args.window} 这次提醒，不能凭空恢复", file=sys.stderr)
+        return 4
+    if hit.get("state") != "cancelled":
+        print(
+            f"cancel: {args.window} 当前状态 {hit.get('state')}，不是取消状态，没有可撤销的取消",
+            file=sys.stderr,
+        )
+        return 4
+
+    prior_hit = deepcopy(hit)
+    _restore_window_from_trace(hit, snapshot)
+
+    rev = int(state["rev"])
+    state["rev"] = rev + 1
+    try:
+        atomic_write(STATE, state, expected_rev=rev)
+    except Conflict as e:
+        print(f"cancel: 状态冲突（{e}）", file=sys.stderr)
+        return 2
+
+    _record_history(state, routine, kind=CANCEL_UNDO_ACTION, window=args.window, ts=now)
+    after_hit = next((x for x in state["windows"] if x["id"] == args.window), None)
+    audit.record(
+        CANCEL_UNDO_ACTION,
+        args.window,
+        actor=audit.ACTOR_USER,
+        source="cancel",
+        old={"window": prior_hit},
+        new=_audit_state_change(state, after_hit),
+        reason="undo 撤销今天的取消",
+        ts=now,
+    )
+    print(f"cancel: {args.window} 已撤销今天的取消，恢复到取消前状态", file=sys.stderr)
+    return 0
+
+
 def cmd_cancel(args: argparse.Namespace) -> int:
     """取消一个安排。
 
@@ -3336,8 +3495,14 @@ def cmd_cancel(args: argparse.Namespace) -> int:
       - 无限期的周期窗口 → 只取消今天这一次（明天照常）。
         周期窗口没有「结束」，想永久停用请用 `disable`。
 
+    `--undo` 撤销今天那次取消，按审计痕迹把今天这次实例恢复到取消前状态；
+    痕迹只在当天有效，不影响其它日期与永久停用状态。
+
     stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
     """
+    if getattr(args, "undo", False):
+        return _cmd_cancel_undo(args)
+
     digest = file_digest(ROUTINE)
     routine = load_routine()
     tz = resolve_tz(routine)
@@ -3733,6 +3898,11 @@ def main(argv: list[str] | None = None) -> int:
     scan = sub.add_parser("cancel")
     scan.add_argument("--window", required=True, help="窗口 id")
     scan.add_argument("--date", help="取消未来某天的那次（YYYY-MM-DD）")
+    scan.add_argument(
+        "--undo",
+        action="store_true",
+        help="撤销今天的取消：按审计痕迹把这次提醒恢复到取消前状态（当天有效，不影响其它日期）",
+    )
     scan.add_argument("--now")
     scan.set_defaults(func=cmd_cancel)
 

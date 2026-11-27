@@ -14,7 +14,7 @@
   python rtc.py --workspace <dir> stats    [--group-by window|date|month] [--missed-only] [--json]
   python rtc.py --workspace <dir> check --window <ID> --item <序号或名称> [--undo]
   python rtc.py --workspace <dir> postpone --window <ID> [--to YYYY-MM-DD | --days N] [--deadline]
-  python rtc.py --workspace <dir> cancel   --window <ID> [--date YYYY-MM-DD]
+  python rtc.py --workspace <dir> cancel   --window <ID> [--date YYYY-MM-DD] [--undo]
   python rtc.py --workspace <dir> complete --window <ID> [--text TXT]
   python rtc.py --workspace <dir> disable  --window <ID>
   python rtc.py --workspace <dir> enable   --window <ID>
