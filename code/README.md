@@ -205,6 +205,23 @@ python rtc.py history  --month 2026-11      # 那个月的汇总
 python rtc.py history  2026-11-13 --json    # 机器可读
 ```
 
+### 按条件筛选（FR-2.3）
+
+`history` / `schedule` / `stats` 都支持两个可选过滤参数；不带时输出与原先逐字节一致：
+
+- `--q <关键词>`：在窗口 id、label 与事件正文里做大小写不敏感的子串匹配；中文按原字符匹配、不分词。
+- `--kind <类型>`：按窗口类型精确过滤，取值 `fixed`（周期）/ `oneoff`（一次性）/ `appointment`（预约倒计时），与契约里的类型枚举一致，不新造类型名。
+- 两个参数同时给时是 **AND**：必须同时命中才保留。过滤后没有命中属于正常结果，退出码仍是 `0`，输出空数组 / 空表，不算错误。
+
+```bash
+python rtc.py history 2026-11-17 --q 起床
+python rtc.py history 2026-11-17 --kind fixed
+python rtc.py schedule 2026-11-17 --q 起床 --kind fixed
+python rtc.py stats --q 起床 --kind oneoff
+```
+
+`--json` 的顶层键与条目形状不变，只是命中的条目变少；非法 `--kind` 给出清晰提示并退出 `4`，不会崩溃。
+
 输出：
 
 ```
