@@ -14,9 +14,13 @@ from __future__ import annotations
 import subprocess
 import sys
 import unittest
-from datetime import date
+from pathlib import Path
 
-from test_rtc import ENV, REPO, RtcCase, base_routine
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "code"))
+
+import rtc_core as core  # noqa: E402
+from test_rtc import ENV, RtcCase, base_routine  # noqa: E402
 
 RTC_PLAN = REPO / "code" / "rtc_plan.py"
 
@@ -39,13 +43,15 @@ class TestPlanEntry(RtcCase):
         return proc.returncode, proc.stdout, proc.stderr
 
     def test_plain_run_generates_ledger_with_empty_stdout(self):
-        """不带 RTC_NOW：用今天出账，成功时 stdout 必须为空（cron 静默约定）。"""
-        self.write_routine(base_routine())
+        """不带 RTC_NOW：用时刻表时区的今天出账，成功时 stdout 必须为空（cron 静默约定）。"""
+        routine = base_routine()
+        self.write_routine(routine)
+        app_today = core.now_for(routine).date()
         rc, out, err = self.run_entry()
         self.assertEqual(rc, 0, err)
         self.assertEqual(out, "", "plan 正常时 stdout 必须静默")
         state = self.state()
-        self.assertEqual(state["planDate"], date.today().isoformat())
+        self.assertEqual(state["planDate"], app_today.isoformat())
         self.assertEqual(state["generatedBy"], "rtc-plan", "入口必须委派 plan，不能跑去 due")
         self.assertIn("wake", [w["id"] for w in state["windows"]])
 

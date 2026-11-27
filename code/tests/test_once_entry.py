@@ -15,11 +15,15 @@ import json
 import subprocess
 import sys
 import unittest
-from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
-import rtc_once as once
-from test_rtc import ENV, REPO, RtcCase, base_routine
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "code"))
+
+import rtc_core as core  # noqa: E402
+import rtc_once as once  # noqa: E402
+from test_rtc import ENV, RtcCase, base_routine  # noqa: E402
 
 ONCE = REPO / "code" / "rtc_once.py"
 
@@ -45,14 +49,18 @@ class TestOnceEntry(RtcCase):
 
     def test_registers_oneoff_and_never_runs_due(self):
         """成功路径：写 oneOff 窗口、跑 plan --force；不触发 due，响铃计数不涨。"""
-        self.write_routine(base_routine())
+        routine = base_routine()
+        self.write_routine(routine)
         rc, _, err = self.cli("plan", now="2026-11-18T06:00:00+08:00")
         self.assertEqual(rc, 0, err)
         before = self.window("wake")
 
-        today = date.today().isoformat()
-        wid = f"once-1500-{date.today().strftime('%Y%m%d')}"
-        rc, out, err = self.run_once("15:00", "寄材料", "--ack", "知道了")
+        # 日历日以时刻表时区为准（plan 也按此时区出账）；不能用 runner 本地 date.today()，
+        # 否则跨时区 / 日界时会被 plan 当成过期窗口剪掉。
+        app_today = core.now_for(routine).date()
+        today = app_today.isoformat()
+        wid = f"once-1500-{app_today.strftime('%Y%m%d')}"
+        rc, out, err = self.run_once("15:00", "寄材料", "--ack", "知道了", "--date", today)
         self.assertEqual(rc, 0, err)
         self.assertIn("已登记", out)
         self.assertIn(wid, out)
