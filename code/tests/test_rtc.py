@@ -5507,7 +5507,9 @@ class TestIntentGuard(RtcCase):
 
     def test_status_lists_unlanded_intent(self):
         self.cli("plan")
-        today = date.today().isoformat()
+        # 当天以时刻表时区的账本日期为准（runner 时区可能与时刻表不同，
+        # 不能用宿主机 date.today()，否则跨时区夜里会错位）。
+        today = self.state()["planDate"]
         self._register("tea", today, f"{today}T08:00:00+08:00")
         rc, out, _ = self.cli("status")
         self.assertEqual(rc, 0)
