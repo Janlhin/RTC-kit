@@ -16,7 +16,8 @@ $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
     # 三个形态分开写，避免把 Markdown 的 setext 下划线误判成冲突标记
-    $patterns = @('^<<<<<<< ', '^>>>>>>> ', '^=======$')
+    # Git grep retains CR before LF; accept that byte without permitting other whitespace.
+    $patterns = @('^<<<<<<< ', '^>>>>>>> ', "^=======`r?$")
     $hits = @()
     foreach ($p in $patterns) {
         $found = & git grep -n -E -- $p
