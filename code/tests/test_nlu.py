@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -357,14 +357,25 @@ class OnceScriptNluCase(unittest.TestCase):
         data = json.loads((self.ws / "rules" / "routines.json").read_text(encoding="utf-8"))
         return list(data["alarmWindows"])
 
+    def _registered_once_windows(self, proc: subprocess.CompletedProcess[str]) -> list[dict[str, object]]:
+        """断言入口成功落盘，并返回 once 窗口；失败时带子进程全部输出与落盘原文。"""
+        raw = (self.ws / "rules" / "routines.json").read_text(encoding="utf-8")
+        diag = f"rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}\nroutines.json={raw}"
+        self.assertEqual(proc.returncode, 0, diag)
+        return [w for w in self._windows() if str(w.get("id", "")).startswith("once-")]
+
     def test_chinese_phrase_registers_oneoff(self):
         proc = self._run("明天下午三点", "看牙")
-        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
-        wins = [w for w in self._windows() if str(w.get("id", "")).startswith("once-")]
+        wins = self._registered_once_windows(proc)
         self.assertEqual(len(wins), 1)
-        self.assertEqual(wins[0]["start"], "15:00")
-        self.assertEqual(wins[0]["validFrom"], wins[0]["validUntil"])
-        self.assertEqual(wins[0]["validFrom"], (date.today() + timedelta(days=1)).isoformat())
+        win = wins[0]
+        self.assertEqual(win["start"], "15:00")
+        self.assertTrue(win["oneOff"])
+        self.assertEqual(win["intervalMin"], 5)
+        self.assertEqual(win["expectFires"], 1)
+        self.assertEqual(win["validFrom"], win["validUntil"])
+        # 日期格式合法即可；具体日历日由注入 now 的单测钉死，避免运行机时区干扰。
+        self.assertRegex(str(win["validFrom"]), r"^\d{4}-\d{2}-\d{2}$")
 
     def test_recurring_expression_rejected_existing_exit_code(self):
         proc = self._run("每周一三五锻炼", "健身")
@@ -384,8 +395,8 @@ class OnceScriptNluCase(unittest.TestCase):
 
     def test_legacy_hhmm_path_unchanged(self):
         proc = self._run("15:00", "一次性-测试")
-        self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
-        wins = [w for w in self._windows() if str(w.get("id", "")).startswith("once-")]
+        wins = self._registered_once_windows(proc)
+        self.assertEqual(len(wins), 1)
         self.assertEqual(wins[0]["start"], "15:00")
 
 
