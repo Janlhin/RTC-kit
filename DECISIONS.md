@@ -182,5 +182,34 @@
   - 回滚：revert 迁移提交；旧 schema 版本保留一个版本周期。
   - 影响面：`.ics` / 审计 / history 全部走新模型；旧 history 不可变记录原样保留。
 - **被采纳**：按 P0 → P1 → P2 → P3 渐进迁移；模型语义对齐 RFC 5545 的 UID / RRULE / STATUS 口径，但只取其身份与规则表达，不引入整套日历协议；工作日 / 节假日等本地语义留在外挂日期类型表。
+- **被否决**：备选方案检索记录与被否理由（按 AGENTS「先搜寻，后自研」顺序：标准库 → 已有依赖 → 包注册表 → 现成工具 → 自研）。
+
+  | # | 检索对象 | 用了它什么 | 为何不直接依赖 / 被否代价 |
+  |---|---|---|---|
+  | 1 | RFC 5545 iCalendar（[rfc5545](https://www.rfc-editor.org/rfc/rfc5545)，在线读原文）：§3.8.4.7 UID、§3.8.5.3 RRULE、§3.8.1.11 STATUS、§3.8.5.1 EXDATE | UID 稳定身份语义；RRULE/EXDATE 标准字符串形态；STATUS 状态枚举口径 | RFC 是日历交换协议，含组调度、请求/回复、日历代理等本项目用不到的方法体系；本项目是本地优先提醒/行程本，不做邀请-回复；现有状态机（ringing/acked/missed）比 RFC 的 TENTATIVE/CONFIRMED/CANCELLED 更细，需要映射层而非全量对齐 |
+  | 2 | 仓库内既有契约（本地读）：`contract/routine.schema.json`、`contract/alarm-state.schema.json`、`contract/task.schema.json` | `task.owner` 枚举口径；alarm-state 状态机与终态规则；`ocid`/`seq` 稳定身份做法；`dateTypes`/`holidayOverrides` 外挂表 | 既有行为测试钉死了状态转换与幂等语义，迁移必须投影兼容，不能另起一套推翻重来 |
+  | 3 | `python-dateutil` 的 `rrule` 模块（[文档](https://dateutil.readthedocs.io/en/stable/rrule.html)，PyPI 包）：RFC 重复规则的解析与实例展开 | RRULE 解析与展开可参考的语义对照 | 运行时引入第三方依赖，违反 D-012 已定的「tick 路径零第三方依赖、tzdata 仅测试层」口径；它不覆盖工作日/节假日外挂表语义；跨代可读要求下我们只存标准 RRULE 字符串，实例展开在代码侧自研一小段 |
+  | 4 | `icalendar`（[PyPI](https://pypi.org/project/icalendar/)）与 `recurring-ical-events`（[PyPI](https://pypi.org/project/recurring-ical-events/)）：前者 RFC 5545 解析/生成，后者在其上做实例展开，依赖链含 `python-dateutil` 与时区库 | 完整日历库的能力边界参考 | 同 #3 的依赖链问题；当前 `.ics` 只是只读导出（`code/rtc_ics.py` 自述定位），不需要反向解析外部 `.ics`；引入整套解析器超出本期边界 |
+  | 5 | Python 标准库（`datetime` / `zoneinfo` / `calendar`） | 时区与日期计算沿用既有口径（D-012） | 标准库无 RRULE 解析与实例展开器；实例展开需自研，范围限定 `FREQ=DAILY/WEEKLY/MONTHLY/YEARLY` + `BYDAY/BYMONTH/BYMONTHDAY` + `COUNT/UNTIL`，覆盖需求表 FR-1.4 |
+
+  被否的具体方案：
+  - ① **保留布尔拼装，继续加布尔位**（如 `yearlyAlarm`、`workdayOnly`）：字段组合爆炸，状态组合无法穷举测试；与需求表 §5 明确排除布尔拼装的口径冲突。
+  - ② **直接换成 SQLite 存储模型**：违反 NFR-2.5 跨代可读（私有 schema / 数据库 30 年后不可读）；且本 ADR 边界不含存储迁移。
+  - ③ **直接以 `.ics` 为写入真相源、废弃 JSON**：现状 `.ics` 只是只读导出；写入真相源切换是蓝图决策一的独立演进路线，本 ADR 不做（见「风险与明确不做」）。
+  - ④ **引入完整日历库做运行时依赖**：代价同 #3/#4，依赖链与零依赖口径不匹配。
+- **风险与明确不做**：
+  - 风险：双写期间两套表示漂移（P1 已给防漂移规则：旧源为准、派生不反写、逐项 diff 告警）；投影对老账本特例误判；老账本缺 `ocid` 时 uid 回退算法稳定性不足。
+  - **本 ADR 不落地存储迁移**：不改 `routines.json` / `alarms.json` / `history.db` 的 schema，不新增持久化表。
+  - **不改 `.ics` 为真相源**：`.ics` 仍是只读导出；源真相仍是现有 JSON 账本（现状口径）。
+  - 不改对外命令面（子命令 / 参数 / 退出码）；不合并周期事件跨日实例状态；不做节假日联网抓取、国家→时区映射、歧义/不存在本地时间消歧（沿用 `docs/timezone.md` §6 边界）。
+  - 本 ADR 不实现 RRULE 展开器，只定模型与分期；提醒策略（预提醒 / 阶梯预警）属另一条线，不在此定稿。
+- **待裁决（需用户拍板，未自行定论）**：
+
+  | 编号 | 待裁决口径 | 选项与代价 |
+  |---|---|---|
+  | O-01 | `owner` 取值词汇表 | ① `principal \| assistant`（对齐现有 `task.schema.json`；代价：表达不了「替某个具体的人」）；② `self \| <人名>` 自由文本（对齐需求表 §5；代价：校验弱、检索易分裂）；③ 枚举主体 + 别名表（代价：多一层映射维护） |
+  | O-02 | `uid` 格式与生成规则 | ① `<slug>-<时间戳>@rtc-kit` 本地生成（可读，撞号靠时间戳兜底）；② UUIDv4 + 域名后缀（唯一性强，不可读）；③ 收敛现有 `id@rtc` / `id@YYYY-MM-DD` 双形态为一种（迁移期双形态并存，对账成本高） |
+  | O-03 | 双写期间真相源口径 | ① 旧 JSON 为准、新模型纯派生（推荐，最稳；代价：P2 前新模型不能独立决策）；② 双写对等、字段级冲突裁决（代价：冲突规则复杂，漂移面最大）；③ 直接以新模型为准、旧字段兼容回写（代价：等于提前进入写切换，回滚成本高） |
+  | O-04 | `rrule` 存储位置 | ① 存进 routine 配置文件（与窗口同处，可读；代价：旧解析器需容错未知字段）；② 影子/投影层生成，不进主配置（主配置干净；代价：每次查询要推导）；③ 未来落 `.ics` 标准字段（跨代可读好；代价：与现状 `.ics` 只读定位冲突） |
 - **影响**：本 PR 仅文档层追加本 ADR；目标态后续会触及 `contract/*.schema.json`、`code/rtc_core.py`、`code/rtc_ics.py` 与对应测试，均在后续分期提案中落地，本 PR 不改代码与契约。
 - **复审条件**：进入 P1 前复核投影一致性数据；五维取值口径在 O-01 ~ O-04 裁决后回填本 ADR；任一期判据连续不达标，回退上一期并在本文件新增决策条说明。
