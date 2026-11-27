@@ -126,3 +126,13 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-016 周期规则存 RFC 5545 RRULE 字符串，解析/展开引擎自研，不造 DSL、不引 dateutil
+
+- **日期**：2026-11-28
+- **决策**：L2 事件的周期规则直接存 RFC 5545 RRULE 字符串；解析与 occurrence 展开在 `code/rtc_rrule.py` 自研，仅用标准库 `datetime` / `zoneinfo` / `calendar`；不另造自研 DSL，不引入 dateutil。
+- **背景**：FR-1.4 要求天/周/月/年重复与 RRULE 表达。候选路线有三条：① 存自研 DSL（结构化字段拼中文/私有串）；② 引入 dateutil 做解析展开；③ 存标准 RRULE 字符串 + 自研引擎覆盖所需子集。
+- **被采纳**：③。RRULE 是 1998 年开放标准，与 `.ics` 同源同构，跨代可读；本阶段所需子集（`FREQ` 天/周/月/年 + `INTERVAL` / `COUNT` / `UNTIL` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `WKST`）自研成本可控，闰年、月末、序号周几、`COUNT` / `UNTIL` 全局预算、跨年、DST 春秋切等边界由成组测试锁定；符合 AGENTS「标准库优先、先搜寻后自研」的约定，tick 路径保持零第三方依赖。
+- **被否决**：① 自研 DSL——与 `.ics` 互导要再写一层翻译，两套语义容易漂移，也背离「`.ics` 是源真相」的方向；② dateutil——成熟但带第三方依赖，其 RRULE 实现覆盖大量本阶段不需要的键，且与标准库 `zoneinfo` 的 DST 口径需要再对齐；当前子集自研边界清晰，不值得为它背依赖。
+- **影响**：新增 `code/rtc_rrule.py`、`code/tests/test_rrule.py`；`docs/behavior-contract.md` §7.1；本阶段不接 plan / due / ack，不碰存储层、NLU 与命令面。
+- **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
