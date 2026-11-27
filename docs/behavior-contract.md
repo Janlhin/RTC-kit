@@ -67,6 +67,13 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 成一条失败通知。正常竞态不是失败，因此 `due` / `plan` 冲突**退出 0**；
 只有 `ack` 在 3 次重读都写不进去时才退出 2。
 
+### 3.1 时区口径（#91）
+
+- 时刻表时区以 `timezone`（IANA 名）为准；缺省回退旧格式 `tzOffset` 固定偏移，再缺省回退 `+08:00`。回退链与 Windows 缺 tzdata 的限制见 `docs/timezone.md`。
+- 运行时只用标准库 `zoneinfo`；`tzdata` 只在 dev/test 与 CI 测试层，不进运行时依赖。
+- `.ics` 导出必须带时区：UTC 瞬时用 `Z` 后缀，本地事件用 `TZID` + `VTIMEZONE`，**不允许浮动时间**。
+- `schedule --json` 仍是纯 JSON 到 stdout；退出码语义（0 / 3 / 4 等）不变。
+
 ## 4. 冲突策略（乐观锁）
 
 写入前读 `rev`，写入时比对，不符即放弃：

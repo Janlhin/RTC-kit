@@ -52,6 +52,7 @@ npx ajv-cli validate -s contract/routine.schema.json -d /tmp/routines.json \
 ## 字段命名约定
 
 - 时间：`YYYY-MM-DDTHH:MM:SS{{TZ_OFFSET}}`（带偏移的 ISO 8601）
+- 时区：顶层 `timezone` 存 IANA 名（首选）；`tzOffset`（`+HH:MM`）是旧格式固定偏移，仅作兼容回退。口径见 `../docs/timezone.md`
 - 日期：`YYYY-MM-DD`
 - 全小写 camelCase（`planDate` / `expectFires` / `ackHints`）；状态用枚举字符串，不用布尔
 - 可空字段写成 `"type": ["string", "null"]`。**不要用 `nullable`**——那是 OpenAPI 3.0 的关键字，JSON Schema 2020-12 不认识它，写了不报错也不生效
