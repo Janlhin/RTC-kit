@@ -88,6 +88,7 @@
 │   state/history.db      执行历史（四表，唯一真相源）      │
 │   state/schedule/*.json 每日快照（代码写，人读的派生副本）│
 │   state/metrics.db      统计索引（旁路，可缺失）          │
+│   state/intents.json    取消意图旁路（意图 vs 账本核对）  │
 │   tasks.md / errors.md  人的东西                          │
 └─────────────────────────────────────────────────────────┘
 
@@ -168,6 +169,7 @@ cron（no-agent）
 | 次日预排账本    | `state/alarms.next.json`         | `plan` 06:00 写，跨日 `due` 激活 | 临时槽位，激活后删除      |
 | 某天到底怎么排的  | `state/schedule/YYYY-MM-DD.json` | `plan` 写一次，永久               | 权威存档（不可再算出来）   |
 | 统计查询      | `state/metrics.db`               | `metrics sync`              | **派生索引，可删可重建** |
+| 未落地的取消意图 | `state/intents.json`             | `cancel` 登记 / `due` 核对 / 落地后清理 | **旁路对账记录，可缺失重建** |
 | 给模型看的今日行程 | `AGENTS.md` 的受控区块                | `plan` / `due` / `ack` 自动刷新 | **派生视图，可随时删**  |
 
 四条硬规则：
@@ -290,6 +292,7 @@ state/history.db      四张表：windows / daily / checklist / events  ← 历�
 state/schedule/*.json 每日完整快照，永久                              ← 派生副本（人读、可 diff）
 alarms.json           当天计划 + 最近 14 天执行摘要                     ← 主链路当前状态
 metrics.db            统计索引，可缺失                                 ← 旁路
+intents.json          未落地取消意图（当天有效，可删可重建）           ← 旁路
 ```
 
 * `history` / `stats` / `events` 先读 `history.db`；库里没这一天时才退回快照。

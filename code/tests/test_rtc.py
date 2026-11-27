@@ -5353,5 +5353,214 @@ class TestRecovery(RtcCase):
         self.assertEqual(bad.missed, [])
 
 
+class TestIntentGuard(RtcCase):
+    """#83：意图 vs 账本核对——取消意图的登记 / 幂等 / TTL。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "tea",
+                "label": "喝茶",
+                "start": "15:00",
+                "end": "15:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["好了"],
+            }
+        ]
+        self.write_routine(r)
+        rtc.set_workspace(self.ws)
+
+    def intents(self) -> dict:
+        p = self.ws / "state" / "intents.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    def _register(self, window: str, day: str, at: str) -> None:
+        rtc.register_cancel_intent(window, day, datetime.fromisoformat(at))
+
+    def test_register_writes_intent(self):
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        entries = self.intents()["intents"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["window"], "tea")
+        self.assertEqual(entries[0]["date"], "2026-11-13")
+        self.assertEqual(entries[0]["kind"], "cancel")
+        self.assertIsNotNone(entries[0].get("requestedAt"))
+
+    def test_register_idempotent_same_day(self):
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        first = self.intents()["intents"][0]["requestedAt"]
+        self._register("tea", "2026-11-13", "2026-11-13T08:05:00+08:00")
+        entries = self.intents()["intents"]
+        self.assertEqual(len(entries), 1, "同日重复登记只留一条")
+        self.assertEqual(entries[0]["requestedAt"], first, "重复登记不刷新请求时间")
+
+    def test_register_reregistered_next_day(self):
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        self._register("tea", "2026-11-14", "2026-11-14T08:00:00+08:00")
+        dates = sorted(i["date"] for i in self.intents()["intents"])
+        self.assertEqual(dates, ["2026-11-13", "2026-11-14"], "跨日同窗口另记一条")
+
+    def test_register_tolerates_corrupt_file(self):
+        (self.ws / "state" / "intents.json").write_text("{坏 json", encoding="utf-8")
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        entries = self.intents()["intents"]
+        self.assertEqual(len(entries), 1, "坏文件清空后重记一条，不崩")
+
+    def test_due_skips_window_with_unlanded_intent(self):
+        """未落地意图 → due 不响（rc=0、零提醒正文），只投一条人工确认告警。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        rc, out, _ = self.cli("due", now="2026-11-13T15:00:00+08:00")
+        self.assertEqual(rc, 0)
+        body = "\n".join(x for x in out.splitlines() if not x.startswith("⚠️"))
+        self.assertEqual(body.strip(), "", "未落地意图的窗口本次不响（零提醒正文）")
+        self.assertIn("取消没生效", out, "必须投一条人工确认告警")
+        w = self.window("tea")
+        self.assertEqual(w["state"], "pending", "核对不改账本")
+        self.assertEqual(int(w["fireCount"]), 0, "被跳过的窗口不递增 fireCount")
+
+    def test_due_stuck_alert_throttled_same_day(self):
+        """节流计数断言：同一窗口连续多次 due，告警只出现一次。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        alerts: list[str] = []
+        for tick in ("15:00", "15:05", "15:10"):
+            rc, out, _ = self.cli("due", now=f"2026-11-13T{tick}:00+08:00")
+            self.assertEqual(rc, 0)
+            alerts += [line for line in out.splitlines() if "取消没生效" in line]
+        self.assertEqual(len(alerts), 1, "同一窗口同一天告警只投一次")
+
+    def test_stale_intent_does_not_suppress_next_day(self):
+        """TTL：昨天的意图今天自动失效，窗口照常响（时间注入，不 sleep）。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self._register("tea", "2026-11-12", "2026-11-12T08:00:00+08:00")
+        self.assertEqual(rtc.load_cancel_intents("2026-11-13"), [], "读侧按当天 TTL 过滤")
+        rc, out, _ = self.cli("due", now="2026-11-13T15:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("喝茶", out, "跨日意图已失效，窗口照常响")
+
+    def test_intent_on_final_state_is_not_pending(self):
+        """终态窗口不再响，对应意图不算未落地。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        state = self.state()
+        for w in state["windows"]:
+            if w["id"] == "tea":
+                w["state"] = "acked"
+        (self.ws / "state" / "alarms.json").write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.assertEqual(rtc.pending_cancel_intents(self.state(), "2026-11-13"), [])
+
+    def test_load_intents_filters_kind_and_window(self):
+        (self.ws / "state" / "intents.json").write_text(
+            json.dumps(
+                {
+                    "date": "2026-11-13",
+                    "intents": [
+                        {"window": "tea", "date": "2026-11-13", "kind": "ack", "requestedAt": "x"},
+                        {"date": "2026-11-13", "kind": "cancel", "requestedAt": "x"},
+                        {"window": "tea", "date": "2026-11-13", "kind": "cancel", "requestedAt": "x"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual([i["window"] for i in rtc.load_cancel_intents("2026-11-13")], ["tea"])
+
+    def test_pending_intent_window_missing_from_ledger(self):
+        self._register("ghost", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        stuck = rtc.pending_cancel_intents({"windows": []}, "2026-11-13")
+        self.assertEqual([i["window"] for i in stuck], ["ghost"], "账本里没这个窗口也算未落地")
+
+    def test_clear_intent_noop_when_empty_or_no_match(self):
+        rtc.clear_cancel_intent("tea", "2026-11-13")  # 文件不存在 → 直接返回
+        self._register("tea", "2026-11-13", "2026-11-13T08:00:00+08:00")
+        rtc.clear_cancel_intent("other", "2026-11-13")  # 没有可删的 → 不落盘
+        self.assertEqual(len(self.intents()["intents"]), 1)
+
+    def test_register_and_clear_tolerate_write_oserror(self):
+        orig = rtc.atomic_write
+
+        def oserror_write(path, data, expected_rev=None, expected_digest=None):
+            if path == rtc.intents_path():
+                raise OSError("injected: disk full")
+            return orig(path, data, expected_rev, expected_digest)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rtc.atomic_write = oserror_write
+            rtc.register_cancel_intent(
+                "tea", "2026-11-13", datetime.fromisoformat("2026-11-13T08:00:00+08:00")
+            )
+            rtc.atomic_write = orig
+            rtc.register_cancel_intent(
+                "tea", "2026-11-13", datetime.fromisoformat("2026-11-13T08:00:00+08:00")
+            )
+            rtc.atomic_write = oserror_write
+            rtc.clear_cancel_intent("tea", "2026-11-13")
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+        self.assertIn("意图", err.getvalue())
+
+    def test_status_lists_unlanded_intent(self):
+        self.cli("plan")
+        # 当天以时刻表时区的账本日期为准（runner 时区可能与时刻表不同，
+        # 不能用宿主机 date.today()，否则跨时区夜里会错位）。
+        today = self.state()["planDate"]
+        self._register("tea", today, f"{today}T08:00:00+08:00")
+        rc, out, _ = self.cli("status")
+        self.assertEqual(rc, 0)
+        self.assertIn("未落地的意图：1", out)
+        self.assertIn("tea", out)
+        data = json.loads(self.cli("status", "--json")[1])
+        self.assertEqual(data["pending_intent_ids"], ["tea"])
+
+    def test_status_clean_has_no_intent_line(self):
+        self.cli("plan")
+        _, out, _ = self.cli("status")
+        self.assertNotIn("未落地的意图", out)
+        data = json.loads(self.cli("status", "--json")[1])
+        self.assertEqual(data["pending_intent_ids"], [])
+
+    def test_cancel_unknown_window_leaves_no_intent(self):
+        rc, _, _ = self.cli("cancel", "--window", "nope", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 4)
+        self.assertFalse((self.ws / "state" / "intents.json").exists(), "无匹配窗口不落意图")
+
+    def test_cancel_success_clears_intent(self):
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(self.intents()["intents"], [], "账本落地取消后意图应清掉")
+
+    def test_cancel_conflict_keeps_intent(self):
+        """状态写冲突（rc=2）时意图必须保留——这正是 #83 要留下的证据。"""
+        self.cli("plan", now="2026-11-13T06:00:00+08:00")
+        orig = rtc.atomic_write
+
+        def conflict_write(path, data, expected_rev=None, expected_digest=None):
+            if path == rtc.STATE:
+                raise rtc.Conflict("injected: state changed concurrently")
+            return orig(path, data, expected_rev, expected_digest)
+
+        rtc.atomic_write = conflict_write
+        self.addCleanup(lambda: setattr(rtc, "atomic_write", orig))
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rtc.cmd_cancel(argparse.Namespace(window="tea", date=None, now="2026-11-13T08:00:00+08:00"))
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.getvalue(), "", "cancel 的 stdout 必须为空")
+        self.assertEqual(len(self.intents()["intents"]), 1, "冲突回滚时意图不能丢")
+
+    def test_cancel_not_planned_keeps_intent(self):
+        """账本里压根没这个窗口（plan 没跑 / 没排上）→ 意图保留，留给 due 核对。"""
+        rc, _, _ = self.cli("cancel", "--window", "tea", now="2026-11-13T08:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.intents()["intents"]), 1, "未落地的 cancel 必须留痕")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
