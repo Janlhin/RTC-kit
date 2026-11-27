@@ -137,6 +137,17 @@ python rtc.py --workspace <dir> ack \
 - 恢复提示只有一条，走 `due` stdout；状态冲突未写成时不投递（沿用 due 静默口径）。
 - `due --bootstrap` 是宿主重启钩子的显式核对入口，不新增子命令；心跳新鲜或账本是今天时不伪造停摆。
 
+## 5c. L2 事件模型契约（P1 影子账本）
+
+> 状态：P1 落地离线投影；**P2 起 `.ics` 为源真相**，`state/events.json` 转为只读缓存视图。本章节字段口径在 P2 不推翻。
+
+- 事件一等公民字段：`uid`（RFC 5545 §3.8.4.7 风格，UUIDv4 + `@rtc-kit` 后缀；改期、取消、状态迁移都不换）、`kind`（`once` / `recurring`）、`start` / `end`（带偏移 ISO 8601）、`rrule`（RFC 5545 标准字符串，一次性为 `null`，不另造自研 DSL）、`owner`（默认 `self`；替别人记 `other:<name>`，事件级字段）、`deadline`（可空日期）、`status`（`scheduled` / `ringing` / `done` / `cancelled` / `missed`）、`reminderPolicy`（`preRemind` / `ddlLadder` / `snooze` 预留为 `null`，P5 接入）、`aliases`（旧 id / ocid 列表）。
+- 投影口径：旧 `oneOff` → `once`；周期窗口 → `recurring`，RRULE 由 `dateTypes` 生成（workday → `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR`，weekend → `SA,SU`，两者皆无 → `FREQ=DAILY`，`validUntil` → `UNTIL`）；`dueDate` → `deadline`。旧账本 state 映射：`pending→scheduled`、`ringing→ringing`、`acked/delivered→done`、`cancelled→cancelled`、`missed→missed`、`skipped→scheduled`。
+- 真相边界：P1 旧 `rules/routines.json` + `state/alarms.json` 仍是唯一真相；`events.json` 是派生影子副本，**派生永不反写真相**（沿用 §五 规则 1）。迁移只读旧文件，不回写。
+- 迁移四条性质：默认 dry-run；真跑前自动备份（manifest 留源文件哈希）；幂等（别名 / uid 已存在则跳过，不换 uid、不产生第二份）；`--rollback <备份目录>` 可恢复（迁移前无影子账本的，回滚删除本次产物）。
+- 热路径边界：`rtc_events` / `rtc_migrate` **不得**被 `plan` / `due` / `ack` tick 路径 import；有静态断言测试守住。
+- 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |
@@ -166,6 +177,9 @@ python rtc.py --workspace <dir> ack \
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
 | 并发写不覆盖 | `TestPostponeRollbackPreservesConcurrentEdit`、`TestLockOwnership` |
 | 重启后按 `planDate` 补建 | `TestMainlineRegression` |
+| L2 P1 事件投影 / 别名 / 迁移四条性质 | `test_events_p1.py` 的 `TestWindowProjection`、`TestMigrationSkeleton` |
+| 迁移前后五条旧命令逐字节一致 | `TestGoldenRegression.test_five_commands_byte_identical_after_migration` |
+| tick 热路径不 import 事件栈 | `TestHotPathImportGuard` |
 
 ## 8. 明确不做
 

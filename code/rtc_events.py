@@ -215,11 +215,14 @@ def empty_envelope(now: datetime | None = None) -> dict[str, Any]:
 
 
 def load_events(workspace: Path) -> dict[str, Any]:
-    """读影子账本；文件缺失 / 形状不对时返回空信封，绝不抛栈给调度器。"""
+    """读影子账本；文件缺失 / 损坏 / 形状不对时返回空信封，绝不抛栈给调用方。"""
     path = events_path(workspace)
     if not path.exists():
         return empty_envelope()
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return empty_envelope()
     if not isinstance(raw, dict):
         return empty_envelope()
     raw.setdefault("version", 1)

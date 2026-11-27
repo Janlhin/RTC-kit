@@ -88,6 +88,7 @@
 │   state/history.db      执行历史（四表，唯一真相源）      │
 │   state/schedule/*.json 每日快照（代码写，人读的派生副本）│
 │   state/metrics.db      统计索引（旁路，可缺失）          │
+│   state/events.json     L2 事件影子账本（P1 派生；P2 起 .ics 为准）│
 │   tasks.md / errors.md  人的东西                          │
 └─────────────────────────────────────────────────────────┘
 
@@ -168,6 +169,7 @@ cron（no-agent）
 | 次日预排账本    | `state/alarms.next.json`         | `plan` 06:00 写，跨日 `due` 激活 | 临时槽位，激活后删除      |
 | 某天到底怎么排的  | `state/schedule/YYYY-MM-DD.json` | `plan` 写一次，永久               | 权威存档（不可再算出来）   |
 | 统计查询      | `state/metrics.db`               | `metrics sync`              | **派生索引，可删可重建** |
+| L2 事件影子账本 | `state/events.json`              | `rtc_migrate.py`（离线投影） | **派生影子副本**；P1 旧 JSON 仍是真相，P2 起 `.ics` 为准、本文件转缓存 |
 | 给模型看的今日行程 | `AGENTS.md` 的受控区块                | `plan` / `due` / `ack` 自动刷新 | **派生视图，可随时删**  |
 | L2 事件台账    | `calendar/<YYYY>.ics`            | 迁移工具 / 后续事件写路径       | **唯一真相（RFC 5545，跨代可读）** |
 | 事件 SQL 索引  | `state/calendar-index.db`         | `rtc_calindex.rebuild` 从 `.ics` 灌入 | **派生索引，可删可重建** |
