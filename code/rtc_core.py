@@ -3514,6 +3514,10 @@ def main(argv: list[str] | None = None) -> int:
     ssch.add_argument("--month", help="YYYY-MM")
     ssch.add_argument("--json", action="store_true")
     ssch.add_argument("--json-only", action="store_true", help=argparse.SUPPRESS)
+    ssch.add_argument(
+        "--q", dest="query", metavar="关键词", help="按关键词子串过滤（窗口 id / label / 正文，大小写不敏感）"
+    )
+    ssch.add_argument("--kind", help="按窗口类型过滤：fixed / oneoff / appointment")
     ssch.set_defaults(func=brief.cmd_schedule)
 
     shis = sub.add_parser("history")
@@ -3521,6 +3525,10 @@ def main(argv: list[str] | None = None) -> int:
     shis.add_argument("--month", help="YYYY-MM")
     shis.add_argument("--range", help="<起>..<止>，两端都是 YYYY-MM-DD")
     shis.add_argument("--json", action="store_true")
+    shis.add_argument(
+        "--q", dest="query", metavar="关键词", help="按关键词子串过滤（窗口 id / label / 正文，大小写不敏感）"
+    )
+    shis.add_argument("--kind", help="按窗口类型过滤：fixed / oneoff / appointment")
     shis.set_defaults(func=brief.cmd_history)
 
     sev = sub.add_parser("events", help="看某个窗口的状态迁移轨迹（history.db 的 events 表）")
@@ -3534,6 +3542,10 @@ def main(argv: list[str] | None = None) -> int:
     sst.add_argument("--group-by", choices=["window", "date", "month"], default="window")
     sst.add_argument("--missed-only", action="store_true")
     sst.add_argument("--json", action="store_true")
+    sst.add_argument(
+        "--q", dest="query", metavar="关键词", help="按关键词子串过滤（窗口 id / label / 正文，大小写不敏感）"
+    )
+    sst.add_argument("--kind", help="按窗口类型过滤：fixed / oneoff / appointment")
     sst.set_defaults(func=brief.cmd_stats)
 
     ss = sub.add_parser("status")

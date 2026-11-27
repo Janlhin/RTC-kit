@@ -23,6 +23,10 @@ from typing import Any
 
 import rtc_core as core
 
+# 窗口类型集合，与 contract/alarm-state.schema.json 的 window.type enum 一一对应；
+# 不新造类型名（cancelled 是覆盖在类型之上的粘性状态，不是类型）。
+WINDOW_TYPES: tuple[str, ...] = ("fixed", "oneoff", "appointment")
+
 
 def history_db() -> Path:
     return core.WORKSPACE / "state" / "history.db"
@@ -223,7 +227,7 @@ def rows_for_day(day: str) -> list[dict[str, Any]]:
     con = _connect()
     try:
         cur = con.execute(
-            """SELECT date, window_id, label, expect, fired, acked_at, missed, state
+            """SELECT date, window_id, label, type, expect, fired, acked_at, missed, state
                FROM daily WHERE date=? ORDER BY window_id""",
             (day,),
         )
@@ -237,7 +241,7 @@ def rows_for_range(start: str, end: str) -> list[dict[str, Any]]:
     con = _connect()
     try:
         cur = con.execute(
-            """SELECT date, window_id, label, expect, fired, acked_at, missed, state
+            """SELECT date, window_id, label, type, expect, fired, acked_at, missed, state
                FROM daily WHERE date BETWEEN ? AND ? ORDER BY date, window_id""",
             (start, end),
         )
@@ -278,7 +282,22 @@ def has_day(day: str) -> bool:
     return bool(rows_for_day(day))
 
 
-def results_for_day(day: str) -> dict[str, Any]:
+def window_matches(row: dict[str, Any], query: str | None, kind: str | None) -> bool:
+    """关键词 + 类型的 AND 过滤。
+
+    `query` 是大小写不敏感的子串匹配，中文按原字符匹配、不分词；`kind` 按窗口类型
+    精确匹配。两个条件都给时必须同时命中。
+    """
+    if kind and str(row.get("type") or "") != kind:
+        return False
+    if query:
+        hay = " ".join(str(row.get(k) or "") for k in ("window_id", "label", "missed")).lower()
+        if query.lower() not in hay:
+            return False
+    return True
+
+
+def results_for_day(day: str, query: str | None = None, kind: str | None = None) -> dict[str, Any]:
     """按快照 `results` 的形状返回某天的结果，供 history 命令直接复用渲染。
 
     只有「真的有结果」的窗口才算：计划刚生成、一条都没响的 pending 行不算——
@@ -292,6 +311,8 @@ def results_for_day(day: str) -> dict[str, Any]:
             and row["missed"] is None
             and row["state"] == "pending"
         ):
+            continue
+        if not window_matches(row, query, kind):
             continue
         out[row["window_id"]] = {
             "state": row["state"],
@@ -315,16 +336,32 @@ def days_in_month(month: str) -> list[str]:
         con.close()
 
 
-def stats(group_by: str = "window", missed_only: bool = False) -> list[dict[str, Any]]:
-    """按窗口 / 日期 / 月份聚合：响了多少次、确认多少、漏多少。"""
+def stats(
+    group_by: str = "window",
+    missed_only: bool = False,
+    query: str | None = None,
+    kind: str | None = None,
+) -> list[dict[str, Any]]:
+    """按窗口 / 日期 / 月份聚合：响了多少次、确认多少、漏多少。
+
+    `query` / `kind` 是 AND 过滤，先在底层 daily 行上筛掉再聚合；输出行形状不变。
+    """
     key = {"window": "window_id", "date": "date", "month": "substr(date, 1, 7)"}.get(group_by)
     if key is None:
         raise ValueError(f"不认识的分组 {group_by}")
-    where = (
-        " WHERE (missed IS NOT NULL OR (fired < expect AND state NOT IN ('skipped','cancelled','postponed')))"
-        if missed_only
-        else ""
-    )
+    clauses: list[str] = []
+    params: list[str] = []
+    if missed_only:
+        clauses.append(
+            "(missed IS NOT NULL OR (fired < expect AND state NOT IN ('skipped','cancelled','postponed')))"
+        )
+    if kind:
+        clauses.append("type = ?")
+        params.append(kind)
+    if query:
+        clauses.append("LOWER(window_id || ' ' || label || COALESCE(missed, '')) LIKE ?")
+        params.append(f"%{query.lower()}%")
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"""SELECT {key} AS grp,
                      COUNT(*) AS days,
                      SUM(expect) AS expect,
@@ -335,7 +372,7 @@ def stats(group_by: str = "window", missed_only: bool = False) -> list[dict[str,
               GROUP BY grp ORDER BY grp"""
     con = _connect()
     try:
-        cur = con.execute(sql)
+        cur = con.execute(sql, params)
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
     finally:
