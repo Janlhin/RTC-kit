@@ -1,0 +1,6 @@
+ENTRIES=rules/routines.json,rules/backup.json,state/alarms.json,state/routine-seal.json,state/metrics.sql,state/metrics.db,AGENTS.md,tasks.md,state/schedule/2026-11-27.json,state/backups/routines.program-last.json
+planDate=2026-11-27
+rev=1
+windows=4
+alarmIds=wake,meds-am,meds-noon,meds-pm
+routineIds=wake,meds-am,meds-noon,meds-pm

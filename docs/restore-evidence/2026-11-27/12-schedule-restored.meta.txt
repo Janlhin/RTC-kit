@@ -1,0 +1,4 @@
+name=12-schedule-restored
+exit=0
+elapsedMs=140
+argv=C:\Users\Janlhin\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38456938345562882\agents\s_000K0UXppAb\rtc-99\repo\code\rtc.py --workspace C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\ws schedule --month 2026-11

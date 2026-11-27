@@ -1,0 +1,55 @@
+# 恢复演练附录 · 2026-11-27 23:12 +08:00
+
+对应 docs/RESTORE.md 第 6.1 节。本目录是 2026-11-27 当晚在隔离临时工作区
+（`%TEMP%\rtc-restore-drill-20261127`）实跑恢复演练的原始留痕，未做润色。
+
+## 运行环境
+
+- 机器：Windows（DESKTOP-5M9V04K）
+- 解释器：仓库 `.venv` Python 3.13.15
+- 演练根目录：`%TEMP%\rtc-restore-drill-20261127`（`ws` 工作区 / `target` 备份目录 /
+  `restore` 解压目录 / `harness-scripts`、`harness-skills` 安装器重定向目录）
+- 真实作息工作区零触碰；演练结束后临时目录可整目录删除。
+
+## 文件说明
+
+每条命令对应三件套：`<步骤>.meta.txt`（argv / 退出码 / 耗时毫秒）、
+`<步骤>.stdout.txt`（标准输出原文）、`<步骤>.stderr.txt`（标准错误原文，空文件即无输出）。
+
+| 文件 | 步骤 | 退出码 | 耗时 ms |
+|---|---|---|---|
+| 01-install.* | 安装器初始化工作区（脚本/技能重定向到临时目录） | 0 | 263 |
+| 02-plan.* | `plan --now 2026-11-27T06:00:00+08:00` 生成当天账本 | 0 | 390 |
+| 03-status-baseline.* | 基线 `status` | 0 | 157 |
+| 04-status-json-baseline.* | 基线 `status --json` | 0 | 150 |
+| 05-backup.* | `backup --to <TARGET>`（zip 当天已存在，未覆盖） | 0 | 137 |
+| 05-hash-alarms-baseline.txt | 备份时刻 `state/alarms.json` SHA256 | — | — |
+| 06-hash-zip.txt | `RTC-20261127.zip` SHA256 与字节数 | — | — |
+| 06-zip-inspect.* | 直读 zip 条目，核对 planDate/rev/窗口 id | 0 | 96 |
+| 07-status-restore-readonly.* | 解压到 `<RESTORE>` 后只读 `status` | 0 | 141 |
+| 08-status-after-delete.* | 真删 `state/alarms.json` 后 `status` | 0 | 124 |
+| 09-status-restored.* | 盖回后 `status` | 0 | 143 |
+| 10-status-json-restored.* | 盖回后 `status --json` | 0 | 147 |
+| 11-history-restored.* | `history --month 2026-11` | 0 | 139 |
+| 12-schedule-restored.* | `schedule --month 2026-11` | 0 | 140 |
+| 13-hash-alarms-restored.txt | 恢复后 `state/alarms.json` SHA256 | — | — |
+| 14-hash-compare.txt | 基线 / 恢复后指纹比对，`equal=True` | — | — |
+| 15-tree-ws.txt | 演练后工作区目录清单 | — | — |
+| 16-tree-target.txt | 备份目标目录清单 | — | — |
+| probe_zip.py | zip 条目核对脚本（Python 标准库 zipfile + hashlib） | — | — |
+| drill-driver.ps1 | 本次演练的 PowerShell 驱动脚本，可整段重跑 | — | — |
+
+## 指纹汇总
+
+- 备份时刻 / zip 内条目 / 恢复后 `state/alarms.json`（2866 B）：
+  `FD10587C45115478A68065434A92708987478D76DA5FC1DF79A421B84D3FE281`
+- 备份包 `RTC-20261127.zip`（9085 B）：
+  `A77F16332E5F73CD7BA00B075D2BE484DF42E1E743AD55955D04AE4946FA5BF7`
+
+## 已知预期现象（非失败）
+
+- 全新演练工作区 `history --month 2026-11` 没有已归档执行结果。
+- 只读副本 `<RESTORE>` 的 `status` 显示「尚未备份」：`state/.backup-last.json`
+  不在归档清单内、没有进 zip，不影响账本恢复判定。
+- 手动 `backup --to` 报「今天已存在，未覆盖」：`plan` 成功后已自动打过同名 zip；
+  手动命令退出码仍为 0，并照常写备份记录。

@@ -1,0 +1,4 @@
+name=01-install
+exit=0
+elapsedMs=263
+argv=C:\Users\Janlhin\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38456938345562882\agents\s_000K0UXppAb\rtc-99\repo\install.py --workspace C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\ws --harness-scripts-dir C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\harness-scripts --harness-skills-dir C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\harness-skills

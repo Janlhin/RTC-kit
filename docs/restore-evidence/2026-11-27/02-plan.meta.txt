@@ -1,0 +1,4 @@
+name=02-plan
+exit=0
+elapsedMs=390
+argv=C:\Users\Janlhin\AppData\Local\DoubaoWork\User Data\Default\.doubaowork\agent_mode\workspace\.sessions\38456938345562882\agents\s_000K0UXppAb\rtc-99\repo\code\rtc.py --workspace C:\Users\Janlhin\AppData\Local\Temp\rtc-restore-drill-20261127\ws plan --now 2026-11-27T06:00:00+08:00

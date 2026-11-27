@@ -1,0 +1,65 @@
+{
+  "planDate": "2026-11-27",
+  "ledger_date": "2026-11-27",
+  "ledger_stale": false,
+  "missing_window_ids": [],
+  "rev": 1,
+  "timetable": {
+    "total": 4,
+    "recurring": 4,
+    "oneOff": 0
+  },
+  "backup": {
+    "date": "2026-11-27",
+    "at": "2026-11-27T06:00:00+08:00",
+    "written": 1,
+    "git": null,
+    "errors": []
+  },
+  "paused": null,
+  "delivery": {
+    "date": "2026-11-27",
+    "total": 0,
+    "ok": 0,
+    "failed": 0,
+    "failures": []
+  },
+  "windows": [
+    {
+      "id": "wake",
+      "label": "起床",
+      "window": "08:10-08:40",
+      "state": "pending",
+      "fireCount": 0,
+      "expectFires": 7,
+      "ackedAt": null
+    },
+    {
+      "id": "meds-am",
+      "label": "早间事项",
+      "window": "09:00-09:25",
+      "state": "pending",
+      "fireCount": 0,
+      "expectFires": 6,
+      "ackedAt": null
+    },
+    {
+      "id": "meds-noon",
+      "label": "午间事项",
+      "window": "12:00-12:25",
+      "state": "pending",
+      "fireCount": 0,
+      "expectFires": 6,
+      "ackedAt": null
+    },
+    {
+      "id": "meds-pm",
+      "label": "晚间事项",
+      "window": "19:00-19:25",
+      "state": "pending",
+      "fireCount": 0,
+      "expectFires": 6,
+      "ackedAt": null
+    }
+  ]
+}
