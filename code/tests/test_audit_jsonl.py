@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -150,6 +151,141 @@ class AuditWriterCase(unittest.TestCase):
         self.assertNotIn("C:\\", raw)
         self.assertNotIn("/home/", raw)
         self.assertNotIn("token", raw.lower())
+
+
+RTC = REPO / "code" / "rtc.py"
+FIXED_DATE = "2026-12-01"  # 周二：避开周末过滤，也避开周一的周报日
+
+
+def _base_routine() -> dict:
+    return {
+        "version": 1,
+        "timezone": "Asia/Shanghai",
+        "tzOffset": "+08:00",
+        "dateTypes": {"workday": [1, 2, 3, 4, 5], "weekend": [0, 6], "holidayOverrides": []},
+        "alarmWindows": [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            }
+        ],
+        "rollcalls": [],
+        "phases": [],
+    }
+
+
+class AuditReplayCase(unittest.TestCase):
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="rtc-audit-replay-"))
+        (self.ws / "rules").mkdir()
+        (self.ws / "state").mkdir()
+        self.old_ws = core.WORKSPACE
+        core.WORKSPACE = self.ws
+        audit.core.WORKSPACE = self.ws
+        self.routine = _base_routine()
+        (self.ws / "rules" / "routines.json").write_text(
+            json.dumps(self.routine, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def tearDown(self):
+        core.WORKSPACE = self.old_ws
+        audit.core.WORKSPACE = self.old_ws
+        shutil.rmtree(self.ws, ignore_errors=True)
+
+    def cli(self, *args: str, now: str | None = None) -> tuple[int, str, str]:
+        env = dict(os.environ, RTC_WORKSPACE=str(self.ws), PYTHONIOENCODING="utf-8")
+        cmd = [sys.executable, str(RTC), "--workspace", str(self.ws), *args]
+        if now is not None:
+            cmd += ["--now", now]
+        p = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return p.returncode, p.stdout, p.stderr
+
+    def read_state(self) -> dict:
+        p = self.ws / "state" / "alarms.json"
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def read_routine(self) -> dict:
+        p = self.ws / "rules" / "routines.json"
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def test_replay_state_matches_real_snapshot_field_by_field(self):
+        # checkpoint 1：plan 生成账本
+        rc, out, err = self.cli("plan", now=f"{FIXED_DATE}T06:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        snap_plan = self.read_state()
+        events = audit.read_events()
+        rebuilt = audit.replay_state(events, at=f"{FIXED_DATE}T06:00:00+08:00")
+        self.assertEqual(rebuilt, snap_plan, "plan 后回放必须与真实账本逐字段相等（含 rev）")
+
+        # checkpoint 2：due 命中开火
+        rc, out, err = self.cli("due", now=f"{FIXED_DATE}T07:00:00+08:00")
+        self.assertEqual(rc, 0, err)
+        snap_fire = self.read_state()
+        events = audit.read_events()
+        rebuilt = audit.replay_state(events, at=f"{FIXED_DATE}T07:00:00+08:00")
+        self.assertEqual(rebuilt, snap_fire, "due-fire 后回放必须与真实账本逐字段相等（含 rev）")
+        self.assertEqual(rebuilt["rev"], snap_fire["rev"])
+
+        # checkpoint 3：ack 收口
+        rc, out, err = self.cli(
+            "ack", "--window", "wake", "--text", "起了", now=f"{FIXED_DATE}T07:05:00+08:00"
+        )
+        self.assertEqual(rc, 0, err)
+        snap_ack = self.read_state()
+        events = audit.read_events()
+        rebuilt = audit.replay_state(events, at=f"{FIXED_DATE}T07:05:00+08:00")
+        self.assertEqual(rebuilt, snap_ack, "ack 后回放必须与真实账本逐字段相等（含 rev）")
+        self.assertEqual(rebuilt["rev"], snap_ack["rev"])
+
+    def test_replay_cutoff_excludes_later_events(self):
+        self.cli("plan", now=f"{FIXED_DATE}T06:00:00+08:00")
+        self.cli("due", now=f"{FIXED_DATE}T07:00:00+08:00")
+        self.cli("ack", "--window", "wake", "--text", "起了", now=f"{FIXED_DATE}T07:05:00+08:00")
+        events = audit.read_events()
+        # 只回放 plan 时点：窗口应还是 pending，fireCount 未消耗。
+        rebuilt = audit.replay_state(events, at=f"{FIXED_DATE}T06:00:00+08:00")
+        win = next(w for w in rebuilt["windows"] if w["id"] == "wake")
+        self.assertEqual(win["state"], "pending")
+        self.assertEqual(win["fireCount"], 0)
+
+    def test_replay_routine_rebuilds_window_definition(self):
+        rc, out, err = self.cli(
+            "add-window",
+            "--id",
+            "milk",
+            "--label",
+            "牛奶",
+            "--start",
+            "08:00",
+            "--end",
+            "08:10",
+            "--interval",
+            "5",
+            "--ack",
+            "好",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        routine = self.read_routine()
+        events = audit.read_events()
+        rebuilt = audit.replay_routine(events, base=self.routine)
+        by_id = {w["id"]: w for w in rebuilt["alarmWindows"]}
+        self.assertIn("milk", by_id)
+        real = next(w for w in routine["alarmWindows"] if w["id"] == "milk")
+        self.assertEqual(by_id["milk"], real)
 
 
 if __name__ == "__main__":

@@ -337,11 +337,17 @@ def _audit_window(w: dict[str, Any] | None) -> dict[str, Any] | None:
     return deepcopy(w) if w is not None else None
 
 
+def _audit_state_change(state: dict[str, Any], hit: dict[str, Any] | None) -> dict[str, Any]:
+    """账本侧变更留痕：窗口快照 + 当前账本 rev，供回放重建时把 rev 也对上。"""
+    return {"rev": state.get("rev"), "window": _audit_window(hit)}
+
+
 def _audit_state_summary(state: dict[str, Any] | None) -> dict[str, Any] | None:
     """账本留痕摘要：顶层字段 + 窗口列表 + history，供回放重建当时账本。"""
     if not state:
         return None
     return {
+        "version": state.get("version"),
         "rev": state.get("rev"),
         "planDate": state.get("planDate"),
         "planKind": state.get("planKind"),
@@ -2227,8 +2233,8 @@ def _due_eval(
                         wid,
                         actor=audit.ACTOR_PROGRAM,
                         source="due",
-                        old=prior,
-                        new=_audit_window(after),
+                        old={"window": prior},
+                        new=_audit_state_change(state, after),
                         ts=now,
                     )
                 print("due: 已把过期窗口标为 missed", file=sys.stderr)
@@ -2276,8 +2282,8 @@ def _due_eval(
         hit["id"],
         actor=audit.ACTOR_PROGRAM,
         source="due",
-        old=prior_hit,
-        new=_audit_window(hit),
+        old={"window": prior_hit},
+        new=_audit_state_change(state, hit),
         ts=now,
     )
     # 状态确实写下去了，才轮到投递攒着的对账告警
@@ -2442,8 +2448,8 @@ def cmd_ack(args: argparse.Namespace) -> int:
         hit["id"],
         actor=audit.ACTOR_MODEL if args.source == "external" else audit.ACTOR_USER,
         source="ack",
-        old=prior_hit,
-        new=_audit_window(hit),
+        old={"window": prior_hit},
+        new=_audit_state_change(state, hit),
         ts=now,
     )
     res = brief.sync_brief_block(routine, state, now)
@@ -2531,8 +2537,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         hit["id"],
         actor=audit.ACTOR_USER,
         source="check",
-        old=prior_hit,
-        new=_audit_window(hit),
+        old={"window": prior_hit},
+        new=_audit_state_change(state, hit),
         reason="undo" if args.undo else None,
         ts=now,
     )
@@ -2870,8 +2876,8 @@ def cmd_postpone(args: argparse.Namespace) -> int:
                 args.window,
                 actor=audit.ACTOR_USER,
                 source="postpone:state",
-                old=prior_hit,
-                new=_audit_window(hit),
+                old={"window": prior_hit},
+                new=_audit_state_change(state, hit),
                 reason=outcome,
                 ts=now,
             )
@@ -3422,8 +3428,8 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             args.window,
             actor=audit.ACTOR_USER,
             source="cancel",
-            old=prior_hit,
-            new=_audit_window(after_hit),
+            old={"window": prior_hit},
+            new=_audit_state_change(state, after_hit),
             ts=now,
         )
 
@@ -3522,8 +3528,8 @@ def cmd_complete(args: argparse.Namespace) -> int:
             args.window,
             actor=audit.ACTOR_USER,
             source="complete",
-            old=prior_hit,
-            new=_audit_window(after_hit),
+            old={"window": prior_hit},
+            new=_audit_state_change(state, after_hit),
             ts=now,
         )
 
@@ -3597,8 +3603,8 @@ def cmd_disable(args: argparse.Namespace) -> int:
             args.window,
             actor=audit.ACTOR_USER,
             source="disable",
-            old=prior_hit,
-            new=_audit_window(after_hit),
+            old={"window": prior_hit},
+            new=_audit_state_change(state, after_hit),
             ts=now,
         )
 

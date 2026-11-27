@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Iterator
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,8 @@ __all__ = [
     "audit_path",
     "record",
     "read_events",
+    "replay_state",
+    "replay_routine",
 ]
 
 AUDIT_NAME = "audit.jsonl"
@@ -146,3 +149,146 @@ def read_events(path: Path | None = None) -> list[dict[str, Any]]:
         except json.JSONDecodeError as e:
             raise ValueError(f"audit.jsonl 第 {lineno} 行不是合法 JSON：{e}") from None
     return out
+
+
+# 账本级事件：回放时直接用 new 里的顶层字段与 windows 整份替换。
+_LEDGER_EVENTS = frozenset({"plan", "prebuilt-promote", "recovery"})
+
+_STATE_TOP_KEYS = (
+    "version",
+    "rev",
+    "planDate",
+    "planKind",
+    "timezone",
+    "generatedBy",
+    "generatedAt",
+)
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _events_up_to(events: list[dict[str, Any]], at: datetime | str | None) -> Iterator[dict[str, Any]]:
+    """按落盘顺序筛出 ``ts <= at`` 的事件；``at`` 为空表示全部回放。"""
+    cutoff = _as_datetime(at)
+    for event in events:
+        if cutoff is None:
+            yield event
+            continue
+        ts = _as_datetime(event.get("ts"))
+        if ts is not None and ts <= cutoff:
+            yield event
+
+
+def _find_window(state: dict[str, Any], wid: str) -> dict[str, Any] | None:
+    for w in state.get("windows", []) or []:
+        if isinstance(w, dict) and w.get("id") == wid:
+            return w
+    return None
+
+
+def _apply_state_event(state: dict[str, Any], event: dict[str, Any]) -> None:
+    action = str(event.get("action") or "")
+    new = event.get("new")
+    if action in _LEDGER_EVENTS:
+        if not isinstance(new, dict):
+            return
+        for key in _STATE_TOP_KEYS:
+            if key in new:
+                state[key] = deepcopy(new[key])
+        if isinstance(new.get("windows"), list):
+            state["windows"] = deepcopy(new["windows"])
+        if "history" in new:
+            state["history"] = deepcopy(new["history"])
+        return
+    wid = event.get("target")
+    if not isinstance(wid, str) or not wid:
+        return
+    win = _find_window(state, wid)
+    if win is None:
+        # 事件对应的窗口不在当前账本（早于基线 / 已归档）：不凭空造窗口。
+        return
+    if isinstance(new, dict) and "window" in new:
+        # 账本侧事件：{"rev": 账本 rev, "window": 窗口快照}。
+        if isinstance(new["window"], dict):
+            win.update(deepcopy(new["window"]))
+        if "rev" in new:
+            state["rev"] = deepcopy(new["rev"])
+    elif isinstance(new, dict):
+        win.update(deepcopy(new))
+        if "rev" in new:
+            state["rev"] = deepcopy(new["rev"])
+
+
+def replay_state(
+    events: list[dict[str, Any]],
+    *,
+    base: dict[str, Any] | None = None,
+    at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """按时间回放审计流，重建某时点的账本（``alarms.json`` 形态）。
+
+    ``base``：回放起点快照（通常是更早的一份真实账本）；为空时从空骨架起步。
+    ``at``：只回放 ``ts <= at`` 的事件；为空回放全部。
+
+    回放是纯函数：不读磁盘、不写文件、不改入参。
+    """
+    state: dict[str, Any] = (
+        deepcopy(base)
+        if isinstance(base, dict)
+        else {
+            "version": 1,
+            "rev": 0,
+            "windows": [],
+            "history": [],
+        }
+    )
+    if not isinstance(state.get("windows"), list):
+        state["windows"] = []
+    if not isinstance(state.get("history"), list):
+        state["history"] = []
+    for event in _events_up_to(events, at):
+        _apply_state_event(state, event)
+    return state
+
+
+def replay_routine(
+    events: list[dict[str, Any]],
+    *,
+    base: dict[str, Any] | None = None,
+    at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """按时间回放审计流，重建某时点的时刻表窗口集合（``routines.json`` 形态）。
+
+    只重建 ``alarmWindows``；顶层其它字段沿用 ``base``。窗口顺序不保证与原表
+    一致（事件溯源不保留列表位置），逐字段比对时按 id 索引。
+    """
+    routine: dict[str, Any] = deepcopy(base) if isinstance(base, dict) else {"version": 1}
+    windows: dict[str, dict[str, Any]] = {}
+    for w in routine.get("alarmWindows") or []:
+        if isinstance(w, dict) and isinstance(w.get("id"), str):
+            windows[w["id"]] = deepcopy(w)
+    for event in _events_up_to(events, at):
+        action = str(event.get("action") or "")
+        wid = event.get("target")
+        new = event.get("new")
+        if not isinstance(wid, str) or not wid:
+            continue
+        if action in {"add", "edit"} and isinstance(new, dict):
+            windows[wid] = deepcopy(new)
+        elif action in {"set-time", "postpone", "cancel", "complete", "disable", "enable"}:
+            if wid in windows and isinstance(new, dict):
+                windows[wid].update(deepcopy(new))
+        elif action == "prune-expired" and isinstance(new, dict):
+            for removed in new.get("removed") or []:
+                windows.pop(str(removed), None)
+    routine["alarmWindows"] = [windows[k] for k in sorted(windows)]
+    return routine
