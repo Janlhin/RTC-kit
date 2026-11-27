@@ -204,6 +204,7 @@ cron（no-agent）
 | 安装器              | `install.py`                     | ✅       | 半（要按宿主目录布局写）          |
 | 回归测试             | `code/tests/*`                   | ✅       | 否                     |
 | 实机自检脚本           | `tools/rtc-labtest.py`           | ✅       | 否（实机层用例才是宿主相关）        |
+| 外部心跳看门狗         | `tools/check-heartbeat.ps1`     | ✅       | 否（只读检查；调度载体由部署方接）  |
 | `AGENTS.md` 自动区块 | 运行时工作区                           | ❌ 本地接线  | 是（要宿主每次会话读 AGENTS.md） |
 | `rtc_brief` 插件工具 | `%LOCALAPPDATA%\hermes\plugins\` | ❌ 本地接线  | 是（宿主插件格式）             |
 | `v_today` 视图     | `state/metrics.db`               | ⚠️ 可选衍生 | 否（但模型得会写 SQL）         |
