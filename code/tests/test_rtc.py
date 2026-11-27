@@ -3548,6 +3548,154 @@ class TestHistoryDB(RtcCase):
         self.assertIn("已确认", out)
 
 
+class TestQueryFilters(RtcCase):
+    """FR-2.3：history / schedule / stats 的 --q 关键词与 --kind 类型筛选。"""
+
+    def setUp(self):
+        super().setUp()
+        r = base_routine()
+        r["alarmWindows"] = [
+            {
+                "id": "wake",
+                "label": "起床",
+                "start": "07:00",
+                "end": "07:25",
+                "intervalMin": 5,
+                "expectFires": 6,
+                "ackHints": ["起了"],
+            },
+            {
+                "id": "milk",
+                "label": "买牛奶",
+                "start": "20:00",
+                "end": "20:15",
+                "intervalMin": 5,
+                "expectFires": 1,
+                "oneOff": True,
+                "ackHints": ["好了"],
+            },
+        ]
+        self.write_routine(r)
+        self.cli("plan", now="2026-11-17T06:00:00+08:00")
+        self.cli("due", now="2026-11-17T07:00:00+08:00")
+        self.cli("ack", "--text", "起了", now="2026-11-17T07:01:00+08:00")
+
+    # ---- history
+
+    def test_history_q_hit_filters_results(self):
+        rc, out, err = self.cli("history", "2026-11-17", "--q", "起床")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("起床", out)
+        self.assertNotIn("买牛奶", out)
+
+    def test_history_q_miss_is_empty_ok(self):
+        rc, out, err = self.cli("history", "2026-11-17", "--q", "不存在的词")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("错误", err)
+        self.assertEqual(out.strip(), "2026-11-17 的执行结果（0 项）：")
+        rc, out, err = self.cli("history", "2026-11-17", "--q", "不存在的词", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), {"date": "2026-11-17", "results": {}})
+
+    def test_history_kind_invalid_rejects_without_crash(self):
+        rc, _, err = self.cli("history", "2026-11-17", "--kind", "bogus")
+        self.assertEqual(rc, 4)
+        self.assertIn("fixed/oneoff/appointment", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_history_and_semantics(self):
+        rc, out, _ = self.cli("history", "2026-11-17", "--q", "起床", "--kind", "fixed", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(list(json.loads(out)["results"]), ["wake"])
+        rc, out, _ = self.cli("history", "2026-11-17", "--q", "起床", "--kind", "oneoff", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out)["results"], {})
+
+    def test_history_json_entry_shape_unchanged(self):
+        rc, out, err = self.cli("history", "2026-11-17", "--json")
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(set(data), {"date", "results"})
+        entry = data["results"]["wake"]
+        self.assertEqual(set(entry), {"state", "fires", "ackedAt", "missedReason", "label"})
+
+    # ---- stats
+
+    def test_stats_q_and_kind(self):
+        rc, out, err = self.cli("stats", "--q", "起床", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual({r["grp"] for r in json.loads(out)}, {"wake"})
+        rc, out, _ = self.cli("stats", "--kind", "fixed", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual({r["grp"] for r in json.loads(out)}, {"wake"})
+        rc, out, _ = self.cli("stats", "--kind", "oneoff", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual({r["grp"] for r in json.loads(out)}, {"milk"})
+
+    def test_stats_miss_is_empty_array_ok(self):
+        rc, out, err = self.cli("stats", "--q", "zzz", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), [])
+        self.assertNotIn("错误", err)
+
+    def test_stats_kind_invalid(self):
+        rc, _, err = self.cli("stats", "--kind", "nope")
+        self.assertEqual(rc, 4)
+        self.assertIn("fixed/oneoff/appointment", err)
+
+    # ---- schedule
+
+    def test_schedule_q_hit(self):
+        rc, out, err = self.cli("schedule", "2026-11-17", "--q", "起床")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("起床", out)
+        self.assertNotIn("买牛奶", out)
+
+    def test_schedule_kind_filters_windows(self):
+        rc, out, _ = self.cli("schedule", "2026-11-17", "--kind", "oneoff")
+        self.assertEqual(rc, 0)
+        self.assertIn("买牛奶", out)
+        self.assertNotIn("起床", out)
+        rc, out, _ = self.cli("schedule", "2026-11-17", "--kind", "fixed")
+        self.assertEqual(rc, 0)
+        self.assertIn("起床", out)
+        self.assertNotIn("买牛奶", out)
+
+    def test_schedule_kind_invalid(self):
+        rc, _, err = self.cli("schedule", "2026-11-17", "--kind", "nope")
+        self.assertEqual(rc, 4)
+        self.assertIn("fixed/oneoff/appointment", err)
+
+    def test_schedule_json_window_shape_unchanged(self):
+        rc, out, err = self.cli("schedule", "2026-11-17", "--kind", "oneoff", "--json")
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(
+            set(data["windows"][0]),
+            {
+                "id",
+                "label",
+                "type",
+                "review",
+                "start",
+                "end",
+                "intervalMin",
+                "expectFires",
+                "oneOff",
+                "dueDate",
+                "ackHint",
+                "format",
+                "validFrom",
+                "validUntil",
+            },
+        )
+
+    def test_no_filter_keeps_full_output(self):
+        rc, out, err = self.cli("stats", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual({r["grp"] for r in json.loads(out)}, {"wake", "milk"})
+
+
 class TestStableIds(RtcCase):
     """#12 Phase 2：清单项有跨日不变的稳定 id，序号只用于显示。"""
 

@@ -70,24 +70,98 @@ def outcome_text(r: dict[str, Any]) -> str:
     return base
 
 
+def _filter_active(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "query", None) or getattr(args, "kind", None))
+
+
+def _validate_kind(kind: str | None) -> str | None:
+    if kind is not None and kind not in history.WINDOW_TYPES:
+        return f"--kind 不认识的类型 {kind}（可选：{'/'.join(history.WINDOW_TYPES)}）"
+    return None
+
+
+def _query_hit(fields: list[Any], query: str | None) -> bool:
+    """大小写不敏感子串匹配；中文按原字符匹配、不分词。"""
+    if not query:
+        return True
+    hay = " ".join(str(x or "") for x in fields).lower()
+    return query.lower() in hay
+
+
+def _filter_snapshot(s: dict[str, Any], query: str | None, kind: str | None) -> dict[str, Any]:
+    """按 q/kind 过滤一份快照的 windows 与 results；返回浅拷贝，原快照不动。"""
+    windows = s.get("windows") or []
+    results = s.get("results") or {}
+    kept_windows: list[dict[str, Any]] = []
+    keep_ids: set[str] = set()
+    for w in windows:
+        if kind and str(w.get("type") or "") != kind:
+            continue
+        if not _query_hit([w.get("id"), w.get("label"), w.get("ackHint")], query):
+            continue
+        kept_windows.append(w)
+        keep_ids.add(str(w["id"]))
+    kept_results: dict[str, Any] = {}
+    for wid, r in results.items():
+        if wid in keep_ids:
+            kept_results[wid] = r
+        elif kind:
+            # 孤儿结果（计划里已没有该窗口）带不上类型，类型筛选下丢弃
+            continue
+        elif _query_hit([wid, (r or {}).get("label")], query):
+            kept_results[wid] = r
+    out = dict(s)
+    out["windows"] = kept_windows
+    out["results"] = kept_results
+    return out
+
+
+def _filter_snapshot_results(snap: dict[str, Any], query: str | None, kind: str | None) -> dict[str, Any]:
+    """只过滤快照 results（history 回退路径用），返回 wid → 结果的字典。"""
+    windows = {str(w.get("id")): w for w in snap.get("windows") or []}
+    out: dict[str, Any] = {}
+    for wid, r in (snap.get("results") or {}).items():
+        w = windows.get(str(wid)) or {}
+        if kind and str(w.get("type") or "") != kind:
+            continue
+        if not _query_hit(
+            [wid, (r or {}).get("label"), w.get("label"), (r or {}).get("missedReason")], query
+        ):
+            continue
+        out[wid] = r
+    return out
+
+
 def cmd_schedule(args: argparse.Namespace) -> int:
     """查历史某天（或某月）的日程安排。
 
     读的是每日快照目录 state/schedule/，永久保留，不受 14 天截断影响。
     """
+    kind_err = _validate_kind(getattr(args, "kind", None))
+    if kind_err:
+        print(f"schedule: {kind_err}", file=sys.stderr)
+        return 4
+    q = getattr(args, "query", None)
+    k = getattr(args, "kind", None)
+    active = _filter_active(args)
+
     if args.month:
         files = sorted(core.SCHEDULE_DIR.glob(f"{args.month}-*.json"))
         if not files:
             print(f"schedule: 没有 {args.month} 的快照", file=sys.stderr)
             return 4
-        if args.json:
-            out = []
-            for f in files:
-                out.append(json.loads(f.read_text(encoding="utf-8")))
-            print(json.dumps(out, ensure_ascii=False, indent=2))
-            return 0
+        snaps: list[dict[str, Any]] = []
         for f in files:
             s = json.loads(f.read_text(encoding="utf-8"))
+            if active:
+                s = _filter_snapshot(s, q, k)
+                if not s["windows"] and not s["results"]:
+                    continue
+            snaps.append(s)
+        if args.json:
+            print(json.dumps(snaps, ensure_ascii=False, indent=2))
+            return 0
+        for s in snaps:
             d = date.fromisoformat(s["date"])
             dow = "一二三四五六日"[d.weekday()]
             fires = sum(w["expectFires"] for w in s["windows"])
@@ -125,6 +199,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             print(f"schedule: 没有 {args.date} 的快照，也推算不出安排", file=sys.stderr)
             return 4
         source = "配置推算"
+    if active:
+        s = _filter_snapshot(s, q, k)
     if args.json:
         if not args.json_only:
             s = dict(s)
@@ -185,6 +261,14 @@ def cmd_history(args: argparse.Namespace) -> int:
     先读 `state/history.db`（唯一真相源）；库里没有这一天时才退回旧快照——
     删掉整个 `state/schedule/` 目录，只要库在，历史照样查得到。
     """
+    kind_err = _validate_kind(getattr(args, "kind", None))
+    if kind_err:
+        print(f"history: {kind_err}", file=sys.stderr)
+        return 4
+    q = getattr(args, "query", None)
+    k = getattr(args, "kind", None)
+    active = _filter_active(args)
+
     if getattr(args, "range", None):
         try:
             start, _, end = args.range.partition("..")
@@ -196,17 +280,24 @@ def cmd_history(args: argparse.Namespace) -> int:
             print("history: --range 用法 <起>..<止>（YYYY-MM-DD）", file=sys.stderr)
             return 4
         rows = history.rows_for_range(start, end)
-        if not rows:
+        if not rows and not active:
             print(f"history: {start}..{end} 没有执行结果", file=sys.stderr)
             return 4
+        days = sorted({r["date"] for r in rows})
         if args.json:
-            out = [
-                {"date": d, "results": history.results_for_day(d)} for d in sorted({r["date"] for r in rows})
-            ]
+            out = []
+            for d in days:
+                res = history.results_for_day(d, q, k)
+                if res:
+                    out.append({"date": d, "results": res})
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return 0
-        for d in sorted({r["date"] for r in rows}):
-            res = history.results_for_day(d)
+        any_row = False
+        for d in days:
+            res = history.results_for_day(d, q, k)
+            if active and not res:
+                continue
+            any_row = True
             done = sum(1 for r in res.values() if r.get("state") in {"acked", "delivered"})
             print(f"{d} {len(res)} 项，完成 {done}，未成 {len(res) - done}")
         return 0
@@ -220,25 +311,26 @@ def cmd_history(args: argparse.Namespace) -> int:
         if args.json:
             out = []
             for day_iso in db_days:
-                res = history.results_for_day(day_iso)
+                res = history.results_for_day(day_iso, q, k)
                 if res:
                     out.append({"date": day_iso, "results": res})
             if not out:
                 for f in files:
                     s = json.loads(f.read_text(encoding="utf-8"))
-                    res = s.get("results") or {}
+                    res = _filter_snapshot_results(s, q, k) if active else (s.get("results") or {})
                     if res:
                         out.append({"date": s["date"], "results": res})
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return 0
         any_row = False
         for day_iso in db_days or [json.loads(f.read_text(encoding="utf-8"))["date"] for f in files]:
-            res = history.results_for_day(day_iso)
+            res = history.results_for_day(day_iso, q, k)
             if not res:
                 path = core.SCHEDULE_DIR / f"{day_iso}.json"
                 if not path.exists():
                     continue
-                res = json.loads(path.read_text(encoding="utf-8")).get("results") or {}
+                snap = json.loads(path.read_text(encoding="utf-8"))
+                res = _filter_snapshot_results(snap, q, k) if active else (snap.get("results") or {})
             if not res:
                 continue
             any_row = True
@@ -248,18 +340,25 @@ def cmd_history(args: argparse.Namespace) -> int:
             print(f"{day_iso}（周{dow}）{len(res)} 项，完成 {done}，未成 {len(res) - done}")
             for wid, r in res.items():
                 print(f"    {r.get('label') or wid:<14} {outcome_text(r)}")
-        if not any_row:
+        if not any_row and not active:
             print(f"history: {args.month} 没有已归档的执行结果")
         return 0
 
     if not args.date:
         print("用法：rtc.py history <YYYY-MM-DD> | --month YYYY-MM [--json]", file=sys.stderr)
         return 4
-    res = history.results_for_day(args.date)
+    res = history.results_for_day(args.date, q, k)
     path = core.SCHEDULE_DIR / f"{args.date}.json"
     if not res and path.exists():
-        res = json.loads(path.read_text(encoding="utf-8")).get("results") or {}
+        snap = json.loads(path.read_text(encoding="utf-8"))
+        res = _filter_snapshot_results(snap, q, k) if active else (snap.get("results") or {})
     if not res:
+        if active:
+            if args.json:
+                print(json.dumps({"date": args.date, "results": {}}, ensure_ascii=False, indent=2))
+            else:
+                print(f"{args.date} 的执行结果（0 项）：")
+            return 0
         if history.has_day(args.date):
             print(f"history: {args.date} 还没有归档的执行结果")
             return 0
@@ -297,12 +396,25 @@ def cmd_events(args: argparse.Namespace) -> int:
 
 def cmd_stats(args: argparse.Namespace) -> int:
     """按窗口 / 日期 / 月份聚合执行结果。"""
+    kind_err = _validate_kind(getattr(args, "kind", None))
+    if kind_err:
+        print(f"stats: {kind_err}", file=sys.stderr)
+        return 4
     try:
-        rows = history.stats(args.group_by, args.missed_only)
+        rows = history.stats(
+            args.group_by,
+            args.missed_only,
+            query=getattr(args, "query", None),
+            kind=getattr(args, "kind", None),
+        )
     except ValueError as e:
         print(f"stats: {e}", file=sys.stderr)
         return 4
     if not rows:
+        if _filter_active(args):
+            if args.json:
+                print(json.dumps([], ensure_ascii=False, indent=2))
+            return 0
         print("stats: 库里还没有执行结果", file=sys.stderr)
         return 4
     if args.json:

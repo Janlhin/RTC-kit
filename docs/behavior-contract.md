@@ -74,6 +74,15 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 - `.ics` 导出必须带时区：UTC 瞬时用 `Z` 后缀，本地事件用 `TZID` + `VTIMEZONE`，**不允许浮动时间**。
 - `schedule --json` 仍是纯 JSON 到 stdout；退出码语义（0 / 3 / 4 等）不变。
 
+### 3.2 查询筛选（FR-2.3）
+
+`history` / `schedule` / `stats` 新增两个可选参数，只做只读过滤，不改既有参数语义与退出码：
+
+- `--q <关键词>`：窗口 id / label / 事件正文的大小写不敏感子串匹配；中文按原字符匹配、不分词。
+- `--kind <类型>`：按窗口类型精确过滤，取值集合与 `contract/alarm-state.schema.json` 的 `window.type` enum 一致：`fixed` / `oneoff` / `appointment`；`cancelled` 是覆盖在类型之上的粘性状态，不是类型。
+- 两参数同时给为 AND。过滤后空结果退出 `0`（空数组 / 空表），不当错误；非法 `--kind` 退出 `4`，stderr 给出可选类型清单。
+- 不带任何过滤参数时，文本与 `--json` 输出与改前逐字节一致；带过滤时 `--json` 顶层键与条目形状不变，只是条目变少。
+
 ## 4. 冲突策略（乐观锁）
 
 写入前读 `rev`，写入时比对，不符即放弃：
