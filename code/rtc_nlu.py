@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """rtc_nlu.py — 确定性中文时间短语解析（NLU L0/L1），零模型、零第三方依赖。
 
-本模块只做「一次性时间点 / 日期」的封闭词表解析，定位是交互入口的前端翻译层：
+本模块只做封闭词表内的中文时间解析，定位是交互入口的前端翻译层：
 
   - **确定性**：同一输入 + 同一注入的 ``now``，多次解析结果逐字节一致；模块内部
     不读系统时间（没有 ``datetime.now`` / ``date.today`` 兜底），现在时刻必须由
     调用方以 tz-aware datetime 注入。
   - **时区**：一律使用调用方给出的 IANA ``tzinfo``（``zoneinfo``）；日级运算按
     本地墙钟算，相对时长运算走 aware datetime，不写死固定偏移。
-  - **边界**：周期 / 重复 / 集合类表达（每年、每周一三五、每月最后一个工作日、
-    每天 8 点等）现有契约表达不了，明确抛出 :class:`UnsupportedExpression`，
-    不硬塞、不偷偷降级成某个单次时刻。
+  - **一次性 / 周期**：默认（``recurring=False``）只解析一次性时间点，周期表达按
+    既有契约拒绝；显式打开 ``recurring=True`` 后，封闭词表内的周期表达产出
+    ``kind="recurring"`` + RFC 5545 ``rrule`` + 首个 occurrence 的 ``dtstart``。
+    周期写路径尚未接入，入口命令仍按一次性契约拒绝周期表达。
 
 依赖纪律：本模块只能被交互入口（``rtc_once``）import；``plan`` / ``due`` /
-``tick`` 判定链路与 ``rtc_core`` 不得依赖它（由测试做静态 + 运行时双重断言）。
+tick 判定链路与 ``rtc_core`` 不得依赖它（由测试做静态 + 运行时双重断言）。
 """
 
 from __future__ import annotations
@@ -37,15 +38,36 @@ _WEEKDAY_CN: dict[str, int] = {
     "天": 6,
 }
 
+# 中文周几 → RFC 5545 BYDAY 缩写。
+_WEEKDAY_RFC: dict[str, str] = {
+    "一": "MO",
+    "二": "TU",
+    "三": "WE",
+    "四": "TH",
+    "五": "FR",
+    "六": "SA",
+    "日": "SU",
+    "天": "SU",
+}
+
 # 时段词 → 是否把 12 小时制的小时数往下午拨 12。
 _PM_PERIODS = ("下午", "晚上")
 _AM_PERIODS = ("凌晨", "早上", "上午")
 
-# 周期 / 集合类表达：命中即判「现有契约不支持」。
+# 周期 / 集合类表达：未开周期开关时，命中即按既有契约拒绝。
 _RECURRING_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"每年|每月|每周|每天|每日|每逢|每个"),
-    re.compile(r"工作日|最后一个|节假日"),
+    re.compile(r"每年|每月|每周|每天|每日|每逢|每个|每\s*\d"),
 )
+
+# 即使打开周期开关也不猜：需要工作日历 / BYSETPOS / 相对月末 / 第 N 周定位。
+_RE_RECURRING_REJECTED = re.compile(r"工作日|节假日|最后一个|第\s*\d+\s*周|隔周|每两")
+
+# 周期表达形状（封闭词表）。
+_RE_WEEKLY = re.compile(r"每周(?P<wds>[一二三四五六日天]+)")
+_RE_DAILY = re.compile(r"每天|每日")
+_RE_MONTHLY = re.compile(r"每月(?P<day>\d{1,2})\s*(号|日)")
+_RE_YEARLY = re.compile(r"每年(?P<mon>\d{1,2})\s*月(?P<day>\d{1,2})\s*(?:日|号)")
+_RE_EVERY_N = re.compile(r"每(?P<n>\d+)\s*(?P<unit>个月|天|周|月)")
 
 # 纯相对天数偏移词 → 天数；按词长从长到短排，避免「后天」抢先吃掉「大后天」。
 _DAY_OFFSET_WORDS: list[tuple[str, int]] = [
@@ -111,11 +133,15 @@ class ParsedTime:
     """一次解析的结构化结果。
 
     属性：
-        moment: 目标绝对瞬时（tz-aware datetime）。
+        moment: 目标绝对瞬时（tz-aware datetime）。一次性事件即目标时刻；
+            周期事件即首个 occurrence 的 ``dtstart``。
         date: 目标本地日历日（所在时区墙钟）。
         clock: 目标本地时刻（不带时区）。
         crosses_midnight: 与注入的 ``now`` 是否不在同一本地日历日。
         raw: 归一化之前的原始短语。
+        kind: ``once``（一次性）或 ``recurring``（周期）。
+        rrule: 周期事件的 RFC 5545 RRULE 字符串；一次性为 ``None``。
+        dtstart: 周期事件首个 occurrence 的 tz-aware datetime；一次性等于 ``moment``。
     """
 
     moment: datetime
@@ -123,6 +149,9 @@ class ParsedTime:
     clock: time
     crosses_midnight: bool
     raw: str
+    kind: str = "once"
+    rrule: str | None = None
+    dtstart: datetime | None = None
 
     @property
     def hhmm(self) -> str:
@@ -139,6 +168,16 @@ class ParsedTime:
 # 内部工具
 # ----------------------------------------------------------------------------
 
+_UNSUPPORTED_REASON_DISABLED = (
+    "现有契约不支持：周期 / 重复事件（每周一三五、每天几点、每月 1 号等）的写路径"
+    "待 L2 排程层接入；当前入口只登记一次性提醒。"
+)
+_UNSUPPORTED_REASON_SHAPE = (
+    "现有契约不支持：需要工作日历、BYSETPOS、相对月末或「第 N 周的周几」等规则"
+    "（如每月最后一个工作日、每年第 3 周的周三、工作日、节假日、隔周）；"
+    "封闭词表内只支持天 / 周 / 月 / 年，以及每 N 天 / 周 / 月的确定性 RRULE。"
+)
+
 
 def _normalize(phrase: str) -> str:
     text = "".join(_FULLWIDTH_DIGITS.get(ch, ch) for ch in phrase)
@@ -147,13 +186,10 @@ def _normalize(phrase: str) -> str:
     return text
 
 
-def _check_recurring(text: str) -> None:
+def _check_recurring_disabled(text: str) -> None:
     for pattern in _RECURRING_PATTERNS:
         if pattern.search(text):
-            raise UnsupportedExpression(
-                "现有契约不支持：周期 / 重复 / 集合类表达（如每年、每周一三五、"
-                "每月最后一个工作日、每天几点）；当前 L0/L1 只解析一次性时间点。"
-            )
+            raise UnsupportedExpression(_UNSUPPORTED_REASON_DISABLED)
 
 
 def _match_duration_minutes(text: str) -> int | None:
@@ -254,23 +290,177 @@ def _validate_now(now: datetime) -> tzinfo:
 
 
 # ----------------------------------------------------------------------------
+# 周期（recurring）分支
+# ----------------------------------------------------------------------------
+
+
+def _combine(day: date, clock: time, zone: tzinfo) -> datetime:
+    return datetime.combine(day, clock, tzinfo=zone)
+
+
+def _future_today_or_next(today: date, clock: time, now_local: datetime, zone: tzinfo) -> date:
+    """今天该槽位还没到就取今天；已过则顺到下一个自然日。"""
+    if _combine(today, clock, zone) <= now_local:
+        return today + timedelta(days=1)
+    return today
+
+
+def _next_weekly(today: date, wd_idx: int, clock: time, now_local: datetime, zone: tzinfo) -> date:
+    """下一个命中给定周几的日期；今天命中且槽位未过就取今天。"""
+    delta = (wd_idx - today.weekday()) % 7
+    candidate = today + timedelta(days=delta)
+    if candidate == today and _combine(candidate, clock, zone) <= now_local:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def _next_monthly(today: date, day: int, clock: time, now_local: datetime, zone: tzinfo) -> date:
+    """下一个 ``day`` 号；跳过没有该日的月份（如 2 月没有 31 号）。"""
+    year, month = today.year, today.month
+    for _ in range(13):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            candidate = None
+        if candidate is not None and (candidate > today or _combine(candidate, clock, zone) > now_local):
+            return candidate
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    raise NluError(f"每月 {day} 号在可行月份内找不到下一次 occurrence")
+
+
+def _next_yearly(today: date, mon: int, day: int, clock: time, now_local: datetime, zone: tzinfo) -> date:
+    """下一个周年纪念日；今年已过则顺到明年。"""
+    for year in (today.year, today.year + 1):
+        try:
+            candidate = date(year, mon, day)
+        except ValueError as exc:
+            raise NluError(f"{year}-{mon:02d}-{day:02d} 不是有效日期：{exc}") from exc
+        if candidate > today or _combine(candidate, clock, zone) > now_local:
+            return candidate
+    raise NluError(f"每年 {mon} 月 {day} 日找不到下一次 occurrence")
+
+
+def _recurring_result(
+    rrule: str,
+    anchor: date,
+    clock: time,
+    now_local: datetime,
+    zone: tzinfo,
+    raw: str,
+) -> ParsedTime:
+    moment = _combine(anchor, clock, zone)
+    dtstart = moment
+    return ParsedTime(
+        moment=moment,
+        date=anchor,
+        clock=clock,
+        crosses_midnight=anchor != now_local.date(),
+        raw=raw,
+        kind="recurring",
+        rrule=rrule,
+        dtstart=dtstart,
+    )
+
+
+def _match_recurring(text: str, now_local: datetime, zone: tzinfo, raw: str) -> ParsedTime | None:
+    """识别封闭词表内的周期形状；不是周期短语返回 ``None``。"""
+    today = now_local.date()
+    clock = _match_clock(text) or time(9, 0)
+
+    weekly = _RE_WEEKLY.search(text)
+    if weekly:
+        chars = weekly.group("wds")
+        rfc: list[str] = []
+        idxs: list[int] = []
+        seen: set[str] = set()
+        for char in chars:
+            if char not in _WEEKDAY_CN or char in seen:
+                continue
+            seen.add(char)
+            idxs.append(_WEEKDAY_CN[char])
+            rfc.append(_WEEKDAY_RFC[char])
+        if not idxs:
+            return None
+        anchor = min(_next_weekly(today, idx, clock, now_local, zone) for idx in idxs)
+        return _recurring_result(f"FREQ=WEEKLY;BYDAY={','.join(rfc)}", anchor, clock, now_local, zone, raw)
+
+    if _RE_DAILY.search(text):
+        anchor = _future_today_or_next(today, clock, now_local, zone)
+        return _recurring_result("FREQ=DAILY", anchor, clock, now_local, zone, raw)
+
+    monthly = _RE_MONTHLY.search(text)
+    if monthly:
+        day = int(monthly.group("day"))
+        if not 1 <= day <= 31:
+            raise NluError(f"每月 {day} 号越界（日 1-31）")
+        anchor = _next_monthly(today, day, clock, now_local, zone)
+        return _recurring_result(f"FREQ=MONTHLY;BYMONTHDAY={day}", anchor, clock, now_local, zone, raw)
+
+    yearly = _RE_YEARLY.search(text)
+    if yearly:
+        mon = int(yearly.group("mon"))
+        day = int(yearly.group("day"))
+        if not 1 <= mon <= 12 or not 1 <= day <= 31:
+            raise NluError(f"每年 {mon} 月 {day} 日越界（月 1-12，日 1-31）")
+        anchor = _next_yearly(today, mon, day, clock, now_local, zone)
+        return _recurring_result(
+            f"FREQ=YEARLY;BYMONTH={mon};BYMONTHDAY={day}",
+            anchor,
+            clock,
+            now_local,
+            zone,
+            raw,
+        )
+
+    every_n = _RE_EVERY_N.search(text)
+    if every_n:
+        n = int(every_n.group("n"))
+        unit = every_n.group("unit")
+        if n < 1:
+            raise NluError("每 N 次重复的 N 必须不小于 1")
+        if unit == "天":
+            anchor = _future_today_or_next(today, clock, now_local, zone)
+            freq = "DAILY"
+        elif unit == "周":
+            anchor = _next_weekly(today, today.weekday(), clock, now_local, zone)
+            freq = "WEEKLY"
+        else:
+            anchor = _next_monthly(today, today.day, clock, now_local, zone)
+            freq = "MONTHLY"
+        interval = f";INTERVAL={n}" if n > 1 else ""
+        return _recurring_result(f"FREQ={freq}{interval}", anchor, clock, now_local, zone, raw)
+
+    return None
+
+
+# ----------------------------------------------------------------------------
 # 对外入口
 # ----------------------------------------------------------------------------
 
 
-def parse_phrase(phrase: str, now: datetime, tz: tzinfo | None = None) -> ParsedTime:
+def parse_phrase(
+    phrase: str,
+    now: datetime,
+    tz: tzinfo | None = None,
+    *,
+    recurring: bool = False,
+) -> ParsedTime:
     """把一句中文时间短语解析成结构化结果。
 
     参数：
         phrase: 中文时间短语，如「明天下午三点」「下周三」「半小时后」。
         now: 注入的当前时刻，必须 tz-aware；模块内部不读系统时间。
         tz: 目标时区；省略时取 ``now`` 自带的时区。
+        recurring: 是否解析周期表达。默认 ``False``（一次性契约：周期短语拒绝）；
+            ``True`` 时封闭词表内的周期短语产出 ``kind="recurring"`` + ``rrule``。
 
     返回：
         :class:`ParsedTime`。
 
     抛出：
-        UnsupportedExpression: 周期 / 重复 / 集合类表达，现有契约不支持。
+        UnsupportedExpression: 周期写路径未接入，或规则需要工作日历 / BYSETPOS 等。
         NluError: 短语落在封闭词表之外，或日期 / 时刻越界。
     """
     source_tz = _validate_now(now)
@@ -278,7 +468,17 @@ def parse_phrase(phrase: str, now: datetime, tz: tzinfo | None = None) -> Parsed
     local_now = now.astimezone(zone)
     text = _normalize(phrase)
 
-    _check_recurring(text)
+    if _RE_RECURRING_REJECTED.search(text):
+        raise UnsupportedExpression(_UNSUPPORTED_REASON_SHAPE)
+
+    recurring_parsed: ParsedTime | None = None
+    if recurring:
+        recurring_parsed = _match_recurring(text, local_now, zone, phrase)
+    else:
+        _check_recurring_disabled(text)
+
+    if recurring_parsed is not None:
+        return recurring_parsed
 
     # 相对时长（半小时后 / N 小时后 / N 分钟后）：先落到 UTC 瞬时再加，
     # 避免 DST 边界上按本地墙钟加完再重算偏移导致瞬时漂移。
@@ -292,6 +492,9 @@ def parse_phrase(phrase: str, now: datetime, tz: tzinfo | None = None) -> Parsed
             clock=local.time().replace(second=0, microsecond=0),
             crosses_midnight=local.date() != local_now.date(),
             raw=phrase,
+            kind="once",
+            rrule=None,
+            dtstart=moment,
         )
 
     today = local_now.date()
@@ -338,4 +541,7 @@ def parse_phrase(phrase: str, now: datetime, tz: tzinfo | None = None) -> Parsed
         clock=clock,
         crosses_midnight=target_date != today,
         raw=phrase,
+        kind="once",
+        rrule=None,
+        dtstart=moment,
     )
