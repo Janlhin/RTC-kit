@@ -138,7 +138,7 @@ python rtc.py --workspace <dir> ack \
   | 字段 | 含义 |
   |---|---|
   | `ts` | ISO8601 带时区偏移的时间戳（沿用工作区 IANA 时区） |
-  | `action` | 动作名：`plan` / `due-fire` / `due-missed` / `ack` / `check` / `cancel` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
+  | `action` | 动作名：`plan` / `due-fire` / `due-pre-remind` / `due-ladder` / `due-missed` / `ack` / `check` / `cancel` / `complete` / `disable` / `enable` / `postpone` / `set-time` / `add` / `edit` / `prune-expired` / `recovery` / `restore-backup` |
   | `target` | 逻辑作用对象：窗口 id；账本级事件用 `"-"`。**不记本机绝对路径** |
   | `actor` | `program`（cron / 程序自动写）/ `user`（交互命令直接调用）/ `model`（模型或外部适配器代操作，如 `ack --source external`） |
   | `source` | 哪个子命令（可带子路径，如 `postpone:state`、`due:promote`） |
@@ -150,6 +150,41 @@ python rtc.py --workspace <dir> ack \
 - **回放边界**：`replay_state` / `replay_routine` 是纯函数，按 `ts <= 截止时点` 折叠事件流重建当时账本/时刻表。本批**仍以 `alarms.json` / `routines.json` 为唯一真相源**，审计流不是真相源；回放只用于核对与追溯。命令行暴露方式本批未加（仅库函数），后续若开放只允许给已有命令加参数，不新增子命令。
 - **隐私**：记录不含个人信息、绝对路径、token；`target` 只用逻辑 id。
 - **遗留**：日志轮转 / 压缩策略本批不做；Event 模型迁移另有独立 lane。
+
+## 5d. 提前提醒与截止阶梯（FR-4.2 / FR-1.5）
+
+两个**可选**窗口策略字段；省略时账本形状、判定与输出与旧版逐字节一致（硬指标）。
+
+**字段**
+
+- `preRemind`：时长字符串 `Nm` / `Nh`（如 `"30m"`、`"1h"`）。锚点 = 窗口当天 `start`，提前量 = 该时长；触发区间 `[start - dur, start)`，到点响一次。
+- `ddlLadder`：时长字符串数组（如 `["24h", "12h"]`），只对带 `dueDate` 的倒计时窗口生效。锚点 = 截止日当天窗口 `start`（dueDate 本身无钟点，复用现有到点时刻，不另设日终截止）；每个阶梯点 = deadline − 阶梯时长，落在该点当天响一次。
+
+**去重（幂等，NFR-1.5）**
+
+- 去重键：提前提醒 `(window_id, planDate)`；阶梯 `(window_id, planDate, 阶梯标签)`。
+- 标记落在当天账本窗口：`preRemindFiredAt` / `ladderFired`；同日 `plan --force` 重建会把标记带过去，不重响。
+- 跨日不补响：阶梯点归属它自己那天的实例；次日新账本不会替昨天的点补投。
+- 阶梯不含到点本身：截止日当天的普通到点仍由现有链路投递。
+
+**与其它状态 / 命令的关系**
+
+- 候选状态只取 `pending` / `ringing`；`acked` / `delivered` / `missed` / `skipped` / `cancelled` 不复活。同日 ack 之后不再补提前类提醒。
+- 提前类投递**不占 `fireCount`**，也不改窗口终态：响完仍是 `pending`，等到点再走普通链路。
+- 截止日之前的阶梯点若落在当天普通到点槽位上（如 24h 前 = 前一天同一时刻），该次阶梯投递顶替当天普通到点（`fireCount` 顶到 `expectFires`），避免同晚重复响；截止日当天的阶梯不压晚上的到点。
+- 摘要 / 早报 / 复盘日实例不参与提前类判定。
+
+**投递类型必须可区分**
+
+- 输出：提前提醒挂「（提前提醒：距开始还有 N 分钟/小时）」；阶梯挂「（截止前 24h 提醒）」；普通到点不带后缀。
+- 审计 `action`：`due-pre-remind`（`reason` = 提前量原值）、`due-ladder`（`reason` = 阶梯标签）；普通到点仍是 `due-fire`。
+- history events `kind`：`pre-remind` / `ladder`。
+
+**待裁决口径（本批先按下列默认实现，拍板后再改）**
+
+1. 阶梯锚点：当前锚定「截止日窗口 `start`」；若产品要以「截止日 23:59 日终」为锚，需要改锚点并配合过期扫描，另开 lane。
+2. 阶梯列表不含到点本身；是否要把「到点」作为最后一个显式阶梯点，待裁决。
+3. 同一窗口同时配 `preRemind` 与 `ddlLadder`、同一 tick 命中多个候选时，优先级：阶梯 > 提前提醒 > 普通到点；同类取离现在最近的点。
 
 ## 6. 三条硬规矩（跨类型）
 
@@ -180,6 +215,9 @@ python rtc.py --workspace <dir> ack \
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
 | 审计只追加、并发无撕裂、失败不阻断 | `test_audit_jsonl.py` `AuditWriterCase` |
 | 审计流回放与真实账本逐字段相等（含 rev） | `test_audit_jsonl.py` `AuditReplayCase` |
+| 提前提醒到点响一次、不占普通到点次数、同日 ack 后不补 | `TestPreRemind` |
+| 阶梯 24h/12h 各响一次、重复 due 不重复、跨日不补响、计数断言 | `TestDdlLadder` |
+| 旧配置账本形状与输出零变化 | `TestOldConfigUnchanged` |
 | 并发写不覆盖 | `TestPostponeRollbackPreservesConcurrentEdit`、`TestLockOwnership` |
 | 重启后按 `planDate` 补建 | `TestMainlineRegression` |
 
