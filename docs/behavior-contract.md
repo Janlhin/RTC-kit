@@ -161,8 +161,7 @@ python rtc.py --workspace <dir> ack \
 
 ## 7.1 RRULE 周期规则语义（`code/rtc_rrule.py`）
 
-P3 上半段只落地纯解析 / 展开引擎：输入 RRULE 字符串与 DTSTART，输出 occurrence 列表。
-本阶段**不接** plan / due / ack，不碰存储层与 NLU；occurrence 接入主链路是后续 PR 的事。
+纯解析 / 展开引擎：输入 RRULE 字符串与 DTSTART，输出 occurrence 列表。引擎本身不读写账本；接入 plan / due / ack 的口径见 §7.2。
 
 ### 支持的键
 
@@ -193,6 +192,35 @@ P3 上半段只落地纯解析 / 展开引擎：输入 RRULE 字符串与 DTSTAR
 ### 明确不支持（本阶段）
 
 `BYSETPOS`、`BYHOUR` / `BYMINUTE` / `BYSECOND`、`BYWEEKNO`、`BYYEARDAY`、`RDATE` / `EXRULE`。引擎零第三方依赖，只用标准库 `datetime` / `zoneinfo` / `calendar`，不引入 dateutil。
+
+## 7.2 occurrence 实例化与去重（`code/rtc_occurrence.py`）
+
+P3 下半段把影子事件账本里 `kind=recurring` 的事件实例化进当天账本，供既有 plan / due / ack 机器判定；`once` 事件仍走旧 `routines.json` 链路，本模块不投影。
+
+### 接入口径
+
+- 适配层唯一入口 `occurrence_windows(workspace, tz, day, now, errors=...)`；`rtc_core` 只调本模块，不直接 import `rtc_events` / `rtc_rrule`（热路径守卫口径见 P1 测试 `TestHotPathImportGuard`）。
+- 只展开当天半开区间 `[00:00, 24:00)` 内的 occurrence，不无限展开；`COUNT` / `UNTIL` 沿用引擎全局预算，不从当天重新计数。
+- 去重键 = `(uid, occurrence start)`；同一事件同一天多条实例按起点区分。
+- 账本窗口身份：`id` = uid 去掉 `@rtc-kit` 后缀的 slug；`ocid` = `<slug>@YYYY-MM-DD`；确认 / 归档走既有 ocid 机器。
+- 状态过滤：仅 `scheduled` / `ringing` 实例化；`done` / `cancelled` / `missed` 跳过。
+- 时区：事件 `start` 自带偏移则沿用；朴素时刻挂工作区时区。产出 `start` / `end` 一律带偏移，不写裸 naive。
+- 单条事件解析 / 展开失败只跳过它自己并记一条诊断，不拖垮整天计划；账本缺失 / 损坏 / 空信封 → 返回 `[]`。
+
+### 语义
+
+- due 命中按 occurrence 起点所在窗口判定；`expectFires=1`，重复 tick 达上限后静默，不重复响。
+- ack 只确认当前这一条 occurrence；次日重新生成的新 occurrence 是 `pending`，昨天的确认不带过去。
+- 跨年照常出现，跨年查询不重复不丢。
+
+### 兼容红线
+
+工作区没有 `events.json`（或空信封）时，`plan / due / ack / status / history / schedule / report` 输出与基线逐字节一致；既有测试一条不改全绿。
+
+### 已知缺口
+
+- occurrence 级取消 / 改期（单条 occurrence 推迟、取消）未接；旧 routine 与事件账本同源双写的跨源去重留待读切换阶段。
+- 带固定偏移的事件时刻不跟随工作区 ZoneInfo 的 DST 切换；朴素时刻挂 ZoneInfo 的路径才跟随秋切 / 春切。
 
 ## 8. 明确不做
 
