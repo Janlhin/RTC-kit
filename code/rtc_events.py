@@ -101,11 +101,27 @@ def compose_local_iso(day: str, hhmm: str, offset: str = DEFAULT_OFFSET) -> str:
     return datetime.combine(d, t, tzinfo=_parse_offset(offset)).isoformat()
 
 
-def rrule_for_window(w: dict[str, Any]) -> str | None:
+def _until_date_time(until: str, offset: str) -> str:
+    """``validUntil``（``YYYY-MM-DD``）→ 当日 23:59:59 带偏移的 RRULE UNTIL 时刻。
+
+    P3 展开器只认 date-time；date-only ``UNTIL=YYYYMMDD`` 会被兜成当天 00:00:00，
+    截止日当天的晚间实例会被误判过期。取当日收尾时刻，保证截止日当天实例仍落在
+    窗口内、次日实例起不再排。日期解析失败时退回旧的 date-only 形态，不抛栈。
+    """
+    try:
+        d = date.fromisoformat(until)
+    except ValueError:
+        return until.replace("-", "")
+    dt = datetime.combine(d, time(23, 59, 59), tzinfo=_parse_offset(offset))
+    return dt.strftime("%Y%m%dT%H%M%S%z")
+
+
+def rrule_for_window(w: dict[str, Any], *, tz_offset: str = DEFAULT_OFFSET) -> str | None:
     """旧窗口 → RFC 5545 RRULE 字符串；一次性窗口返回 ``None``。
 
     只覆盖旧模型能表达的 DAILY / WEEKLY + BYDAY；YEARLY / MONTHLY / INTERVAL /
-    BYSETPOS 等由后续 phase 接入。``validUntil`` 收敛为 ``UNTIL``。
+    BYSETPOS 等由后续 phase 接入。``validUntil`` 收敛为 ``UNTIL``，且按事件时区
+    产出 date-time（当日 23:59:59 + 偏移），不用 date-only。
     """
     if w.get("oneOff"):
         return None
@@ -126,7 +142,7 @@ def rrule_for_window(w: dict[str, Any]) -> str | None:
 
     until = w.get("validUntil")
     if until:
-        parts.append(f"UNTIL={str(until).replace('-', '')}")
+        parts.append(f"UNTIL={_until_date_time(str(until), tz_offset)}")
     return ";".join(parts)
 
 
@@ -191,7 +207,7 @@ def map_window(
         "kind": kind,
         "start": start,
         "end": end,
-        "rrule": None if kind == "once" else rrule_for_window(w),
+        "rrule": None if kind == "once" else rrule_for_window(w, tz_offset=tz_offset),
         "owner": DEFAULT_OWNER,
         "deadline": str(deadline) if deadline else None,
         "status": _status(w, ledger),

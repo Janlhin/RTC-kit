@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -206,7 +206,30 @@ class TestWindowProjection(unittest.TestCase):
             "dateTypes": ["workday"],
             "validUntil": "2027-01-31",
         }
-        self.assertEqual(events.rrule_for_window(w), "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;UNTIL=20270131")
+        self.assertEqual(
+            events.rrule_for_window(w),
+            "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;UNTIL=20270131T235959+0800",
+        )
+
+    def test_until_is_date_time_and_keeps_last_day_evening(self):
+        w = {
+            "id": "wake",
+            "start": "07:00",
+            "end": "07:25",
+            "dateTypes": ["workday"],
+            "validUntil": "2026-11-30",
+        }
+        rrule = events.rrule_for_window(w, tz_offset="+08:00")
+        self.assertIn("UNTIL=20261130T235959+0800", rrule)
+
+        until = next(p.split("=", 1)[1] for p in rrule.split(";") if p.startswith("UNTIL="))
+        until_dt = datetime.strptime(until, "%Y%m%dT%H%M%S%z")
+        shanghai = timezone(timedelta(hours=8))
+        evening_of_last_day = datetime(2026, 11, 30, 20, 0, tzinfo=shanghai)
+        evening_of_next_day = datetime(2026, 12, 1, 20, 0, tzinfo=shanghai)
+        # 截止日当天 20:00 实例仍落在窗口内；次日 20:00 实例已超出 UNTIL。
+        self.assertLessEqual(evening_of_last_day, until_dt)
+        self.assertGreater(evening_of_next_day, until_dt)
 
     def test_rrule_all_week_falls_back_to_daily_and_dedupes(self):
         w = {"id": "drink", "start": "15:00", "end": "15:10", "dateTypes": ["workday", "weekend"]}
