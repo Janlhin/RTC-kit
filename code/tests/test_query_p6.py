@@ -332,6 +332,90 @@ class TestListFilters(_WorkspaceCase):
         self.assertEqual(payload["items"], [])
 
 
+class TestOccurrenceExpansion(_WorkspaceCase):
+    """P3 引擎接入后：list 按 occurrence 实例输出，show 仍按事件定义。"""
+
+    def seed_weekly(self) -> None:
+        self.seed_events(
+            [
+                _make_event(
+                    "weekly-mon@rtc-kit",
+                    "recurring",
+                    "2026-12-28T09:00:00+08:00",
+                    rrule="FREQ=WEEKLY;BYDAY=MO",
+                    aliases=["周一例会"],
+                ),
+                _make_event(
+                    "once-marker@rtc-kit",
+                    "once",
+                    "2027-02-15T10:00:00+08:00",
+                    aliases=["一次性"],
+                ),
+            ]
+        )
+
+    @staticmethod
+    def _event_items(payload: dict) -> list[dict]:
+        return [i for i in payload.get("items", []) if i.get("source") == "event"]
+
+    def test_weekly_seven_days_one_occurrence(self):
+        self.seed_weekly()
+        rc, payload, err = self.list_json("--from", "2026-12-28", "--to", "2027-01-03")
+        self.assertEqual(rc, 0, err)
+        items = [i for i in self._event_items(payload) if i["uid"] == "weekly-mon@rtc-kit"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["start"], "2026-12-28T09:00:00+08:00")
+        self.assertEqual(items[0]["ocid"], "weekly-mon@rtc-kit@2026-12-28")
+
+    def test_weekly_thirty_days_four_occurrences(self):
+        self.seed_weekly()
+        # 2027-01-05 ~ 2027-02-03（30 天）内的周一：01-11 / 01-18 / 01-25 / 02-01。
+        rc, payload, err = self.list_json("--from", "2027-01-05", "--to", "2027-02-03")
+        self.assertEqual(rc, 0, err)
+        items = [i for i in self._event_items(payload) if i["uid"] == "weekly-mon@rtc-kit"]
+        days = sorted(i["start"][:10] for i in items)
+        self.assertEqual(days, ["2027-01-11", "2027-01-18", "2027-01-25", "2027-02-01"])
+
+    def test_year_scope_lists_occurrences_in_that_year(self):
+        self.seed_weekly()
+        rc, payload, err = self.list_json("--year", "2027")
+        self.assertEqual(rc, 0, err)
+        items = [i for i in self._event_items(payload) if i["uid"] == "weekly-mon@rtc-kit"]
+        self.assertTrue(items, "跨年周期事件在 2027 年应出现对应实例")
+        self.assertTrue(all(i["start"].startswith("2027-") for i in items))
+        # 一次性事件只落 start 年。
+        once = [i for i in self._event_items(payload) if i["uid"] == "once-marker@rtc-kit"]
+        self.assertEqual(len(once), 1)
+
+    def test_budget_exceeded_is_rc4_empty_stdout(self):
+        # 6 条 FREQ=DAILY 事件在 2026 年展开 6×365=2190 条，超过查询预算 2000。
+        evs = [
+            _make_event(
+                f"daily-{i}@rtc-kit",
+                "recurring",
+                "2026-01-01T08:00:00+08:00",
+                rrule="FREQ=DAILY",
+                aliases=[f"d{i}"],
+            )
+            for i in range(6)
+        ]
+        self.seed_events(evs)
+        rc, out, err = self.cli("list", "--year", "2026")
+        self.assertEqual(rc, 4, err)
+        self.assertEqual(out, "")
+        self.assertIn("上限", err)
+
+    def test_show_returns_definition_not_expanded_occurrences(self):
+        self.seed_weekly()
+        rc, out, err = self.cli("show", "weekly-mon@rtc-kit", "--json")
+        self.assertEqual(rc, 0, err)
+        ev = json.loads(out)
+        self.assertEqual(ev["kind"], "recurring")
+        self.assertEqual(ev["rrule"], "FREQ=WEEKLY;BYDAY=MO")
+        self.assertNotIn("ocid", ev)
+        self.assertNotIn("occurrences", ev)
+
+
 class TestShow(_WorkspaceCase):
     def setUp(self):
         super().setUp()
