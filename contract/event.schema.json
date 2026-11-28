@@ -29,7 +29,7 @@
         },
         "kind": { "enum": ["once", "recurring"], "description": "once = 只发生一次；recurring = 按 rrule 重复。" },
         "start": { "type": "string", "format": "date-time", "description": "开始时刻（带偏移 ISO 8601）；时区口径沿用 D-012。" },
-        "end": { "type": "string", "format": "date-time", "description": "结束时刻（闭区间含义沿用旧窗口）。" },
+        "end": { "type": "string", "format": "date-time", "description": "结束时刻（闭区间含义沿用旧窗口）。缺省时默认与 start 同刻（零时长事件），不另设默认分钟数；旧窗口 end 缺省同样回退 start。" },
         "rrule": {
           "type": ["string", "null"],
           "description": "RFC 5545 §3.8.5.3 RRULE 标准字符串（FREQ/INTERVAL/BYDAY/BYMONTH/BYMONTHDAY/COUNT/UNTIL）；null/省略 = 一次性事件。直接存标准字符串，不另造自研 DSL。"

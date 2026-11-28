@@ -136,3 +136,4 @@
 - **被否决**：① 直接改旧 `alarm-state` / `routine` schema 承载事件字段——旧命令面与既有测试会被波及，违背「一条不改全绿」；② P1 就写 `.ics` 真相源——日历序列化是 P2 的事，提前做会把两套真相源缝在一起；③ 事件模块被 `due` / `plan` 直接 import——tick 路径变重，违反确定性与零第三方依赖边界。
 - **影响**：`contract/event.schema.json`、`code/rtc_events.py`、`code/rtc_migrate.py`、`code/tests/test_events_p1.py`、`docs/architecture.md`、`docs/behavior-contract.md` §5c、`contract/README.md`、`code/README.md`、`TASKS.md` T-016。
 - **复审条件**：P2 切 `.ics` 真相源时复核影子缓存的重建与删除路径；P5 接入提醒策略时复核 `reminderPolicy` 形状；`owner` 词汇表收紧或校验规则另提案；`holiday` 类型不进 RRULE，留外挂日期类型表。
+- **审计修订（2026-11-28，一致性审计 A2–A7）**：① `UNTIL` 改 date-time（当日 23:59:59 + 偏移），不用 date-only；② 契约补齐 `.ics` 往返七字段 `summary` / `categories` / `tzid` / `dtstamp` / `unknown` / `rev` / `crossYear`，`rev` 每次写操作 +1、落 `X-RTC-REV` 与索引；③ `end` 缺省与 `start` 同刻（零时长）；④ `createdAt` / `updatedAt` / `source` 不随 `.ics` 走；⑤ 新旧两套 UID 算法 P1 不收敛，旧 `id-<开始时间>` 回退算法仅兼容读取，P2 统一新 `uid`。口径明细见 `docs/behavior-contract.md` §5c。
