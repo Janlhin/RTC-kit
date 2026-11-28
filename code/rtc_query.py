@@ -13,9 +13,8 @@
 
 - 纯标准库；**不被** ``plan`` / ``due`` / ``ack`` tick 热路径 import（与
   ``rtc_events`` 同一条静态守卫线）。
-- 周期事件的 occurrence 逐条枚举属 P3 引擎；本阶段按「规则有效期与查询区间
-  重叠」做归属匹配，不展开实例。接入 P3 ``rtc_rrule.expand_occurrences`` 后
-  再补实例级过滤（见 D-019 复审条件）。
+- 周期事件由 P3 ``rtc_rrule`` 引擎按查询区间逐条展开成 occurrence 实例；每条实例
+  带 occurrence 起点与 ``ocid``。``show`` 仍按事件定义返回，不展开实例。
 - ``--q`` 大小写不敏感子串匹配，中文按原字符、不分词；多条件 AND。
 - ``export --ics``：序列化 / 折行 / 转义 / 跨年分组全部复用 P2 ``rtc_ics``，本模块只做路径路由。
 
@@ -30,7 +29,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,12 +37,15 @@ import rtc_core as core
 import rtc_events as events
 import rtc_history as history
 import rtc_ics as ics
+import rtc_rrule as rrule
 
 __all__ = ["cmd_list", "cmd_show", "cmd_export"]
 
-# 单次查询返回条数硬上限：先按日期/年份过滤再聚合，超限明确报错而不是卡死。
-# occurrence 枚举接入 P3 引擎后，条数预算由引擎的 ExpansionLimit 兜底。
-MAX_LIST_ITEMS = 5_000
+# 单次查询展开后的实例条数硬上限：先按区间过滤再聚合，超限明确报错而不是卡死
+# 或静默截断。引擎侧另有 MAX_OCCURRENCES / MAX_SCAN_YEARS 双硬上限兜底死循环。
+MAX_LIST_ITEMS = 2_000
+
+_DEFAULT_SPACING_MIN = 15
 
 DEFAULT_OFFSET = timezone(timedelta(hours=8))
 
@@ -124,40 +126,68 @@ def _parse_event_dt(raw: Any) -> datetime | None:
     return dt
 
 
-def _rrule_until_day(rrule: str | None) -> date | None:
-    """从 RRULE 字符串取 UNTIL 的日历日；没有 UNTIL / 解析不出返回 None。"""
-    if not rrule:
-        return None
-    for part in rrule.split(";"):
-        if part.startswith("UNTIL="):
-            value = part[6:]
-            try:
-                return datetime.strptime(value[:8], "%Y%m%d").date()
-            except ValueError:
-                return None
-    return None
+def _duration_minutes(start: datetime, end: Any) -> int:
+    """事件起止时长（分钟）；缺 end / 非法值退回默认间隔，与 occurrence 适配层口径一致。"""
+    if end is None:
+        return _DEFAULT_SPACING_MIN
+    try:
+        parsed = datetime.fromisoformat(str(end))
+    except ValueError:
+        return _DEFAULT_SPACING_MIN
+    minutes = (parsed.astimezone(start.tzinfo) - start).total_seconds() / 60
+    return max(1, int(minutes)) if minutes > 0 else _DEFAULT_SPACING_MIN
 
 
-def _event_in_scope(ev: dict[str, Any], scope: Scope) -> bool:
-    """事件是否落在查询区间。
+def _scope_window(start_dt: datetime, scope: Scope) -> tuple[datetime, datetime]:
+    """查询区间在事件时区下的半开窗口 ``[from, to)``。"""
+    tz = start_dt.tzinfo or DEFAULT_OFFSET
+    wfrom = datetime.combine(scope.start, time.min, tzinfo=tz)
+    wto = datetime.combine(scope.end + timedelta(days=1), time.min, tzinfo=tz)
+    return wfrom, wto
 
-    归属规则（P6 口径，D-019）：
 
-    - ``once``：按 ``start`` 日期归属，只落在 start 那天所在的区间。
-    - ``recurring``：按「规则有效期与区间重叠」归属——start 不晚于区间末、
-      UNTIL 不早于区间始；跨年周期事件在两个年份都会列出。实例级逐条枚举
-      待 P3 引擎接入。
+def _expand_event(ev: dict[str, Any], scope: Scope, errors: list[str]) -> list[dict[str, Any]]:
+    """把事件展开成区间内的 occurrence 实例列表。
+
+    - ``once``：start 落在区间内才出一条，实例起点即事件 start。
+    - ``recurring``：交 P3 引擎 ``expand_occurrences`` 按半开区间逐条展开；
+      跨年事件在两个年份的查询里各自出现对应实例。
+    - 单条事件解析 / 展开失败只跳过它自己并记一条诊断，不拖垮整份查询。
     """
     start_dt = _parse_event_dt(ev.get("start"))
     if start_dt is None:
-        return False
-    start_day = start_dt.date()
+        return []
+    uid = str(ev.get("uid") or "")
+    duration = _duration_minutes(start_dt, ev.get("end"))
+
     if ev.get("kind") == "once":
-        return scope.start <= start_day <= scope.end
-    until_day = _rrule_until_day(ev.get("rrule"))
-    if start_day > scope.end:
-        return False
-    return until_day is None or until_day >= scope.start
+        if not (scope.start <= start_dt.date() <= scope.end):
+            return []
+        occs = [start_dt]
+    else:
+        text = ev.get("rrule")
+        if not text:
+            return []
+        wfrom, wto = _scope_window(start_dt, scope)
+        try:
+            parsed = rrule.parse_rrule(str(text))
+            occs = rrule.expand_occurrences(start_dt, parsed, wfrom, wto)
+        except (rrule.RruleError, ValueError, TypeError, KeyError) as e:
+            errors.append(f"事件 {uid or '?'}：{e}")
+            return []
+
+    return [_occurrence_item(ev, occ, duration) for occ in occs]
+
+
+def _occurrence_item(ev: dict[str, Any], occ: datetime, duration_min: int) -> dict[str, Any]:
+    """一条 occurrence 实例：继承事件定义字段，覆盖实例起点 / 终点与 ``ocid``。"""
+    uid = str(ev.get("uid") or "")
+    item = dict(ev)
+    item["source"] = "event"
+    item["ocid"] = f"{uid}@{occ.date().isoformat()}"
+    item["start"] = occ.isoformat()
+    item["end"] = (occ + timedelta(minutes=duration_min)).isoformat()
+    return item
 
 
 def _event_haystack(ev: dict[str, Any]) -> str:
@@ -184,12 +214,6 @@ def _event_matches(ev: dict[str, Any], query: str | None, kind: str | None, owne
     owner_ok = not owner or ev.get("owner") == owner
     query_ok = not query or query.lower() in _event_haystack(ev)
     return kind_ok and owner_ok and query_ok
-
-
-def _event_item(ev: dict[str, Any]) -> dict[str, Any]:
-    item = dict(ev)
-    item["source"] = "event"
-    return item
 
 
 # --------------------------------------------------------------------------- #
@@ -255,20 +279,23 @@ def _validate_filters(kind: str | None, owner: str | None) -> None:
 
 def _gather_items(
     scope: Scope, query: str | None, kind: str | None, owner: str | None
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    errors: list[str] = []
     envelope = events.load_events(core.WORKSPACE)
     event_items: list[dict[str, Any]] = []
     for ev in events.all_events(envelope):
-        if _event_in_scope(ev, scope) and _event_matches(ev, query, kind, owner):
-            event_items.append(_event_item(ev))
-    event_items.sort(key=lambda x: str(x.get("start") or ""))
+        # 筛选在事件定义层做；命中后再交引擎展开成区间内的 occurrence 实例。
+        if not _event_matches(ev, query, kind, owner):
+            continue
+        event_items.extend(_expand_event(ev, scope, errors))
+    event_items.sort(key=lambda x: (str(x.get("start") or ""), str(x.get("ocid") or "")))
 
     window_items: list[dict[str, Any]] = []
     for row in _old_window_rows(scope):
         if _window_matches(row, query, kind, owner):
             window_items.append(_window_item(row))
     window_items.sort(key=lambda x: (str(x.get("date") or ""), str(x.get("windowId") or "")))
-    return event_items, window_items
+    return event_items, window_items, errors
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -279,7 +306,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(f"list: {e}", file=sys.stderr)
         return 4
 
-    event_items, window_items = _gather_items(scope, args.q, args.kind, args.owner)
+    event_items, window_items, errors = _gather_items(scope, args.q, args.kind, args.owner)
+
+    for note in errors:
+        print(f"list: 跳过 {note}", file=sys.stderr)
 
     if len(event_items) + len(window_items) > MAX_LIST_ITEMS:
         print(
@@ -318,9 +348,11 @@ def _print_list_text(
         ident = ev.get("uid") or ""
         if aliases:
             ident = f"{ident}（别名 {aliases}）"
+        ocid = str(ev.get("ocid") or "")
+        tail = f"  ocid={ocid}" if ocid else ""
         print(
             f"  事件  {day} {stamp}  {str(ev.get('kind') or ''):<10} "
-            f"{str(ev.get('owner') or ''):<11} {str(ev.get('status') or ''):<10} {ident}"
+            f"{str(ev.get('owner') or ''):<11} {str(ev.get('status') or ''):<10} {ident}{tail}"
         )
     for row in window_items:
         label = str(row.get("label") or row.get("windowId") or "")
