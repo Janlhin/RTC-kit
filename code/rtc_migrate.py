@@ -46,6 +46,7 @@ __all__ = [
     "plan_migration_to_ics",
     "apply_migration_to_ics",
     "rollback_ics",
+    "rebuild_shadow_from_ics",
     "main",
 ]
 
@@ -339,8 +340,69 @@ def _backup_ics(workspace: Path, backup_dir: Path) -> Path:
     return dest
 
 
+# 影子账本（events.json）契约允许的字段；.ics 专有扩展（summary / categories /
+# tzid / unknown / crossYear / rev / dtstamp）留在真相层，不进派生视图。
+_SHADOW_FIELDS = (
+    "uid",
+    "kind",
+    "start",
+    "end",
+    "rrule",
+    "owner",
+    "deadline",
+    "status",
+    "reminderPolicy",
+    "aliases",
+)
+
+_DEFAULT_POLICY = {"preRemind": None, "ddlLadder": None, "snooze": None}
+_VALID_STATUS = {"scheduled", "ringing", "done", "cancelled", "missed"}
+_VALID_KIND = {"once", "recurring"}
+
+
+def _shadow_event_from_ics(ev: dict[str, Any]) -> dict[str, Any]:
+    """把一条 ``.ics`` 事件裁剪成影子账本契约形状；扩展字段不进派生视图。"""
+    aliases = [str(a) for a in (ev.get("aliases") or [])]
+    policy_in = ev.get("reminderPolicy") or {}
+    policy = {**_DEFAULT_POLICY, **{k: v for k, v in policy_in.items() if k in _DEFAULT_POLICY}}
+    status = ev.get("status") or "scheduled"
+    if status not in _VALID_STATUS:
+        status = "scheduled"
+    kind = ev.get("kind") if ev.get("kind") in _VALID_KIND else "once"
+    stamp = datetime.now().astimezone().isoformat()
+    event: dict[str, Any] = {
+        "uid": str(ev["uid"]),
+        "kind": kind,
+        "start": str(ev["start"]),
+        "end": str(ev.get("end") or ev["start"]),
+        "rrule": ev.get("rrule"),
+        "owner": ev.get("owner") or "self",
+        "deadline": ev.get("deadline"),
+        "status": status,
+        "reminderPolicy": policy,
+        "aliases": aliases,
+        "createdAt": stamp,
+        "updatedAt": stamp,
+        "source": {"routineId": aliases[0] if aliases else "", "ledgerDate": None},
+    }
+    return event
+
+
+def rebuild_shadow_from_ics(workspace: Path) -> int:
+    """从 ``.ics`` 真相重建 ``events.json`` 派生影子视图；幂等，事件集合与 `.ics` 逐条一致。
+
+    派生视图只背契约字段；P3 适配器读影子账本时看到的核心判定字段与 `.ics` 对齐，
+    不读到迁移前的陈旧快照。
+    """
+    envelope = events.empty_envelope()
+    for ev in ics.load_all_events(workspace):
+        events.upsert_event(envelope, _shadow_event_from_ics(ev))
+    events.save_events(workspace, envelope)
+    return len(events.all_events(envelope))
+
+
 def apply_migration_to_ics(workspace: Path, backup_dir: Path, *, as_of: date | None = None) -> dict[str, Any]:
-    """真跑：先备份，再投影写 ``.ics``，最后重建索引；旧文件不删不改。"""
+    """真跑：先备份，再投影写 ``.ics``，重建索引，最后从 ``.ics`` 重建影子视图；旧文件不删不改。"""
     plan = plan_migration_to_ics(workspace, as_of=as_of)
     backup = _backup_ics(workspace, backup_dir)
 
@@ -351,11 +413,13 @@ def apply_migration_to_ics(workspace: Path, backup_dir: Path, *, as_of: date | N
 
     written = ics.write_events(workspace, list(by_uid.values()))
     indexed = calindex.rebuild(workspace)
+    shadow = rebuild_shadow_from_ics(workspace)
 
     plan["dry_run"] = False
     plan["backup_dir"] = str(backup)
     plan["written_files"] = [str(p) for p in written]
     plan["indexed"] = indexed
+    plan["shadow_events"] = shadow
     return plan
 
 
