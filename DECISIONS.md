@@ -136,3 +136,13 @@
 - **被否决**：① 直接改旧 `alarm-state` / `routine` schema 承载事件字段——旧命令面与既有测试会被波及，违背「一条不改全绿」；② P1 就写 `.ics` 真相源——日历序列化是 P2 的事，提前做会把两套真相源缝在一起；③ 事件模块被 `due` / `plan` 直接 import——tick 路径变重，违反确定性与零第三方依赖边界。
 - **影响**：`contract/event.schema.json`、`code/rtc_events.py`、`code/rtc_migrate.py`、`code/tests/test_events_p1.py`、`docs/architecture.md`、`docs/behavior-contract.md` §5c、`contract/README.md`、`code/README.md`、`TASKS.md` T-016。
 - **复审条件**：P2 切 `.ics` 真相源时复核影子缓存的重建与删除路径；P5 接入提醒策略时复核 `reminderPolicy` 形状；`owner` 词汇表收紧或校验规则另提案；`holiday` 类型不进 RRULE，留外挂日期类型表。
+
+## D-015 L2 事件台账以 `.ics` 为源真相，SQLite 仅作可重建只读索引（P2）
+
+- **日期**：2026-11-28
+- **决策**：L2 行程本的事件台账以 RFC 5545 `calendar/<YYYY>.ics` 为唯一真相；`state/calendar-index.db` 只是可删可重建的只读查询索引；旧 `routines.json` / `alarms.json` 迁移后留在原地作只读历史。
+- **背景**：NFR-2.5 跨代可读（30–40 年）是决定性约束——30 年后软件可能全死，数据必须仍是开放标准纯文本。SQLite 与私有 JSON 库不可人类直读、会被 schema 演进绑架，不能作真相。P1 的 `state/events.json` 只是过渡期派生影子副本，P2 起 `.ics` 为准。
+- **被采纳**：① 一年一个 `.ics`，按 `DTSTART` 年份归文件；跨年事件在相邻年份文件各留一段 `X-RTC-CROSS-YEAR` 交叉引用；② 索引 `rebuild` 从零扫描全部 `.ics` 灌入，查询结果与直扫 `.ics` 逐条对账；③ 冲突以 `.ics` 为准，索引陈旧只告警剔除、不反写真相；④ 迁移默认 dry-run，`--apply` 前自动备份（含 manifest 哈希），重跑幂等（别名命中保留原 UID），`--rollback` 按 manifest 恢复；⑤ RRULE 直接存 RFC 5545 标准字符串；owner / deadline / reminderPolicy / aliases / rev 等 RTC 专有字段走 `X-RTC-*` 扩展，未知属性原样保留带回；⑥ `--to-ics --apply` 写完 `.ics`、重建索引后，从 `.ics` 逐条重建 `state/events.json` 派生影子视图（幂等、只背契约字段、随备份回滚），让过渡期旧读路径（P3 适配器）读到的核心字段与真相一致。
+- **被否决**：① SQLite 作事件真相——跨代不可读，NFR-2.5 直接否决；② 单一大 `.ics` 文件——多年后单文件过大、折行与合并冲突难处理，按年份拆分；③ 索引不一致时自动重建并覆盖——历史教训（三套修复器互相重建清空数据，见 `docs/architecture.md` §5 规则 3），读取路径只告警不修复；④ 迁移后不重建影子视图、仅在读路径加「`.ics` 比 `events.json` 新」的告警守卫——双写期适配器仍会读到陈旧数据，告警只暴露问题不消除问题，故否，选上面的方案 ⑥。
+- **影响**：`code/rtc_ics.py` 双向序列化/解析层、`code/rtc_calindex.py`、`code/rtc_migrate.py --to-ics`、`docs/architecture.md` §5、`docs/behavior-contract.md` §3.2、测试 `test_ics_p2.py` / `test_calindex.py` / `test_migrate_ics.py`。
+- **复审条件**：P3 RRULE 展开、P5 事件写路径接入后，复核迁移期双写口径；若后续做系统日历同步（NFR-3.6），单向导出副本另立决策，不回流改写 `.ics`。
