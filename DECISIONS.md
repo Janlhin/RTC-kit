@@ -157,3 +157,13 @@
 - **被否决**：① 自研 DSL——与 `.ics` 互导要再写一层翻译，两套语义容易漂移，也背离「`.ics` 是源真相」的方向；② dateutil——成熟但带第三方依赖，其 RRULE 实现覆盖大量本阶段不需要的键，且与标准库 `zoneinfo` 的 DST 口径需要再对齐；当前子集自研边界清晰，不值得为它背依赖。
 - **影响**：新增 `code/rtc_rrule.py`、`code/tests/test_rrule.py`；`docs/behavior-contract.md` §7.1。occurrence 接入 plan / due / ack 的口径（`code/rtc_occurrence.py` 适配层、去重键、兼容红线）见 §7.2，不再单独立编号决策。
 - **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
+
+## D-018 L2 P5 事件级 CRUD 命令落影子账本，提醒策略先存形状、档位计算留 P3
+
+- **日期**：2026-11-28
+- **决策**：P5 在 P1 影子账本之上落地事件级写命令 `create` / `edit` / `complete` / `cancel`（含当天 `--undo`）与 `owner` / `deadline` / `reminderPolicy` 持久化；写操作复用既有摘要守卫 + 排他锁，审计 + history 逐条留痕；`.ics` 写入、occurrence 展开、NLU 短语、查询导出分别留 P2 / P3 / P4 / P6。
+- **背景**：验收要求「能记、能查、能改、能取消、跨年可查」，但 P2 真相源、P3 occurrence 层、P4 解析器都还没接线。先把事件级命令面与存储写通，后续 phase 在同一契约上叠档位计算与真相源切换，避免等所有口径拍板才动工。
+- **被采纳**：① 命令实现独立成 `code/rtc_event_cmd.py`，不进 `plan` / `due` / `ack` tick 热路径；core 只做子命令路由，窗口级旧行为一字不变；⓪ 与 P4 解析器的字段映射：解析器输出 `dtstart`（tz-aware datetime），落账 `event.start = parsed.dtstart.isoformat()`，`end` 按窗口宽度 / 入参派生；命名差异不牵动 schema，解析器侧不改名；② 并发守卫沿用既有摘要（digest）+ `_exclusive_file_lock` 口径，冲突抛 `Conflict`（退出 2），不静默覆盖；③ 撤销只当天有效，按审计快照逐字段还原，`uid` / `aliases` / `createdAt` 保持不变，跨日 / 无痕迹 / 非取消态一律退出 4；④ `reminderPolicy` 形状对齐 event schema：`preRemind.minutesBefore` 锚 `start`、`ddlLadder` 锚 `deadline`、`snooze.minutes` 存默认时长；同 tick 优先级 阶梯 > 提前 > 到点，重合取最早；⑤ 事件契约补可选 `title` 字段（RFC 5545 SUMMARY 对应），P1 投影事件不带也仍合法；⑥ 审计动作 `create` / `edit` / `complete` / `cancel` / `cancel-undo`，`source` 前缀 `event:`；审计 / history 失败不阻断主流程。
+- **被否决**：① P5 就做 occurrence 粒度的完成 / 平移——展开层是 P3 的事，提前缝会把事件级与实例级状态搅在一起；② 事件命令直接写 `.ics`——真相源切换是 P2 范围，影子账本口径不变；③ 给事件账本另造一套 rev 计数器——摘要守卫与既有配置文件口径一致，rev 字段留待 P2 真相源重构统一；④ 窗口级撤销 / snooze 在本 lane 重写——#113 / #114 各自在窗口层推进，合并后再收敛去重。
+- **影响**：`code/rtc_event_cmd.py`、`code/rtc_core.py`（子命令注册与路由）、`contract/event.schema.json`（补可选 `title`）、`code/tests/test_events_p5.py`、`docs/behavior-contract.md` §5d、`code/README.md`、`README.md`、`TASKS.md` T-020。
+- **复审条件**：P3 occurrence 接线时复核事件级 `complete` / `cancel` 是否需要拆到实例粒度，以及 occurrence snooze 幂等键（uid，日期，目标时刻）落地；P2 切 `.ics` 时复核事件写命令的落盘路径从影子账本切到日历文件；与 #113（窗口撤销）/ #114（窗口 snooze）/ #115（窗口提醒策略）合并后收敛重复语义；`title` 字段在 P1 投影补齐后再评估是否升为必填。

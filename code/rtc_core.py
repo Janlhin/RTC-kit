@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import rtc_archive as archive
 import rtc_brief as brief
+import rtc_event_cmd as event_cmd
 import rtc_history as hist
 import rtc_metrics as metrics
 import rtc_occurrence as occurrence
@@ -3201,8 +3202,20 @@ def cmd_cancel(args: argparse.Namespace) -> int:
       - 无限期的周期窗口 → 只取消今天这一次（明天照常）。
         周期窗口没有「结束」，想永久停用请用 `disable`。
 
+    L2 扩展：``--uid`` / ``--alias`` 取消事件一等公民；``--undo`` 撤销当天的事件取消。
+    窗口级 ``--undo`` 属 #113，本版本未接线。
+
     stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
     """
+    if not (args.window or getattr(args, "uid", None) or getattr(args, "alias", None)):
+        print("cancel: 需要 --window 或 --uid/--alias", file=sys.stderr)
+        return 2
+    if getattr(args, "uid", None) or getattr(args, "alias", None):
+        return event_cmd.cmd_event_cancel(args)
+    if getattr(args, "undo", False):
+        print("cancel: --undo 目前只配合 --uid 撤销事件取消；窗口级撤销见 #113", file=sys.stderr)
+        return 4
+
     digest = file_digest(ROUTINE)
     routine = load_routine()
     tz = resolve_tz(routine)
@@ -3301,8 +3314,17 @@ def cmd_complete(args: argparse.Namespace) -> int:
     语义 = 「做完了，以后不用提醒我」：记录确认 + 永久停用这个窗口。
     这与 `ack` 的区别：`ack` 只停今天这一次，`complete` 连以后也不再提醒。
 
+    L2 扩展：``--uid`` / ``--alias`` 把事件一等公民标成 `done`；occurrence 粒度
+    的完成留 P3 接线。
+
     stdout 保持为空：它由用户交互触发，不是定时任务，不该被投递出去。
     """
+    if not (args.window or getattr(args, "uid", None) or getattr(args, "alias", None)):
+        print("complete: 需要 --window 或 --uid/--alias", file=sys.stderr)
+        return 2
+    if getattr(args, "uid", None) or getattr(args, "alias", None):
+        return event_cmd.cmd_event_complete(args)
+
     digest = file_digest(ROUTINE)
     routine = load_routine()
     tz = resolve_tz(routine)
@@ -3486,16 +3508,62 @@ def main(argv: list[str] | None = None) -> int:
     spo.set_defaults(func=cmd_postpone)
 
     scan = sub.add_parser("cancel")
-    scan.add_argument("--window", required=True, help="窗口 id")
+    scan.add_argument("--window", help="窗口 id（窗口级取消，旧行为不变）")
+    scan.add_argument("--uid", help="L2 事件 uid（事件级取消）")
+    scan.add_argument("--alias", help="L2 事件旧 id / 别名")
     scan.add_argument("--date", help="取消未来某天的那次（YYYY-MM-DD）")
+    scan.add_argument("--undo", action="store_true", help="撤销今天的事件取消（仅配合 --uid/--alias）")
     scan.add_argument("--now")
     scan.set_defaults(func=cmd_cancel)
 
     scom = sub.add_parser("complete")
-    scom.add_argument("--window", required=True, help="窗口 id")
+    scom.add_argument("--window", help="窗口 id（窗口级完成，旧行为不变）")
+    scom.add_argument("--uid", help="L2 事件 uid（事件级标完成）")
+    scom.add_argument("--alias", help="L2 事件旧 id / 别名")
     scom.add_argument("--text", help="完成时的备注")
     scom.add_argument("--now")
     scom.set_defaults(func=cmd_complete)
+
+    sce = sub.add_parser("create", help="L2 新建事件（结构化参数；自然语言短语走 P4）")
+    sce.add_argument("--title", required=True, help="事件标题")
+    sce.add_argument("--start", required=True, help="开始时刻 ISO 8601（带偏移）")
+    sce.add_argument("--end", required=True, help="结束时刻 ISO 8601（带偏移）")
+    sce.add_argument("--rrule", help="RFC 5545 RRULE 字符串；省略 = 一次性事件")
+    sce.add_argument("--owner", help="self（默认）或 other:<name>")
+    sce.add_argument("--deadline", help="DDL 截止日 YYYY-MM-DD")
+    sce.add_argument("--pre-remind", dest="pre_remind", type=int, help="提前 N 分钟提醒（≥1）")
+    sce.add_argument(
+        "--ddl-ladder",
+        dest="ddl_ladder",
+        type=int,
+        action="append",
+        help="截止阶梯预警提前量（分钟，≥0），可重复",
+    )
+    sce.add_argument("--snooze", type=int, help="默认 snooze 时长（分钟，≥1）")
+    sce.add_argument("--uid", help="显式指定稳定 uid（幂等重放用）；缺省自动生成")
+    sce.add_argument("--now")
+    sce.set_defaults(func=event_cmd.cmd_event_create)
+
+    sed = sub.add_parser("edit", help="L2 按 uid/旧 id 局部更新事件")
+    sed.add_argument("--uid", help="事件 uid")
+    sed.add_argument("--alias", help="旧 id / 别名")
+    sed.add_argument("--title", help="新标题")
+    sed.add_argument("--start", help="新开始时刻 ISO 8601（带偏移）")
+    sed.add_argument("--end", help="新结束时刻 ISO 8601（带偏移）")
+    sed.add_argument("--rrule", help="新 RRULE 字符串；空串 = 改为一次性")
+    sed.add_argument("--owner", help="self 或 other:<name>")
+    sed.add_argument("--deadline", help="新截止日 YYYY-MM-DD；空串 = 清除")
+    sed.add_argument("--pre-remind", dest="pre_remind", type=int, help="提前 N 分钟提醒（≥1）")
+    sed.add_argument(
+        "--ddl-ladder",
+        dest="ddl_ladder",
+        type=int,
+        action="append",
+        help="替换截止阶梯预警提前量（分钟，≥0），可重复",
+    )
+    sed.add_argument("--snooze", type=int, help="默认 snooze 时长（分钟，≥1）")
+    sed.add_argument("--now")
+    sed.set_defaults(func=event_cmd.cmd_event_edit)
 
     sdis = sub.add_parser("disable")
     sdis.add_argument("--window", required=True, help="窗口 id")

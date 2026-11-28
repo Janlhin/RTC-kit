@@ -32,6 +32,7 @@
 | T-016 | doing | L2 P1：事件一等公民模型、影子账本、旧窗口投影与迁移骨架 | 契约 `event.schema.json` + `rtc_events.py` + `rtc_migrate.py` + golden 比对；默认口径见 D-014 | 迁移前后五条命令（`status --json` / `history <date>` / `schedule <date>` / `due --now` / `report`）stdout+stderr+退出码 SHA256 逐字节 diff=0；现有测试一条不改全绿；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
 | T-017 | doing | P2：`.ics` 成为事件台账源真相，SQLite 索引可删可重建，旧数据可迁移可回滚 | `rtc_ics` 双向 RFC 5545 序列化/解析（一年一文件、折行转义、未知属性保留）；`rtc_calindex` rebuild 从零重建并与直扫逐条对账；`rtc_migrate --to-ics` dry-run/备份/幂等/rollback，迁移后从 `.ics` 重建 `events.json` 影子视图，旧文件不删（见 D-015） | `pwsh -File scripts/verify.ps1` → 0；索引与直扫 `.ics` 逐条一致；迁移后影子视图与 `.ics` 核心字段逐条一致、重跑不漂移；迁移跑两次产物不变；rollback 恢复备份态；空工作区五条命令与 `origin/main` 基线 SHA256 diff=0 | 2026-11-28 | — |
 | T-018 | todo | L2 P3：周期事件需要 RRULE 解析与 occurrence 展开，旧 `oneOff+expectFires+validFrom` 拼装表达不了跨月/跨年重复 | 引擎：自研 `code/rtc_rrule.py`（`parse_rrule` + `expand_occurrences`，时区感知、COUNT/UNTIL 全局预算、条数与扫描年数双硬上限）；接线：`code/rtc_occurrence.py` 把 `kind=recurring` 事件按当天窗口实例化进账本，去重键 `(uid, occurrence start)`，due/ack 只作用当前 occurrence | 引擎：`test_rrule.py` 九类边界全绿；接线：`test_occurrence.py` 覆盖跨天各响一次、重复 tick 不重响、ack 只确认当次、COUNT 用尽、UNTIL 边界、跨年、DST 秋切、无 events 时 golden 逐字节一致 | 2026-11-28 | — |
+| T-020 | doing | L2 P5：事件级 CRUD（create/edit/complete/cancel/undo）+ owner/deadline/reminderPolicy | `rtc_event_cmd.py` 事件写命令层；摘要守卫 + 排他锁；审计 + history 留痕；默认口径见 D-018 | create→edit→complete→cancel→undo 全链路用例；同 uid 幂等；跨日 undo 拒绝；无痕迹 undo 失败；并发 Conflict 不覆盖；旧五条命令逐字节 diff=0；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
 
 ## 待裁决台账
 
