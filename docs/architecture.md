@@ -169,7 +169,7 @@ cron（no-agent）
 | 次日预排账本    | `state/alarms.next.json`         | `plan` 06:00 写，跨日 `due` 激活 | 临时槽位，激活后删除      |
 | 某天到底怎么排的  | `state/schedule/YYYY-MM-DD.json` | `plan` 写一次，永久               | 权威存档（不可再算出来）   |
 | 统计查询      | `state/metrics.db`               | `metrics sync`              | **派生索引，可删可重建** |
-| L2 事件影子账本 | `state/events.json`              | `rtc_migrate.py`（离线投影） | **派生影子副本**；P1 旧 JSON 仍是真相，P2 起 `.ics` 为准、本文件转缓存 |
+| L2 事件影子账本 | `state/events.json`              | `rtc_migrate.py`（离线投影）、`rtc_event_cmd.py`（事件级 CRUD，P5） | **派生影子副本**；P1 旧 JSON 仍是真相，P2 起 `.ics` 为准、本文件转缓存 |
 | 给模型看的今日行程 | `AGENTS.md` 的受控区块                | `plan` / `due` / `ack` 自动刷新 | **派生视图，可随时删**  |
 
 四条硬规则：

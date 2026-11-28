@@ -22,6 +22,11 @@
       "additionalProperties": false,
       "required": ["uid", "kind", "start", "end", "owner", "status", "reminderPolicy", "aliases"],
       "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "事件标题（对应 RFC 5545 SUMMARY）。P1 影子投影的旧窗口暂时不带本字段，标题沿用时刻表 label；P5 起 CLI 新建事件必须带标题。"
+        },
         "uid": {
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}@rtc-kit$",
