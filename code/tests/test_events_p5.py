@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -236,6 +236,98 @@ class TestEventCreate(_WorkspaceCase):
             CREATE_NOW,
         )
         self.assertEqual(rc, 3, err)
+
+
+class TestEventCreateFromPhrase(_WorkspaceCase):
+    """P4 接线：``create --when`` 中文短语落账；解析口径复用 rtc_nlu 既有单测。"""
+
+    _WINDOW = timedelta(minutes=4)
+
+    def latest_uid(self) -> str:
+        return events.all_events(self.load())[-1]["uid"]
+
+    def create_when(self, phrase: str, *extra: str, title: str = "提醒") -> tuple[int, str, str, str]:
+        rc, out, err = self.cli("create", "--title", title, "--when", phrase, "--now", CREATE_NOW, *extra)
+        uid = self.latest_uid() if rc == 0 else ""
+        return rc, out, err, uid
+
+    def _assert_offset_window(self, ev: dict) -> None:
+        start = datetime.fromisoformat(ev["start"])
+        end = datetime.fromisoformat(ev["end"])
+        self.assertIsNotNone(start.tzinfo, "start 必须带偏移")
+        self.assertIsNotNone(end.tzinfo, "end 必须带偏移")
+        self.assertEqual(end - start, self._WINDOW, "NLU 派生窗口默认 4 分钟")
+
+    def test_recurring_phrases_persist_rrule_and_first_slot(self):
+        cases: list[tuple[str, str]] = [
+            ("每周三晚上八点", "FREQ=WEEKLY;BYDAY=WE"),
+            ("每周一三五", "FREQ=WEEKLY;BYDAY=MO,WE,FR"),
+            ("每天早上八点", "FREQ=DAILY"),
+            ("每年11月5日", "FREQ=YEARLY;BYMONTH=11;BYMONTHDAY=5"),
+            ("每月1号", "FREQ=MONTHLY;BYMONTHDAY=1"),
+            ("每3天", "FREQ=DAILY;INTERVAL=3"),
+            ("每2周", "FREQ=WEEKLY;INTERVAL=2"),
+            ("每4个月", "FREQ=MONTHLY;INTERVAL=4"),
+        ]
+        for phrase, rrule in cases:
+            with self.subTest(phrase=phrase):
+                rc, _, err, uid = self.create_when(phrase)
+                self.assertEqual(rc, 0, err)
+                ev = events.get_event(self.load(), uid)
+                self.assertEqual(ev["kind"], "recurring")
+                self.assertEqual(ev["rrule"], rrule)
+                self._assert_offset_window(ev)
+
+    def test_recurring_first_slot_pinned_for_two_cases(self):
+        rc, _, err, uid = self.create_when("每月1号")
+        self.assertEqual(rc, 0, err)
+        ev = events.get_event(self.load(), uid)
+        self.assertEqual(ev["start"], "2026-12-01T09:00:00+08:00")
+
+        rc, _, err, uid = self.create_when("每天早上八点", title="喝水")
+        self.assertEqual(rc, 0, err)
+        ev = events.get_event(self.load(), uid)
+        self.assertEqual(ev["start"], "2026-11-29T08:00:00+08:00")
+
+    def test_once_phrases_persist_null_rrule(self):
+        phrases = ["明天早上八点", "明天下午三点", "下周三下午3点", "半小时后"]
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                rc, _, err, uid = self.create_when(phrase)
+                self.assertEqual(rc, 0, err)
+                ev = events.get_event(self.load(), uid)
+                self.assertEqual(ev["kind"], "once")
+                self.assertIsNone(ev["rrule"])
+                self._assert_offset_window(ev)
+
+    def test_when_conflicts_with_structured_args_exit_3(self):
+        cases = [
+            ["--start", START_ISO],
+            ["--end", END_ISO],
+            ["--rrule", "FREQ=DAILY"],
+        ]
+        for extra in cases:
+            with self.subTest(extra=extra):
+                rc, _, err = self.cli(
+                    "create",
+                    "--title",
+                    "x",
+                    "--when",
+                    "明天八点",
+                    "--now",
+                    CREATE_NOW,
+                    *extra,
+                )
+                self.assertEqual(rc, 3, err)
+                self.assertEqual(self.load()["events"], [])
+
+    def test_unsupported_phrases_exit_2_and_leave_ledger_empty(self):
+        phrases = ["每月最后一个工作日", "每年第3周的周三", "工作日", "节假日", "嘀嘀嗒嗒"]
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                rc, _, err = self.cli("create", "--title", "x", "--when", phrase, "--now", CREATE_NOW)
+                self.assertEqual(rc, 2, err)
+                self.assertEqual(self.load()["events"], [])
 
 
 class TestEventEditCompleteCancel(_WorkspaceCase):
