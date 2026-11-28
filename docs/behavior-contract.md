@@ -215,7 +215,8 @@ P3 下半段把影子事件账本里 `kind=recurring` 的事件实例化进当�
 
 - 适配层唯一入口 `occurrence_windows(workspace, tz, day, now, errors=...)`；`rtc_core` 只调本模块，不直接 import `rtc_events` / `rtc_rrule`（热路径守卫口径见 P1 测试 `TestHotPathImportGuard`）。
 - 只展开当天半开区间 `[00:00, 24:00)` 内的 occurrence，不无限展开；`COUNT` / `UNTIL` 沿用引擎全局预算，不从当天重新计数。
-- 去重键 = `(uid, occurrence start)`；同一事件同一天多条实例按起点区分。
+- 事件账本内部去重键 = `(uid, occurrence start)`；同一事件同一天多条实例按起点区分。
+- 跨源去重（迁移期旧 `routines.json` 窗口与投影事件并存）：在 `rtc_core` 装配层按 `(旧 id / 别名, 日期, 起点时刻)` 比对；事件窗口 `label`（= 事件 `aliases[0]`）命中旧窗口 `id` / `label` 且当天起点时刻相同，认定是同一事项——保留旧窗口、丢弃该事件 occurrence。身份对不上的两条窗口即使同时刻也不去重。
 - 账本窗口身份：`id` = uid 去掉 `@rtc-kit` 后缀的 slug；`ocid` = `<slug>@YYYY-MM-DD`；确认 / 归档走既有 ocid 机器。
 - 状态过滤：仅 `scheduled` / `ringing` 实例化；`done` / `cancelled` / `missed` 跳过。
 - 时区：事件 `start` 自带偏移则沿用；朴素时刻挂工作区时区。产出 `start` / `end` 一律带偏移，不写裸 naive。
@@ -233,7 +234,7 @@ P3 下半段把影子事件账本里 `kind=recurring` 的事件实例化进当�
 
 ### 已知缺口
 
-- occurrence 级取消 / 改期（单条 occurrence 推迟、取消）未接；旧 routine 与事件账本同源双写的跨源去重留待读切换阶段。
+- occurrence 级取消 / 改期（单条 occurrence 推迟、取消）未接；旧 routine 与事件账本的别名映射全量对齐、以及读切换阶段的跨源合并，留待后续阶段；当前跨源去重只认 `aliases[0]` ↔ 旧窗口 `id` / `label` 这一条链。
 - 带固定偏移的事件时刻不跟随工作区 ZoneInfo 的 DST 切换；朴素时刻挂 ZoneInfo 的路径才跟随秋切 / 春切。
 
 ## 8. 明确不做

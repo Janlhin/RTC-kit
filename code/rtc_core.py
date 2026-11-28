@@ -1621,6 +1621,35 @@ def _carry_windows_from_previous(
     return windows
 
 
+def _drop_duplicate_event_windows(
+    old_windows: list[dict[str, Any]],
+    event_windows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """剔除与旧 routine 窗口同源重复的事件 occurrence。
+
+    迁移期旧 ``routines.json`` 窗口与投影事件账本并存，同一事项两边各排一条会被
+    响两次。去重键 =（旧 id / 别名, 日期, 起点时刻）：事件窗口的 ``label``
+    （= 事件 ``aliases[0]``）命中旧窗口 ``id`` / ``label``，且当天起点时刻相同，
+    就认定是同一件事——保留旧窗口，丢弃事件 occurrence。身份对不上的两条窗口
+    即使同时刻也不去重。
+    """
+    old_index: list[tuple[str, str, str]] = []
+    for w in old_windows:
+        start = str(w.get("start") or "")
+        old_index.append((str(w.get("id") or ""), str(w.get("label") or ""), start[:16]))
+
+    kept: list[dict[str, Any]] = []
+    for w in event_windows:
+        ident = {str(w.get("id") or ""), str(w.get("label") or "")}
+        start = str(w.get("start") or "")
+        duplicate = any(
+            (oid in ident or olabel in ident) and ostart == start[:16] for oid, olabel, ostart in old_index
+        )
+        if not duplicate:
+            kept.append(w)
+    return kept
+
+
 def _build_prebuilt_state(
     routine: dict[str, Any],
     target: date,
@@ -1632,9 +1661,10 @@ def _build_prebuilt_state(
     kind = plan_kind(target, routine)
     errors: list[str] = []
     fresh = [] if day_disabled(routine, kind) else build_windows(routine, target, kind, now, errors=errors)
-    fresh += occurrence.occurrence_windows(
+    event_windows = occurrence.occurrence_windows(
         WORKSPACE, now.tzinfo or resolve_tz(routine), target, now, errors=errors
     )
+    fresh += _drop_duplicate_event_windows(fresh, event_windows)
     windows = _carry_windows_from_previous(old, fresh)
     state = {
         "version": 1,
@@ -1813,6 +1843,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         else build_windows(routine, now.date(), kind, now, errors=plan_errors)
     )
     event_windows = occurrence.occurrence_windows(WORKSPACE, tz, now.date(), now, errors=plan_errors)
+    event_windows = _drop_duplicate_event_windows(fresh, event_windows)
     fresh += event_windows
 
     if old and old.get("planDate") == today:

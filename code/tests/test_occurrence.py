@@ -6,7 +6,7 @@
 
 覆盖：每周事件跨 3 天各响一次、重复 tick 不重响、ack 只确认当次、COUNT 用尽
 静默、UNTIL 边界、跨年、DST 秋切、状态/类型过滤、坏 RRULE 降级、同键去重、
-无 events.json 时 golden 逐字节一致。
+迁移期旧 routine 窗口与投影事件同源去重、无 events.json 时 golden 逐字节一致。
 
 运行：
     python -m unittest discover -s code/tests -p "test_occurrence.py" -v
@@ -287,6 +287,61 @@ class TestFiltersAndDegradation(OccurrenceCase):
             for field in ("start", "end"):
                 dt = datetime.fromisoformat(w[field])
                 self.assertIsNotNone(dt.tzinfo, f"{field} 禁止裸 naive")
+
+
+class TestRoutineEventCoexistence(OccurrenceCase):
+    """迁移期旧 routine 窗口与投影事件并存：同源只响一次，不同源不误伤。"""
+
+    def _old_window(self, wid: str, label: str) -> dict[str, object]:
+        return {
+            "id": wid,
+            "label": label,
+            "start": "09:00",
+            "end": "09:15",
+            "intervalMin": 5,
+            "expectFires": 4,
+            "ackHints": ["知道了"],
+        }
+
+    def test_old_window_and_event_twin_fire_once(self):
+        self.write_routine(base_routine(alarmWindows=[self._old_window("yoga", "yoga")]))
+        self.write_events(
+            [
+                event(
+                    U1,
+                    "FREQ=WEEKLY;BYDAY=MO,WE,FR",
+                    "2026-11-30T09:00:00+08:00",
+                    "2026-11-30T09:15:00+08:00",
+                    aliases=["yoga"],
+                )
+            ]
+        )
+        self.plan("2026-11-30T06:00:00+08:00")  # 周一
+        wins = self.windows()
+        self.assertEqual(len(wins), 1, "同源事件 occurrence 必须被旧窗口去重掉")
+        self.assertEqual(wins[0]["id"], "yoga")
+        self.assertEqual(self.event_windows(), [], "事件 slug 窗口不应再落账本")
+
+        rc, out, _ = self.cli("due", "--now", "2026-11-30T09:00:00+08:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("yoga"), 1)
+        self.assertEqual(self.event_windows(), [])
+
+    def test_distinct_events_same_time_not_deduped(self):
+        self.write_routine(base_routine(alarmWindows=[self._old_window("meds", "吃药")]))
+        self.write_events(
+            [
+                event(
+                    U1,
+                    "FREQ=WEEKLY;BYDAY=MO",
+                    "2026-11-30T09:00:00+08:00",
+                    "2026-11-30T09:15:00+08:00",
+                    aliases=["yoga"],
+                )
+            ]
+        )
+        self.plan("2026-11-30T06:00:00+08:00")
+        self.assertEqual(len(self.windows()), 2, "身份对不上的同时刻窗口不得去重")
 
 
 def _sha(text: str) -> str:
