@@ -158,3 +158,11 @@
 - **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
 
 ## D-019 L2 P6 查询：事件 + 旧窗口只读合并视图，周期事件按 occurrence 实例展开
+
+- **日期**：2026-11-28
+- **决策**：P6 交付只读查询面 `list` / `show`，事件（P1 影子账本；P2 起 `.ics` 为准）与旧窗口（`history.db`）两条来源并排呈现、用 `source` 列区分；`recurring` 事件交 P3 `rtc_rrule` 引擎按查询区间逐条展开成 occurrence 实例，每条带实例起点与 `ocid`；`show` 仍按事件定义返回；`.ics` 导出复用 P2 的 `rtc_ics.py` 序列化层，不自写第二份。
+- **背景**：L2 验收要求任意日期 / 年份 / 跨年可查、关键词与类型 / 归属筛选、`.ics` 导出。occurrence 引擎在 P3、`.ics` 序列化在 P2，两段先后合入 P6 查询层；旧命令输出又被既有回归钉死，查询层不能改写旧窗口读路径。
+- **被采纳**：① 新区块独立模块 `rtc_query.py`，纯标准库、不被 tick 热路径 import；② 区间三选一（`--date` / `--year` / `--from`+`--to`），筛选 `--q`（大小写不敏感子串、AND）/ `--kind once|recurring` / `--owner self|other:<name>`，口径与 #112 对齐、待收敛；③ 筛选在事件定义层做，命中后再展开实例；`once` 按 start 落区间，`recurring` 按引擎半开窗口展开，跨年事件两年各自出对应实例；④ 查询实例条数预算 `2000`，超限退出 4 提示收窄范围，不卡死、不静默截断；引擎侧 `MAX_OCCURRENCES` / `MAX_SCAN_YEARS` 双硬上限兜底死循环；⑤ 空结果退出 0，`--json` 纯 JSON 走 stdout，诊断走 stderr；⑥ 旧窗口行 `type` 补进 history 查询 SELECT（展示面不变），映射 once/recurring。
+- **被否决**：① P6 自己写一份 RRULE occurrence 展开——引擎归 P3，重复实现会在合流时打架；② P6 自写 `.ics` 序列化——复用 P2 模块，避免两套序列化口径；③ 合并两条来源时按别名去重——影子账本与执行历史是两个视角，并列展示更不容易让用户误以为旧窗口被事件取代；④ 把 `--q` 分词或接 LLM 兜底——L2 保持确定性，不支持的表达明确无命中。
+- **影响**：`code/rtc_query.py`、`code/rtc_core.py`（新子命令接线）、`code/rtc_history.py`（SELECT 补 `type`）、`code/tests/test_query_p6.py`、`docs/behavior-contract.md` §5d、`code/README.md`、`TASKS.md` T-021。
+- **复审条件**：#112 收敛后合并事件侧与旧命令侧的 `--q` / `--kind` 匹配函数；事件 `title` / 标签字段由 P5 写入侧落地后扩 `--q` 检索池；occurrence 级取消 / 改期（单条实例推迟、取消）留待后续阶段。

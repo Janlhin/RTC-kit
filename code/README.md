@@ -14,7 +14,7 @@
 | `rtc_calindex.py` | L2 事件 SQL 只读索引：`state/calendar-index.db`，`rebuild` 从全部 `.ics` 重建，与直扫逐条对账 | 仅标准库 |
 | `rtc_migrate.py` | 离线迁移工具：旧窗口 → 事件影子账本（P1）；`--to-ics` 迁到 `.ics` + 索引（P2，dry-run/备份/幂等/rollback） | 仅标准库 |
 | `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
-| `rtc_query.py` | L2 P6 只读查询：事件 + 旧窗口合并视图，日期/年份/区间与关键词/类型/归属筛选，`show` 单事件，`export --ics` 走 P2 序列化层；不写状态、不进 tick 热路径 | 仅标准库 |
+| `rtc_query.py` | L2 P6 只读查询：事件 + 旧窗口合并视图，日期/年份/区间与关键词/类型/归属筛选；`recurring` 交 `rtc_rrule` 按区间展开 occurrence 实例（带 `ocid`），`show` 按事件定义返回，`export --ics` 走 P2 序列化层；不写状态、不进 tick 热路径 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `rtc_rrule.py` | RFC 5545 RRULE 解析与 occurrence 展开引擎（纯确定性，不读写账本） | 仅标准库 |
 | `rtc_occurrence.py` | 事件账本 recurring 事件的当天实例化适配层：展开 occurrence、去重 `(uid, start)`，喂给既有 plan/due/ack 机器 | 仅标准库 |
