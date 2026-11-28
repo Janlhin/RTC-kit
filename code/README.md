@@ -13,7 +13,8 @@
 | `rtc_events.py` | L2 事件模型：影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名（P1；离线投影，不进 tick 热路径） | 仅标准库 |
 | `rtc_migrate.py` | L2 P1 迁移骨架：dry-run / 写前备份 / 幂等 / 回滚；离线工具，不进 tick 热路径 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
-| `rtc_rrule.py` | RFC 5545 RRULE 解析与 occurrence 展开引擎（纯确定性，供后续 plan/due/ack 接入） | 仅标准库 |
+| `rtc_rrule.py` | RFC 5545 RRULE 解析与 occurrence 展开引擎（纯确定性，不读写账本） | 仅标准库 |
+| `rtc_occurrence.py` | 事件账本 recurring 事件的当天实例化适配层：展开 occurrence、去重 `(uid, start)`，喂给既有 plan/due/ack 机器 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 
 为什么 `rtc.py` 只有几十行：`import rtc` 拿到的是 `rtc_core` 这个模块对象（`sys.modules` 别名），所以 `rtc_due.py` / `rtc_plan.py` 调 `rtc.main()`、以及测试里替换 `rtc.atomic_write` 这类动作全部照旧有效。**不要**把它改回 `from rtc_core import *`——那样会变成两个命名空间，替换失效。
