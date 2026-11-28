@@ -433,8 +433,8 @@ class DeterminismCase(unittest.TestCase):
 # ----------------------------------------------------------------------------
 
 CODE_DIR = REPO / "code"
-# 唯一允许 import rtc_nlu 的交互入口；判定链路模块一律不准碰它。
-ALLOWED_IMPORTERS = {"rtc_once.py"}
+# 允许 import rtc_nlu 的交互入口 / 事件写命令层；判定链路模块一律不准碰它。
+ALLOWED_IMPORTERS = {"rtc_once.py", "rtc_event_cmd.py"}
 # rtc_plan / rtc_due 是模块级即跑 main 的 cron 薄壳，运行时探针不加载它们；
 # 其依赖纪律由上方静态 AST 扫描覆盖。
 CORE_MODULES = ["rtc_core", "rtc_archive", "rtc_brief", "rtc_history", "rtc_metrics", "rtc_recovery"]
