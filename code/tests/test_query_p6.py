@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO / "code"))
 import rtc_core as core  # noqa: E402
 import rtc_events as events  # noqa: E402
 import rtc_history as history  # noqa: E402
+import rtc_ics as ics  # noqa: E402
 
 RTC = REPO / "code" / "rtc.py"
 REPORT = REPO / "code" / "rtc_report.py"
@@ -62,8 +63,9 @@ def _make_event(
     aliases: list[str] | None = None,
     deadline: str | None = None,
     status: str = "scheduled",
+    summary: str | None = None,
 ) -> dict:
-    return {
+    event = {
         "uid": uid,
         "kind": kind,
         "start": start,
@@ -78,6 +80,9 @@ def _make_event(
         "updatedAt": start,
         "source": {"routineId": (aliases or [""])[0], "ledgerDate": None},
     }
+    if summary:
+        event["summary"] = summary
+    return event
 
 
 def _fixture_routine() -> dict:
@@ -391,12 +396,109 @@ class TestInvalidArgs(_WorkspaceCase):
         self._assert_rc4_empty_stdout("--year", "2026", "--owner", "boss")
 
 
-class TestExportStub(_WorkspaceCase):
-    def test_export_not_wired_yet(self):
-        rc, out, err = self.cli("export", "--ics", "out.ics")
+class TestExport(_WorkspaceCase):
+    """`.ics` 导出：序列化/折行/转义/跨年分组全部走 P2 ``rtc_ics``，命令层只做路径路由。"""
+
+    def seed_export_fixture(self) -> None:
+        self.seed_events(
+            [
+                {
+                    **_make_event(
+                        "once-ny@rtc-kit",
+                        "once",
+                        "2026-12-31T23:30:00+08:00",
+                        aliases=["ny-eve"],
+                        summary="跨年, 复盘; 年终总结",
+                    )
+                },
+                {
+                    **_make_event(
+                        "daily-open@rtc-kit",
+                        "recurring",
+                        "2026-12-31T09:00:00+08:00",
+                        rrule="FREQ=DAILY",
+                        aliases=["open"],
+                        summary="每日开门",
+                    ),
+                    "end": "2027-01-01T09:00:00+08:00",
+                },
+                {
+                    **_make_event(
+                        "bob@rtc-kit",
+                        "once",
+                        "2027-03-01T10:00:00+08:00",
+                        owner="other:bob",
+                        aliases=["bob-task"],
+                        summary="给bob的事",
+                    )
+                },
+            ]
+        )
+
+    def test_export_dir_year_files_roundtrip(self):
+        self.seed_export_fixture()
+        out_dir = self.ws / "out"
+        rc, _, err = self.cli("export", "--ics", str(out_dir))
+        self.assertEqual(rc, 0, err)
+        files = sorted(p.name for p in out_dir.glob("*.ics"))
+        self.assertEqual(files, ["2026.ics", "2027.ics"])
+
+        ev26 = ics.parse_events((out_dir / "2026.ics").read_text(encoding="utf-8"))
+        ev27 = ics.parse_events((out_dir / "2027.ics").read_text(encoding="utf-8"))
+        u26 = {e["uid"] for e in ev26}
+        u27 = {e["uid"] for e in ev27}
+        # 跨年周期事件两年文件都在；一次性事件只落 start 年。
+        self.assertIn("once-ny@rtc-kit", u26)
+        self.assertIn("daily-open@rtc-kit", u26)
+        self.assertIn("daily-open@rtc-kit", u27)
+        self.assertIn("bob@rtc-kit", u27)
+        self.assertNotIn("bob@rtc-kit", u26)
+
+        once = next(e for e in ev26 if e["uid"] == "once-ny@rtc-kit")
+        # 逗号 / 分号转义后读回原文。
+        self.assertEqual(once["summary"], "跨年, 复盘; 年终总结")
+        daily = next(e for e in ev26 if e["uid"] == "daily-open@rtc-kit")
+        # RRULE 原样写出、原样读回。
+        self.assertEqual(daily["rrule"], "FREQ=DAILY")
+        bob = next(e for e in ev27 if e["uid"] == "bob@rtc-kit")
+        self.assertEqual(bob["owner"], "other:bob")
+
+    def test_export_single_file_holds_all_events(self):
+        self.seed_export_fixture()
+        target = self.ws / "one.ics"
+        rc, _, err = self.cli("export", "--ics", str(target))
+        self.assertEqual(rc, 0, err)
+        evs = ics.parse_events(target.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {e["uid"] for e in evs},
+            {"once-ny@rtc-kit", "daily-open@rtc-kit", "bob@rtc-kit"},
+        )
+
+    def test_export_stdout_pure_calendar(self):
+        self.seed_export_fixture()
+        rc, out, err = self.cli("export", "--ics")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        self.assertTrue(out.startswith("BEGIN:VCALENDAR"))
+        self.assertTrue(out.rstrip().endswith("END:VCALENDAR"))
+        self.assertTrue(ics.parse_events(out))
+
+    def test_export_empty_workspace_rc4(self):
+        rc, out, err = self.cli("export", "--ics", str(self.ws / "empty"))
         self.assertEqual(rc, 4)
         self.assertEqual(out, "")
-        self.assertIn("P2", err)
+        self.assertIn("没有可导出", err)
+
+    def test_ics_uses_crlf_and_folds_long_lines(self):
+        self.seed_export_fixture()
+        target = self.ws / "fold.ics"
+        rc, _, err = self.cli("export", "--ics", str(target))
+        self.assertEqual(rc, 0, err)
+        raw = target.read_bytes()
+        self.assertIn(b"\r\n", raw, "磁盘行尾必须是 CRLF")
+        text = raw.decode("utf-8")
+        lines = text.split("\r\n")
+        self.assertTrue(any(line.startswith(" ") for line in lines), "长行应按 75 octet 折行")
 
 
 def _capture_five(ws: Path) -> dict[str, dict[str, str]]:
