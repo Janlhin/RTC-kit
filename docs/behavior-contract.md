@@ -74,6 +74,14 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 - `.ics` 导出必须带时区：UTC 瞬时用 `Z` 后缀，本地事件用 `TZID` + `VTIMEZONE`，**不允许浮动时间**。
 - `schedule --json` 仍是纯 JSON 到 stdout；退出码语义（0 / 3 / 4 等）不变。
 
+### 3.2 L2 事件台账存储口径（P2 / D-015）
+
+- **源真相**：`calendar/<YYYY>.ics`（RFC 5545，UTF-8 无 BOM、CRLF、75 octet 折行）。按事件 `DTSTART` 年份归文件；跨年事件在结束年份文件留一段 `X-RTC-CROSS-YEAR` 交叉引用，合并查询按 `UID` 去重，主记录取开始年份那份。
+- **只读索引**：`state/calendar-index.db` 是派生缓存，不是真相；删除整个库后 `rebuild` 可从全部 `.ics` 零成本重建。索引查询与直扫 `.ics` 逐条对账，字段不一致即以 `.ics` 为准。
+- **冲突口径**：索引与 `.ics` 不一致时**以 `.ics` 为准**；陈旧记录只剔除并往 stderr 留一行可读告警，索引不反向改写 `.ics`，读取路径不做静默重建。
+- **迁移**：`rtc_migrate.py --to-ics` 默认 dry-run；`--apply` 真跑前自动备份（`.ics` 目录、索引、影子账本 + 旧文件快照与哈希 manifest）；重跑幂等（旧 id 命中别名保留原 `UID`，不重生）；`--rollback <备份目录>` 按 manifest 恢复。旧 `routines.json` / `alarms.json` 全程只读，迁移后留在原地，不删不改。
+- **本批边界**：P2 只落地 `.ics` 真相层、索引重建与迁移工具；不改 `plan` / `due` / `ack` 的判定，不做 RRULE 实例展开（P3）、不接 NLU（P4）、不开放 CRUD 命令面（P5）、不做查询筛选与导出命令（P6）。
+
 ## 4. 冲突策略（乐观锁）
 
 写入前读 `rev`，写入时比对，不符即放弃：

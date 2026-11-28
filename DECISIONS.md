@@ -137,12 +137,22 @@
 - **影响**：`contract/event.schema.json`、`code/rtc_events.py`、`code/rtc_migrate.py`、`code/tests/test_events_p1.py`、`docs/architecture.md`、`docs/behavior-contract.md` §5c、`contract/README.md`、`code/README.md`、`TASKS.md` T-016。
 - **复审条件**：P2 切 `.ics` 真相源时复核影子缓存的重建与删除路径；P5 接入提醒策略时复核 `reminderPolicy` 形状；`owner` 词汇表收紧或校验规则另提案；`holiday` 类型不进 RRULE，留外挂日期类型表。
 
+## D-015 L2 事件台账以 `.ics` 为源真相，SQLite 仅作可重建只读索引（P2）
+
+- **日期**：2026-11-28
+- **决策**：L2 行程本的事件台账以 RFC 5545 `calendar/<YYYY>.ics` 为唯一真相；`state/calendar-index.db` 只是可删可重建的只读查询索引；旧 `routines.json` / `alarms.json` 迁移后留在原地作只读历史。
+- **背景**：NFR-2.5 跨代可读（30–40 年）是决定性约束——30 年后软件可能全死，数据必须仍是开放标准纯文本。SQLite 与私有 JSON 库不可人类直读、会被 schema 演进绑架，不能作真相。P1 的 `state/events.json` 只是过渡期派生影子副本，P2 起 `.ics` 为准。
+- **被采纳**：① 一年一个 `.ics`，按 `DTSTART` 年份归文件；跨年事件在相邻年份文件各留一段 `X-RTC-CROSS-YEAR` 交叉引用；② 索引 `rebuild` 从零扫描全部 `.ics` 灌入，查询结果与直扫 `.ics` 逐条对账；③ 冲突以 `.ics` 为准，索引陈旧只告警剔除、不反写真相；④ 迁移默认 dry-run，`--apply` 前自动备份（含 manifest 哈希），重跑幂等（别名命中保留原 UID），`--rollback` 按 manifest 恢复；⑤ RRULE 直接存 RFC 5545 标准字符串；owner / deadline / reminderPolicy / aliases / rev 等 RTC 专有字段走 `X-RTC-*` 扩展，未知属性原样保留带回。
+- **被否决**：① SQLite 作事件真相——跨代不可读，NFR-2.5 直接否决；② 单一大 `.ics` 文件——多年后单文件过大、折行与合并冲突难处理，按年份拆分；③ 索引不一致时自动重建并覆盖——历史教训（三套修复器互相重建清空数据，见 `docs/architecture.md` §5 规则 3），读取路径只告警不修复。
+- **影响**：`code/rtc_ics.py` 双向序列化/解析层、`code/rtc_calindex.py`、`code/rtc_migrate.py --to-ics`、`docs/architecture.md` §5、`docs/behavior-contract.md` §3.2、测试 `test_ics_p2.py` / `test_calindex.py` / `test_migrate_ics.py`。
+- **复审条件**：P3 RRULE 展开、P5 事件写路径接入后，复核迁移期双写口径；若后续做系统日历同步（NFR-3.6），单向导出副本另立决策，不回流改写 `.ics`。
+
 ## D-019 L2 P6 查询：事件 + 旧窗口只读合并视图，周期事件先按有效期重叠归属
 
 - **日期**：2026-11-28
-- **决策**：P6 先交付只读查询面 `list` / `show`，事件（P1 影子账本）与旧窗口（`history.db`）两条来源并排呈现、用 `source` 列区分；周期事件本阶段按「规则有效期与查询区间重叠」做归属，不逐条展开 occurrence；`.ics` 导出留命令面与 commit 位，序列化等 P2 的 `rtc_ics.py`，不自写第二份。
+- **决策**：P6 先交付只读查询面 `list` / `show`，事件（P1 影子账本；P2 起 `.ics` 为准）与旧窗口（`history.db`）两条来源并排呈现、用 `source` 列区分；周期事件本阶段按「规则有效期与查询区间重叠」做归属，不逐条展开 occurrence；`.ics` 导出复用 P2 的 `rtc_ics.py` 序列化层，不自写第二份。
 - **背景**：L2 验收要求任意日期 / 年份 / 跨年可查、关键词与类型 / 归属筛选、`.ics` 导出。但 occurrence 展开引擎在 P3、`.ics` 序列化在 P2，P6 不能等它们拍板；旧命令输出又被既有回归钉死，查询层不能改写旧窗口读路径。
 - **被采纳**：① 新区块独立模块 `rtc_query.py`，纯标准库、不被 tick 热路径 import；② 区间三选一（`--date` / `--year` / `--from`+`--to`），筛选 `--q`（大小写不敏感子串、AND）/ `--kind once|recurring` / `--owner self|other:<name>`，口径与 #112 对齐、待收敛；③ 跨年归属：once 按 start 日期落年；recurring 按有效期重叠（start ≤ 区间末、UNTIL ≥ 区间始），无 UNTIL 跨年两年都列出；④ 先按日期 / 年份过滤再聚合，单次返回上限 5000 条，超限退出 4 提示收窄范围；⑤ 空结果退出 0，`--json` 纯 JSON 走 stdout，诊断走 stderr；⑥ 旧窗口行 `type` 补进 history 查询 SELECT（展示面不变），映射 once/recurring。
 - **被否决**：① P6 自己写一份 RRULE occurrence 展开——引擎归 P3，重复实现会在合流时打架；② P6 自写 `.ics` 序列化——复用 P2 模块，避免两套序列化口径；③ 合并两条来源时按别名去重——影子账本与执行历史是两个视角，并列展示更不容易让用户误以为旧窗口被事件取代；④ 把 `--q` 分词或接 LLM 兜底——L2 保持确定性，不支持的表达明确无命中。
 - **影响**：`code/rtc_query.py`、`code/rtc_core.py`（新子命令接线）、`code/rtc_history.py`（SELECT 补 `type`）、`code/tests/test_query_p6.py`、`docs/behavior-contract.md` §5d、`code/README.md`、`TASKS.md` T-021。
-- **复审条件**：P3 引擎合入后把 occurrence 枚举接到 `list` 实例级过滤与条数预算（替换定义级重叠匹配）；P2 合入后把 `export --ics` 接到 `rtc_ics.py` 一年一文件导出；#112 收敛后合并事件侧与旧命令侧的 `--q` / `--kind` 匹配函数；事件 `title` / 标签字段由 P5 写入侧落地后扩 `--q` 检索池。
+- **复审条件**：P3 引擎合入后把 occurrence 枚举接到 `list` 实例级过滤与条数预算（替换定义级重叠匹配）；#112 收敛后合并事件侧与旧命令侧的 `--q` / `--kind` 匹配函数；事件 `title` / 标签字段由 P5 写入侧落地后扩 `--q` 检索池。
