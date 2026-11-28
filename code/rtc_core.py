@@ -3557,8 +3557,15 @@ def main(argv: list[str] | None = None) -> int:
     ssh.add_argument("--json", action="store_true")
     ssh.set_defaults(func=query.cmd_show)
 
-    sexp = sub.add_parser("export", help="导出 .ics（序列化层待 P2 接入）")
-    sexp.add_argument("--ics", metavar="目录或文件", help="输出目录或 .ics 文件路径")
+    sexp = sub.add_parser("export", help="导出 RFC 5545 .ics（复用 P2 rtc_ics 序列化层）")
+    sexp.add_argument(
+        "--ics",
+        nargs="?",
+        const=None,
+        default=None,
+        metavar="目录或文件",
+        help="输出目录或 .ics 文件路径；不填写走 stdout",
+    )
     sexp.set_defaults(func=query.cmd_export)
 
     sb = sub.add_parser("brief")

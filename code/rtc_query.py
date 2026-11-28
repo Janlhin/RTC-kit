@@ -17,22 +17,27 @@
   重叠」做归属匹配，不展开实例。接入 P3 ``rtc_rrule.expand_occurrences`` 后
   再补实例级过滤（见 D-019 复审条件）。
 - ``--q`` 大小写不敏感子串匹配，中文按原字符、不分词；多条件 AND。
+- ``export --ics``：序列化 / 折行 / 转义 / 跨年分组全部复用 P2 ``rtc_ics``，本模块只做路径路由。
 
-退出码沿用既有集合：0 正常（含空结果）/ 4 无匹配或参数非法；导出占位同 4。
+退出码沿用既有集合：0 正常（含空结果与导出成功）/ 4 无匹配、无可导出事件或参数非法。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import rtc_core as core
 import rtc_events as events
 import rtc_history as history
+import rtc_ics as ics
 
 __all__ = ["cmd_list", "cmd_show", "cmd_export"]
 
@@ -374,19 +379,57 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# 命令：export（占位，序列化层等 P2）
+# 命令：export（序列化复用 P2 rtc_ics，不自写第二份）
 # --------------------------------------------------------------------------- #
 
 
-def cmd_export(args: argparse.Namespace) -> int:
-    """.ics 导出占位：序列化复用 P2 的 ``rtc_ics.py``，本阶段不自写一份。
+def _export_events() -> list[dict[str, Any]]:
+    """导出事件清单：P2 真相优先（直扫 ``calendar/*.ics``），无 .ics 时回退 P1 影子账本。"""
+    source = ics.load_all_events(core.WORKSPACE)
+    if source:
+        return source
+    envelope = events.load_events(core.WORKSPACE)
+    return events.all_events(envelope)
 
-    P2 分支合入后，此 handler 改为调用 P2 导出函数（一年一文件、RFC 5545），
-    命令面与 ``--ics`` 参数保持不变。
+
+def _event_year(event: dict[str, Any]) -> int:
+    return datetime.fromisoformat(str(event["start"])).year
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """把事件导出为 RFC 5545 `.ics`；序列化 / 折行 / 转义 / 跨年分组全部走 P2 层。
+
+    - 不给路径：整份日历写到 stdout。
+    - 路径以 ``.ics`` 结尾：单文件导出全部事件。
+    - 其余路径按目录处理：复用 P2 ``write_events`` 的按年分组与跨年交叉段，
+      先落临时目录再复制到目标目录，不写工作区真相目录。
     """
-    print(
-        "export --ics 暂未接入：等待 P2 的 rtc_ics.py 序列化层合入后复用，"
-        "本 PR 不另写一份 .ics 序列化（见 D-019 已知缺口）",
-        file=sys.stderr,
-    )
-    return 4
+    target = str(getattr(args, "ics", "") or "").strip()
+    evs = _export_events()
+    if not evs:
+        print("export: 没有可导出的事件", file=sys.stderr)
+        return 4
+
+    if not target:
+        year = min(_event_year(ev) for ev in evs)
+        sys.stdout.write(ics.render_calendar(evs, year=year))
+        return 0
+
+    out = Path(target)
+    if out.suffix.lower() == ".ics":
+        year = min(_event_year(ev) for ev in evs)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(ics.render_calendar(evs, year=year), encoding="utf-8", newline="")
+        print(f"已导出 {out}", file=sys.stderr)
+        return 0
+
+    tmp = Path(tempfile.mkdtemp(prefix="rtc-export-"))
+    try:
+        written = ics.write_events(tmp, evs)
+        out.mkdir(parents=True, exist_ok=True)
+        for src in written:
+            shutil.copyfile(src, out / src.name)
+        print(f"已导出 {len(written)} 个年份文件到 {out}", file=sys.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return 0
