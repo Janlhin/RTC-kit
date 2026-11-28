@@ -38,6 +38,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # 回归测试需要 worktree 检出祖先提交 P1_BASE（30e5ab0），必须取全量历史。
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
