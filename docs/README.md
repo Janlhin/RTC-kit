@@ -9,6 +9,7 @@
 | 架构说明 | 分层架构、职责边界与可移植性 | [architecture.md](architecture.md) |
 | 业务契约 | plan → due → ack → rollover 的状态转换、输出与退出码 | [behavior-contract.md](behavior-contract.md) |
 | 时区模型 | IANA 时区、旧固定偏移回退、DST 与双时区换算口径 | [timezone.md](timezone.md) |
+| NLU L0/L1 | 确定性中文时间解析：支持范围、不支持清单、歧义口径与依赖纪律 | [nlu-l0-l1.md](nlu-l0-l1.md) |
 | 来源与许可边界 | 与上游项目的关系、许可结论 | [attribution.md](attribution.md) |
 
 ## 协作与故障处置
@@ -26,4 +27,5 @@
 | 文档 | 用途 | 路径 |
 |---|---|---|
 | 文档命令实测记录（2026-11-16） | 文档中命令面的实测留痕 | [verification-2026-11-16.md](verification-2026-11-16.md) |
+| L2 集成验收记录（P7） | 七段 PR 叠栈验收矩阵、审计项定性与编号对照 | [l2-acceptance.md](l2-acceptance.md) |
 | 审计回应 · 2026-11-09 | 外部审计包的逐条处置记录 | [audit/2026-11-09-response.md](audit/2026-11-09-response.md) |

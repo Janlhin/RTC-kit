@@ -126,3 +126,75 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-013 L0/L1 中文时间解析用标准库自研，不引第三方 NLU 库
+
+- **日期**：2026-11-28
+- **决策**：交互入口的中文时间短语解析（NLU L0 词表 + L1 本地时间计算）落在新模块 `code/rtc_nlu.py`，纯标准库（`re` / `datetime` / `zoneinfo`），不接 LLM、运行时零第三方依赖；判定链路保持不依赖它。
+- **背景**：需求表 FR-1.1 / FR-1.2 要求「下周三下午 3 点」「半小时后」「下个月 1 号」这类相对时间可本地录入；NFR-4.2 要求高频动作不走 LLM，NFR-4.3 要求无网可用。既有架构里「把明天八点叫我解析成结构化操作」原本划给模型层，但封闭词表内的一次性时间点可以确定性算出来，不必每次唤醒模型。
+- **被采纳**：① 封闭词表 + 正则抽取日锚点 / 时刻 / 相对时长，日期算术走本地墙钟，时长叠加走 UTC 往返；② `now` 由调用方注入，模块内部不读系统时间，保证可回归、可复现；③ 周期 / 集合类表达明确抛 `UnsupportedExpression`，不降级成单次时刻；④ 只被交互入口 import，tick 路径隔离有静态 + 运行时双重测试断言。
+- **被否决**：① 引入通用自然时间库（dateparser / chrono 系等）——带来运行时第三方依赖，与「tick 零第三方、无网可用」冲突，且库自身的歧义口径不可控；② 直接交给 LLM 解析——违背 NFR-4.2 / 4.3，同一输入不保证同一输出，不可回归；③ 在 `rtc_core` / `rtc_due` 内联解析逻辑——判定链路会染上交互层依赖，破坏单一入口与隔离边界。
+- **检索记录**：按「标准库 → 已有依赖 → 注册表」顺序评估；标准库 `re` + `zoneinfo` 已覆盖本轮封闭词表；仓库既有依赖（jsonschema / coverage 等）与时间解析无关；未从注册表安装任何新包。
+- **影响**：`code/rtc_nlu.py`、`code/rtc_once.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`docs/README.md`、`TASKS.md` 待补台账。
+- **复审条件**：若后续接 RRULE 周期事件、裸周几缺时刻的交互确认、或 L2 模型兜底，单独立项；开放表达不在本模块内消化。
+
+## D-014 L2 P1 事件模型先落派生影子账本，旧 JSON 真相源不动
+
+- **日期**：2026-11-28
+- **决策**：L2 行程本第一段（P1）先建 Event 一等公民契约与离线投影，影子账本 `state/events.json` 由旧 `routines.json` / `alarms.json` 投影生成；旧 schema 与旧命令面原样保留，P2 起 `.ics` 才成为源真相，本 JSON 转只读缓存。
+- **背景**：L2 要把一次性 / 周期 / 倒计时 / DDL 统一成带稳定 `uid`、`kind`、RRULE、`owner`、`deadline`、`status` 的事件一等公民。但旧 `routine` / `alarm-state` schema 被 373 条回归与旧命令逐字节口径钉死，直接改旧 schema 会把行为改动与模型迁移混在一起。
+- **被采纳**：① 新 `contract/event.schema.json` 与旧两份 schema 并存，旧 schema 一字不动；② `rtc_events.py` 纯标准库做影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名；`rtc_migrate.py` 是离线迁移骨架，默认 dry-run、写前自动备份、幂等跳过、`--rollback` 可恢复；③ 默认口径：`owner` 默认 `self`、替别人记 `other:<name>`；`uid` = UUIDv4 + `@rtc-kit`，旧 id / ocid 进 `aliases`；`rrule` 直接存 RFC 5545 标准字符串，不造自研 DSL；④ 事件栈不进 `plan` / `due` / `ack` tick 热路径，静态断言测试守住。
+- **被否决**：① 直接改旧 `alarm-state` / `routine` schema 承载事件字段——旧命令面与既有测试会被波及，违背「一条不改全绿」；② P1 就写 `.ics` 真相源——日历序列化是 P2 的事，提前做会把两套真相源缝在一起；③ 事件模块被 `due` / `plan` 直接 import——tick 路径变重，违反确定性与零第三方依赖边界。
+- **影响**：`contract/event.schema.json`、`code/rtc_events.py`、`code/rtc_migrate.py`、`code/tests/test_events_p1.py`、`docs/architecture.md`、`docs/behavior-contract.md` §5c、`contract/README.md`、`code/README.md`、`TASKS.md` T-016。
+- **复审条件**：P2 切 `.ics` 真相源时复核影子缓存的重建与删除路径；P5 接入提醒策略时复核 `reminderPolicy` 形状；`owner` 词汇表收紧或校验规则另提案；`holiday` 类型不进 RRULE，留外挂日期类型表。
+- **审计修订（2026-11-28，一致性审计 A2–A7）**：① `UNTIL` 改 date-time（当日 23:59:59 + 偏移），不用 date-only；② 契约补齐 `.ics` 往返七字段 `summary` / `categories` / `tzid` / `dtstamp` / `unknown` / `rev` / `crossYear`，`rev` 每次写操作 +1、落 `X-RTC-REV` 与索引；③ `end` 缺省与 `start` 同刻（零时长）；④ `createdAt` / `updatedAt` / `source` 不随 `.ics` 走；⑤ 新旧两套 UID 算法 P1 不收敛，旧 `id-<开始时间>` 回退算法仅兼容读取，P2 统一新 `uid`。口径明细见 `docs/behavior-contract.md` §5c。
+
+## D-015 L2 事件台账以 `.ics` 为源真相，SQLite 仅作可重建只读索引（P2）
+
+- **日期**：2026-11-28
+- **决策**：L2 行程本的事件台账以 RFC 5545 `calendar/<YYYY>.ics` 为唯一真相；`state/calendar-index.db` 只是可删可重建的只读查询索引；旧 `routines.json` / `alarms.json` 迁移后留在原地作只读历史。
+- **背景**：NFR-2.5 跨代可读（30–40 年）是决定性约束——30 年后软件可能全死，数据必须仍是开放标准纯文本。SQLite 与私有 JSON 库不可人类直读、会被 schema 演进绑架，不能作真相。P1 的 `state/events.json` 只是过渡期派生影子副本，P2 起 `.ics` 为准。
+- **被采纳**：① 一年一个 `.ics`，按 `DTSTART` 年份归文件；跨年事件在相邻年份文件各留一段 `X-RTC-CROSS-YEAR` 交叉引用；② 索引 `rebuild` 从零扫描全部 `.ics` 灌入，查询结果与直扫 `.ics` 逐条对账；③ 冲突以 `.ics` 为准，索引陈旧只告警剔除、不反写真相；④ 迁移默认 dry-run，`--apply` 前自动备份（含 manifest 哈希），重跑幂等（别名命中保留原 UID），`--rollback` 按 manifest 恢复；⑤ RRULE 直接存 RFC 5545 标准字符串；owner / deadline / reminderPolicy / aliases / rev 等 RTC 专有字段走 `X-RTC-*` 扩展，未知属性原样保留带回；⑥ `--to-ics --apply` 写完 `.ics`、重建索引后，从 `.ics` 逐条重建 `state/events.json` 派生影子视图（幂等、只背契约字段、随备份回滚），让过渡期旧读路径（P3 适配器）读到的核心字段与真相一致。
+- **被否决**：① SQLite 作事件真相——跨代不可读，NFR-2.5 直接否决；② 单一大 `.ics` 文件——多年后单文件过大、折行与合并冲突难处理，按年份拆分；③ 索引不一致时自动重建并覆盖——历史教训（三套修复器互相重建清空数据，见 `docs/architecture.md` §5 规则 3），读取路径只告警不修复；④ 迁移后不重建影子视图、仅在读路径加「`.ics` 比 `events.json` 新」的告警守卫——双写期适配器仍会读到陈旧数据，告警只暴露问题不消除问题，故否，选上面的方案 ⑥。
+- **影响**：`code/rtc_ics.py` 双向序列化/解析层、`code/rtc_calindex.py`、`code/rtc_migrate.py --to-ics`、`docs/architecture.md` §5、`docs/behavior-contract.md` §3.2、测试 `test_ics_p2.py` / `test_calindex.py` / `test_migrate_ics.py`。
+- **复审条件**：P3 RRULE 展开、P5 事件写路径接入后，复核迁移期双写口径；若后续做系统日历同步（NFR-3.6），单向导出副本另立决策，不回流改写 `.ics`。
+
+## D-016 周期规则存 RFC 5545 RRULE 字符串，解析/展开引擎自研，不造 DSL、不引 dateutil
+
+- **日期**：2026-11-28
+- **决策**：L2 事件的周期规则直接存 RFC 5545 RRULE 字符串；解析与 occurrence 展开在 `code/rtc_rrule.py` 自研，仅用标准库 `datetime` / `zoneinfo` / `calendar`；不另造自研 DSL，不引入 dateutil。
+- **背景**：FR-1.4 要求天/周/月/年重复与 RRULE 表达。候选路线有三条：① 存自研 DSL（结构化字段拼中文/私有串）；② 引入 dateutil 做解析展开；③ 存标准 RRULE 字符串 + 自研引擎覆盖所需子集。
+- **被采纳**：③。RRULE 是 1998 年开放标准，与 `.ics` 同源同构，跨代可读；本阶段所需子集（`FREQ` 天/周/月/年 + `INTERVAL` / `COUNT` / `UNTIL` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `WKST`）自研成本可控，闰年、月末、序号周几、`COUNT` / `UNTIL` 全局预算、跨年、DST 春秋切等边界由成组测试锁定；符合 AGENTS「标准库优先、先搜寻后自研」的约定，tick 路径保持零第三方依赖。
+- **被否决**：① 自研 DSL——与 `.ics` 互导要再写一层翻译，两套语义容易漂移，也背离「`.ics` 是源真相」的方向；② dateutil——成熟但带第三方依赖，其 RRULE 实现覆盖大量本阶段不需要的键，且与标准库 `zoneinfo` 的 DST 口径需要再对齐；当前子集自研边界清晰，不值得为它背依赖。
+- **影响**：新增 `code/rtc_rrule.py`、`code/tests/test_rrule.py`；`docs/behavior-contract.md` §7.1。occurrence 接入 plan / due / ack 的口径（`code/rtc_occurrence.py` 适配层、去重键、兼容红线）见 §7.2，不再单独立编号决策。
+- **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
+
+## D-017 周期中文表达产出 RFC 5545 RRULE，解析层开关门控写路径
+
+- **日期**：2026-11-28
+- **决策**：NLU 解析器增加周期分支。封闭词表内的天 / 周 / 月 / 年与每 N 周期，产出 RFC 5545 RRULE 字符串 + 首个 occurrence 的 DTSTART；周期解析由 `recurring` 开关门控，默认关闭，入口一次性契约行为不变。
+- **背景**：FR-1.4 要求周期事件可录入；#108（D-013）只解析一次性时间点，整类周期表达被拒绝。P4 上半段先把确定性解析做掉，落库与 occurrence 展开归 P3 / P5，本层不接写路径。
+- **被采纳**：① RRULE 直接存标准字符串（`FREQ` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `INTERVAL`），不自造 DSL；② DTSTART 取注入 now 之后的下一命中槽位，今天槽位已过则顺到下一周期；③ 周期表达缺时刻默认 09:00；④ 工作日历 / BYSETPOS / 相对月末 / 第 N 周定位 / 隔周等形状抛 `UnsupportedExpression`，不猜、不降级；⑤ 开关默认 `False`，`rtc_once.py` 零改动。
+- **被否决**：① 入口直接登记周期窗口——写路径与展开引擎未就绪，会把周期事件偷偷降级成单次；② 引入第三方自然时间库——破坏运行时零第三方依赖，且歧义口径不可控；③ 接 LLM 兜底——违背确定性与无网可用，同一输入不保证同一输出。
+- **影响**：`code/rtc_nlu.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`TASKS.md`（T-019 新增，T-014 收窄）。
+- **复审条件**：P3 展开引擎与 P5 写路径接线后，评估是否默认打开 `recurring`；BYSETPOS / 工作日历 / 节假日支持单独立项。
+
+## D-018 L2 P5 事件级 CRUD 命令落影子账本，提醒策略先存形状、档位计算留 P3
+
+- **日期**：2026-11-28
+- **决策**：P5 在 P1 影子账本之上落地事件级写命令 `create` / `edit` / `complete` / `cancel`（含当天 `--undo`）与 `owner` / `deadline` / `reminderPolicy` 持久化；写操作复用既有摘要守卫 + 排他锁，审计 + history 逐条留痕；`.ics` 写入、occurrence 展开、NLU 短语、查询导出分别留 P2 / P3 / P4 / P6。
+- **背景**：验收要求「能记、能查、能改、能取消、跨年可查」，但 P2 真相源、P3 occurrence 层、P4 解析器都还没接线。先把事件级命令面与存储写通，后续 phase 在同一契约上叠档位计算与真相源切换，避免等所有口径拍板才动工。
+- **被采纳**：① 命令实现独立成 `code/rtc_event_cmd.py`，不进 `plan` / `due` / `ack` tick 热路径；core 只做子命令路由，窗口级旧行为一字不变；⓪ 与 P4 解析器的字段映射：解析器输出 `dtstart`（tz-aware datetime），落账 `event.start = parsed.dtstart.isoformat()`，`end` 按窗口宽度 / 入参派生；命名差异不牵动 schema，解析器侧不改名；② 并发守卫沿用既有摘要（digest）+ `_exclusive_file_lock` 口径，冲突抛 `Conflict`（退出 2），不静默覆盖；③ 撤销只当天有效，按审计快照逐字段还原，`uid` / `aliases` / `createdAt` 保持不变，跨日 / 无痕迹 / 非取消态一律退出 4；④ `reminderPolicy` 形状对齐 event schema：`preRemind.minutesBefore` 锚 `start`、`ddlLadder` 锚 `deadline`、`snooze.minutes` 存默认时长；同 tick 优先级 阶梯 > 提前 > 到点，重合取最早；⑤ 事件契约补可选 `title` 字段（RFC 5545 SUMMARY 对应），P1 投影事件不带也仍合法；⑥ 审计动作 `create` / `edit` / `complete` / `cancel` / `cancel-undo`，`source` 前缀 `event:`；审计 / history 失败不阻断主流程。
+- **被否决**：① P5 就做 occurrence 粒度的完成 / 平移——展开层是 P3 的事，提前缝会把事件级与实例级状态搅在一起；② 事件命令直接写 `.ics`——真相源切换是 P2 范围，影子账本口径不变；③ 给事件账本另造一套 rev 计数器——摘要守卫与既有配置文件口径一致，rev 字段留待 P2 真相源重构统一；④ 窗口级撤销 / snooze 在本 lane 重写——#113 / #114 各自在窗口层推进，合并后再收敛去重。
+- **影响**：`code/rtc_event_cmd.py`、`code/rtc_core.py`（子命令注册与路由）、`contract/event.schema.json`（补可选 `title`）、`code/tests/test_events_p5.py`、`docs/behavior-contract.md` §5d、`code/README.md`、`README.md`、`TASKS.md` T-020。
+- **复审条件**：P3 occurrence 接线时复核事件级 `complete` / `cancel` 是否需要拆到实例粒度，以及 occurrence snooze 幂等键（uid，日期，目标时刻）落地；P2 切 `.ics` 时复核事件写命令的落盘路径从影子账本切到日历文件；与 #113（窗口撤销）/ #114（窗口 snooze）/ #115（窗口提醒策略）合并后收敛重复语义；`title` 字段在 P1 投影补齐后再评估是否升为必填。
+
+## D-019 L2 P6 查询：事件 + 旧窗口只读合并视图，周期事件按 occurrence 实例展开
+
+- **日期**：2026-11-28
+- **决策**：P6 交付只读查询面 `list` / `show`，事件（P1 影子账本；P2 起 `.ics` 为准）与旧窗口（`history.db`）两条来源并排呈现、用 `source` 列区分；`recurring` 事件交 P3 `rtc_rrule` 引擎按查询区间逐条展开成 occurrence 实例，每条带实例起点与 `ocid`；`show` 仍按事件定义返回；`.ics` 导出复用 P2 的 `rtc_ics.py` 序列化层，不自写第二份。
+- **背景**：L2 验收要求任意日期 / 年份 / 跨年可查、关键词与类型 / 归属筛选、`.ics` 导出。occurrence 引擎在 P3、`.ics` 序列化在 P2，两段先后合入 P6 查询层；旧命令输出又被既有回归钉死，查询层不能改写旧窗口读路径。
+- **被采纳**：① 新区块独立模块 `rtc_query.py`，纯标准库、不被 tick 热路径 import；② 区间三选一（`--date` / `--year` / `--from`+`--to`），筛选 `--q`（大小写不敏感子串、AND）/ `--kind once|recurring` / `--owner self|other:<name>`，口径与 #112 对齐、待收敛；③ 筛选在事件定义层做，命中后再展开实例；`once` 按 start 落区间，`recurring` 按引擎半开窗口展开，跨年事件两年各自出对应实例；④ 查询实例条数预算 `2000`，超限退出 4 提示收窄范围，不卡死、不静默截断；引擎侧 `MAX_OCCURRENCES` / `MAX_SCAN_YEARS` 双硬上限兜底死循环；⑤ 空结果退出 0，`--json` 纯 JSON 走 stdout，诊断走 stderr；⑥ 旧窗口行 `type` 补进 history 查询 SELECT（展示面不变），映射 once/recurring。
+- **被否决**：① P6 自己写一份 RRULE occurrence 展开——引擎归 P3，重复实现会在合流时打架；② P6 自写 `.ics` 序列化——复用 P2 模块，避免两套序列化口径；③ 合并两条来源时按别名去重——影子账本与执行历史是两个视角，并列展示更不容易让用户误以为旧窗口被事件取代；④ 把 `--q` 分词或接 LLM 兜底——L2 保持确定性，不支持的表达明确无命中。
+- **影响**：`code/rtc_query.py`、`code/rtc_core.py`（新子命令接线）、`code/rtc_history.py`（SELECT 补 `type`）、`code/tests/test_query_p6.py`、`docs/behavior-contract.md` §5d、`code/README.md`、`TASKS.md` T-021。
+- **复审条件**：#112 收敛后合并事件侧与旧命令侧的 `--q` / `--kind` 匹配函数；事件 `title` / 标签字段由 P5 写入侧落地后扩 `--q` 检索池；occurrence 级取消 / 改期（单条实例推迟、取消）留待后续阶段。

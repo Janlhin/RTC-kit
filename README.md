@@ -117,7 +117,7 @@ python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate --date 2026-11-17 --js
 
 | 路径 | 职责 |
 |---|---|
-| `code/` | 确定性脚本（`rtc.py` 主链路、`rtc_plan.py` / `rtc_due.py` / `rtc_once.py` 宿主入口）与回归测试 |
+| `code/` | 确定性脚本（`rtc.py` 主链路、`rtc_plan.py` / `rtc_due.py` / `rtc_once.py` 宿主入口、`rtc_nlu.py` 交互前端时间解析）与回归测试 |
 | `contract/` | 机器可读契约（JSON Schema）与可校验示例 |
 | `rules/` | 声明式规则：`routines` / `priority-map` / `auto-resolver` / `formats` |
 | `skills/` | 5 份技能说明，由运行时加载 |
@@ -206,7 +206,7 @@ $env:PYTHON = "C:\path\to\venv\Scripts\python.exe"
 - `code/metrics.mjs` 是可选旁路统计，**不随主链路维护**；主链路统计走 `rtc.py metrics`。
 - 覆盖率阈值已按实测基线收紧到语句 80% / 分支 70%（2026-11-20 实测 82% / 76%），但局部仍有空洞（`rtc_plan.py` 0%、`rtc_once.py` 62%），见 `TASKS.md` T-003。
 - `mypy` 已全量收紧到 `--strict`（`[tool.mypy]` 顶层开关，2026-11-21），`code/` 与 `install.py` 零错误。
-- 执行历史在 `state/history.db`（`windows` / `daily` / `checklist` / `events` 四表，唯一真相源）；`state/schedule/*.json` 是它的人读副本，删掉整个目录历史照样查得到。查询用 `rtc.py history` / `history --range` / `events` / `stats`。
+- 执行历史在 `state/history.db`（`windows` / `daily` / `checklist` / `events` 四表，唯一真相源）；`state/schedule/*.json` 是它的人读副本，删掉整个目录历史照样查得到。查询用 `rtc.py history` / `history --range` / `events` / `stats`；L2 行程本合并视图用 `rtc.py list --date|--year|--from/--to`（`--q` / `--kind` / `--owner`）、`show <uid|旧id>`，`.ics` 导出用 `rtc.py export --ics <目录或文件>`（复用 P2 序列化层）。
 - 每日档案 `state/schedule/*.json` 永久保留；`rtc-plan` 每天压一份 zip 到**其他本地盘**的 `RTC-Backup`（目标盘由 `rules/backup.json` 指定），也可按天提交进私有 git 仓库。恢复办法见 `docs/troubleshooting.md` §7 / §8。
 - 上游 `snarktank/clawchief` 没有附带许可证；本仓库不分发其任何原文，详见 `docs/attribution.md`。
 

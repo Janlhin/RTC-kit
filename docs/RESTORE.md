@@ -4,6 +4,19 @@
 
 **一句话原则**：先验证「这份备份是我的」，再验证「这份备份没坏」，最后才盖回去。顺序颠倒等于把别人的作息盖到自己头上。
 
+> **⚠ 演练 / 验收前的强制前置动作**
+>
+> 做任何迁移、恢复、回滚演练之前，**必须先把 `rules/backup.json` 里的 `targets` 改到一个临时目录**（例如仓库外的 `_acceptance/.../bk`），确认不是真实备份盘后再跑。
+>
+> 红线：**不碰 `C:\Users\Janlhin\RTC` 真实工作区，不写 D:/E: 备份盘**。备份配置示例（临时目录，用完即删）：
+>
+> ```json
+> {
+>   "targets": ["C:/Users/Janlhin/DoubaoWork/chats/2026-11-27/new-chat/rtc-work/_acceptance-p7/bk"],
+>   "keep": 30
+> }
+> ```
+
 ---
 
 ## 0. 备份长什么样
@@ -168,3 +181,49 @@ python {{CODE_DIR}}/rtc.py --workspace {{WORKSPACE_DIR}} status
 | 快照也没了 | 数据真丢了。重建方式：按 `rules/routines.md` 重写时刻表 → `plan --force`，从今天重新开始记账 |
 | 只有 `rules/routines.json` 坏了 | 不用整份恢复：从任一 zip 里只取这一个文件盖回 `rules/`，再 `plan --force` |
 | 想预防下一次 | 打开 git 归档（`rules/backup.json` 里的 `git` 段），每天会自动 commit 到私有仓，多一层异地副本 |
+
+---
+
+## 8. L2 `.ics` 迁移的备份 / 恢复 / 回滚
+
+旧 `rules/routines.json` + `state/alarms.json` 迁到 `.ics` 真相源时，迁移工具自带一套「写前备份 → 幂等写入 → 按清单回滚」流程，与第 1–4 节的 zip 备份是两条独立链路。
+
+### 8.1 迁移前备份
+
+`--to-ics` 默认是 dry-run（只打印计划，不写盘）。真跑加 `--apply`，并用 `--backup-dir` 指到**临时目录**：
+
+```powershell
+python code/rtc_migrate.py --workspace <临时工作区> --to-ics --apply --backup-dir <临时备份目录>
+```
+
+- 备份目录下按时间戳建子目录，里面是 `routines.json.snapshot`、`alarms.json.snapshot` 与一份 `manifest.json`。
+- `manifest.json` 记录每个源文件迁移前的 SHA256、`calendar/` 当时是否存在、以及 `restored` 标记；回滚就按这份清单对账。
+- 迁移**不删旧文件**；旧 `routines.json` / `alarms.json` 原样留在原处。
+
+### 8.2 迁移产物与可重建性
+
+真跑后工作区里会有：
+
+| 产物 | 作用 |
+|---|---|
+| `calendar/<YYYY>.ics` | 事件真相源（一年一文件，含跨年交叉段） |
+| `state/calendar-index.db` | SQLite 只读索引，可由 `.ics` 从零 `rebuild` |
+| `state/events.json` | 影子派生视图，由 `.ics` 重建；**不反向回写** `.ics` 或旧文件 |
+
+索引或影子被删都不怕：从 `.ics` 重建索引 + 影子后，查询结果与删前逐条一致（见 `docs/l2-acceptance.md` 验收项 2）。
+
+### 8.3 回滚
+
+对最近一次备份目录执行 `--rollback`：
+
+```powershell
+python code/rtc_migrate.py --workspace <临时工作区> --to-ics --rollback <临时备份目录>/<时间戳>-to-ics
+```
+
+- 回滚按 `manifest.json` 恢复：存在过的 `calendar/` 目录与派生索引 / 影子被清理，旧 `routines.json` / `alarms.json` 从快照还原。
+- 输出 `{"restored": true, "calendar_existed": false, ...}` 表示回滚完成；`restored` 标记写回 manifest。
+- 回滚后旧五条命令（`status --json` / `history <date>` / `schedule <date>` / `due --now` / `report`）退出码与迁移前一致。
+
+### 8.4 幂等性
+
+同一工作区连续跑两次 `--to-ics --apply`，第二次命中别名 / uid 已存在则跳过，不换 uid、不产生第二份，产物哈希不变。重复迁移不会把影子视图越写越偏。

@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/rtc/event.schema.json",
+  "title": "RTC Event Ledger（L2 行程本）",
+  "description": "事件一等公民契约。P1 落地载体为 state/events.json（由旧 routine/ledger 投影出的派生影子副本，旧真相源仍是 routines.json + alarms.json）；P2 起 .ics 为源真相，本文件对应的 JSON 转为只读缓存视图。旧 routine.schema.json / alarm-state.schema.json 原样保留，本契约不替代它们。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "events"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1, "default": 1 },
+    "generatedAt": { "type": "string", "format": "date-time", "description": "本影子账本最近一次投影生成时刻（ISO 8601）；仅派生留痕，不参与判定" },
+    "events": { "type": "array", "items": { "$ref": "#/$defs/event" } },
+    "aliases": {
+      "type": "object",
+      "description": "旧身份 → uid 的正向别名索引；事件自身的 aliases 列表是反向映射。旧 id 仍可查到对应事件。",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid", "kind", "start", "end", "owner", "status", "reminderPolicy", "aliases"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "事件标题（对应 RFC 5545 SUMMARY）。P1 影子投影的旧窗口暂时不带本字段，标题沿用时刻表 label；P5 起 CLI 新建事件必须带标题。"
+        },
+        "uid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}@rtc-kit$",
+          "description": "RFC 5545 §3.8.4.7 风格稳定 UID：UUIDv4 + @rtc-kit 后缀；改期、取消、状态迁移都不换。旧 id / ocid 进 aliases。"
+        },
+        "kind": { "enum": ["once", "recurring"], "description": "once = 只发生一次；recurring = 按 rrule 重复。" },
+        "start": { "type": "string", "format": "date-time", "description": "开始时刻（带偏移 ISO 8601）；时区口径沿用 D-012。" },
+        "end": { "type": "string", "format": "date-time", "description": "结束时刻（闭区间含义沿用旧窗口）。缺省时默认与 start 同刻（零时长事件），不另设默认分钟数；旧窗口 end 缺省同样回退 start。" },
+        "rrule": {
+          "type": ["string", "null"],
+          "description": "RFC 5545 §3.8.5.3 RRULE 标准字符串（FREQ/INTERVAL/BYDAY/BYMONTH/BYMONTHDAY/COUNT/UNTIL）；null/省略 = 一次性事件。直接存标准字符串，不另造自研 DSL。"
+        },
+        "owner": {
+          "type": "string",
+          "pattern": "^self$|^other:.+",
+          "description": "归属主体：self = 自己；other:<name> = 替别人记。事件级字段。"
+        },
+        "deadline": {
+          "type": ["string", "null"],
+          "format": "date",
+          "description": "DDL 型事件截止日；null/省略 = 非 DDL 型。倒计时复盘日实例由 deadline 次日派生，不单独建模。"
+        },
+        "status": {
+          "enum": ["scheduled", "ringing", "done", "cancelled", "missed"],
+          "description": "scheduled=待响；ringing=正在响未确认；done=已确认/已送达；cancelled=被取消；missed=到点未送达。旧账本 skipped 是生成期派生状态，不进本枚举。"
+        },
+        "reminderPolicy": { "$ref": "#/$defs/reminderPolicy" },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "旧身份（routine id / 账本 ocid）列表，兼容读取用；新引用一律走 uid。"
+        },
+        "summary": {
+          "type": ["string", "null"],
+          "description": "事件标题（RFC 5545 SUMMARY）。P1 投影自旧窗口 label，缺省回退 id；都没有为 null。"
+        },
+        "categories": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "分类标签列表（RFC 5545 CATEGORIES）。P1 投影为 null，分类体系由后续 phase 接入。"
+        },
+        "tzid": {
+          "type": ["string", "null"],
+          "description": "事件级 IANA 时区名（RFC 5545 TZID）；null = 沿用账本固定偏移口径（D-012），不在事件上单独挂时区。"
+        },
+        "dtstamp": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "最近修订时间戳（RFC 5545 DTSTAMP，带偏移 ISO 8601）；P1 与 createdAt 同源。"
+        },
+        "unknown": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "description": "往返兜底对象：解析外部 .ics 时不认识的属性原样存住，不丢弃；键为属性名，值为原始字符串或结构化形态。P1 投影为 null。"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "事件修订号：每次写操作 +1，新建/投影为 0；序列化进 .ics 的 X-RTC-REV 并在索引层同步。不从旧账本 seq 继承（兼容读取由 aliases 承担）。"
+        },
+        "crossYear": {
+          "type": ["boolean", "null"],
+          "description": "跨年标记：周期实例或行程是否跨年度。P1 投影为 null，由 P3 展开器判定后回填。"
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "投影来源留痕（P1 影子副本用），不参与判定。",
+          "required": ["routineId"],
+          "properties": {
+            "routineId": { "type": "string", "description": "旧 routine.alarmWindows[].id" },
+            "ledgerDate": { "type": ["string", "null"], "format": "date", "description": "匹配到的当天账本日期；模板级投影为 null" }
+          }
+        }
+      }
+    },
+    "reminderPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "提醒策略预留位。P1 只落形状，字段由 P5 接入：preRemind 锚点窗口 start；同 tick 顺序 阶梯 > 提前 > 到点，重合只取最早一条；snooze 只往后推。",
+      "required": ["preRemind", "ddlLadder", "snooze"],
+      "properties": {
+        "preRemind": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["minutesBefore"],
+          "properties": { "minutesBefore": { "type": "integer", "minimum": 1 } }
+        },
+        "ddlLadder": {
+          "type": ["array", "null"],
+          "items": { "type": "integer", "minimum": 0 },
+          "description": "阶梯预警提前量（分钟），P5 接入。"
+        },
+        "snooze": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["minutes"],
+          "properties": { "minutes": { "type": "integer", "minimum": 1 } }
+        }
+      }
+    }
+  }
+}
