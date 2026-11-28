@@ -40,7 +40,7 @@ python rtc.py --workspace <dir> history  --month 2026-12 # 那个月的结果汇
 python rtc.py --workspace <dir> list --date 2026-12-15   # 那天的事件 + 旧窗口（只读合并视图）
 python rtc.py --workspace <dir> list --year 2026 --q 报告 --kind once --owner self
 python rtc.py --workspace <dir> show <uid 或旧 id>       # 单事件全字段（含别名/提醒策略/DDL/状态）
-python rtc.py --workspace <dir> export --ics <目录或文件> # .ics 导出（序列化层待 P2 接入）
+python rtc.py --workspace <dir> export --ics <目录或文件> # RFC 5545 .ics 导出（复用 P2 rtc_ics；不给路径走 stdout）
 python rtc.py --workspace <dir> postpone travel --to 2026-12-16  # 把提醒挪到别的日子
 python rtc.py --workspace <dir> cancel   travel                # 取消一个安排
 python rtc.py --workspace <dir> complete travel --text "打完了"  # 完成 + 停用

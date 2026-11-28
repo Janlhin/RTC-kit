@@ -148,7 +148,7 @@ python rtc.py --workspace <dir> ack \
 - 热路径边界：`rtc_events` / `rtc_migrate` **不得**被 `plan` / `due` / `ack` tick 路径 import；有静态断言测试守住。
 - 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。
 
-## 5d. L2 P6 查询契约（`list` / `show` / `export` 占位）
+## 5d. L2 P6 查询契约（`list` / `show` / `export`）
 
 > 只读视图：不写任何状态文件，不接 plan/due/ack 判定。事件来源是 P1 影子账本，旧窗口来源沿用 `history.db` 既有读路径。
 
@@ -159,7 +159,7 @@ python rtc.py --workspace <dir> ack \
 - 空结果退出 `0`（空数组），不当错误；`--json` 纯 JSON 到 stdout，诊断只走 stderr。
 - `show <uid|旧id>`：先按 uid 命中，未中再查别名表；找不到退出 `4`、stdout 为空。
 - 性能：先按日期 / 年份过滤再聚合；单次返回上限 `5000` 条，超限退出 `4` 并提示收窄范围，不一次全量展开。
-- `export --ics`：序列化复用 P2 的 `rtc_ics.py`，本阶段占位退出 `4`，不在本 PR 自写第二份 `.ics` 序列化。
+- `export --ics`：序列化 / 折行 / 转义 / 跨年分组全部复用 P2 `rtc_ics.py`，命令层只做路径路由；不给路径整份日历走 stdout，`.ics` 结尾写单文件，其余按目录落 `<YYYY>.ics`；无可导出事件退出 `4`。
 - 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 在无 `events.json` 的工作区上与 P1 基线逐字节一致（SHA256 diff=0）。
 
 ### 5d.1 与 #112 的筛选语义对齐
@@ -203,6 +203,8 @@ python rtc.py --workspace <dir> ack \
 | L2 P6 `show` 按 uid / 旧别名解析、未命中退出 4 | `TestShow` |
 | L2 P6 非法参数退出 4、stdout 为空；空结果退出 0、纯 JSON | `TestInvalidArgs`、`TestListScopes.test_empty_result_is_rc0_and_pure_json` |
 | L2 P6 五条旧命令对 P1 基线逐字节一致 | `TestOldCommandsByteIdentical` |
+| L2 P6 `.ics` 导出：按年分组 / 单文件 / stdout / 空结果 rc=4 | `TestExport.test_export_dir_year_files_roundtrip`、`test_export_single_file_holds_all_events`、`test_export_stdout_pure_calendar`、`test_export_empty_workspace_rc4` |
+| L2 P6 导出 CRLF、75 octet 折行与转义读回一致 | `TestExport.test_ics_uses_crlf_and_folds_long_lines` |
 
 ## 8. 明确不做
 
