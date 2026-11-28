@@ -30,6 +30,9 @@
 | T-012 | todo | 外部审计提出的锁实现（持久 sidecar + 操作系统持锁）尚未合并与实机验证 | 先停旧写手，再按两套锁协议不可重叠的前提合并并实测 | 两个进程并发写同一 `alarms.json`，一成一败且无静默丢写 → 0 | 2026-11-16 | — |
 | T-013 | todo | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段 → 0 | 2026-11-16 | — |
 | T-016 | doing | L2 P1：事件一等公民模型、影子账本、旧窗口投影与迁移骨架 | 契约 `event.schema.json` + `rtc_events.py` + `rtc_migrate.py` + golden 比对；默认口径见 D-014 | 迁移前后五条命令（`status --json` / `history <date>` / `schedule <date>` / `due --now` / `report`）stdout+stderr+退出码 SHA256 逐字节 diff=0；现有测试一条不改全绿；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
+| T-017 | doing | P2：`.ics` 成为事件台账源真相，SQLite 索引可删可重建，旧数据可迁移可回滚 | `rtc_ics` 双向 RFC 5545 序列化/解析（一年一文件、折行转义、未知属性保留）；`rtc_calindex` rebuild 从零重建并与直扫逐条对账；`rtc_migrate --to-ics` dry-run/备份/幂等/rollback，旧文件不删（见 D-015） | `pwsh -File scripts/verify.ps1` → 0；索引与直扫 `.ics` 逐条一致；迁移跑两次产物不变；rollback 恢复备份态 | 2026-11-28 | — |
+| T-018 | todo | L2 P3：周期事件需要 RRULE 解析与 occurrence 展开，旧 `oneOff+expectFires+validFrom` 拼装表达不了跨月/跨年重复 | 引擎：自研 `code/rtc_rrule.py`（`parse_rrule` + `expand_occurrences`，时区感知、COUNT/UNTIL 全局预算、条数与扫描年数双硬上限）；接线：`code/rtc_occurrence.py` 把 `kind=recurring` 事件按当天窗口实例化进账本，去重键 `(uid, occurrence start)`，due/ack 只作用当前 occurrence | 引擎：`test_rrule.py` 九类边界全绿；接线：`test_occurrence.py` 覆盖跨天各响一次、重复 tick 不重响、ack 只确认当次、COUNT 用尽、UNTIL 边界、跨年、DST 秋切、无 events 时 golden 逐字节一致 | 2026-11-28 | — |
+| T-021 | doing | L2 P6：事件 / 旧窗口只读查询（日 / 年 / 区间 / 跨年 / 筛选）与 `.ics` 导出 | `rtc_query.py` + `list` / `show` / `export` 接线 + 筛选 / occurrence 实例展开 / 条数预算；导出复用 P2 `rtc_ics.py`；口径见 D-019 | 按日 / 年 / 区间与跨年两侧用例通过；空结果 rc=0、`--json` 纯 JSON；非法参数 rc=4、stdout 空；导出事件/周期/跨年/特殊字符读回一致；五条旧命令对 P1 基线 SHA256 diff=0；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
 
 ## 待裁决台账
 

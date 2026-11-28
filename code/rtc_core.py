@@ -38,6 +38,8 @@ import rtc_archive as archive
 import rtc_brief as brief
 import rtc_history as hist
 import rtc_metrics as metrics
+import rtc_occurrence as occurrence
+import rtc_query as query
 import rtc_recovery as recovery
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -1620,6 +1622,35 @@ def _carry_windows_from_previous(
     return windows
 
 
+def _drop_duplicate_event_windows(
+    old_windows: list[dict[str, Any]],
+    event_windows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """剔除与旧 routine 窗口同源重复的事件 occurrence。
+
+    迁移期旧 ``routines.json`` 窗口与投影事件账本并存，同一事项两边各排一条会被
+    响两次。去重键 =（旧 id / 别名, 日期, 起点时刻）：事件窗口的 ``label``
+    （= 事件 ``aliases[0]``）命中旧窗口 ``id`` / ``label``，且当天起点时刻相同，
+    就认定是同一件事——保留旧窗口，丢弃事件 occurrence。身份对不上的两条窗口
+    即使同时刻也不去重。
+    """
+    old_index: list[tuple[str, str, str]] = []
+    for w in old_windows:
+        start = str(w.get("start") or "")
+        old_index.append((str(w.get("id") or ""), str(w.get("label") or ""), start[:16]))
+
+    kept: list[dict[str, Any]] = []
+    for w in event_windows:
+        ident = {str(w.get("id") or ""), str(w.get("label") or "")}
+        start = str(w.get("start") or "")
+        duplicate = any(
+            (oid in ident or olabel in ident) and ostart == start[:16] for oid, olabel, ostart in old_index
+        )
+        if not duplicate:
+            kept.append(w)
+    return kept
+
+
 def _build_prebuilt_state(
     routine: dict[str, Any],
     target: date,
@@ -1631,6 +1662,10 @@ def _build_prebuilt_state(
     kind = plan_kind(target, routine)
     errors: list[str] = []
     fresh = [] if day_disabled(routine, kind) else build_windows(routine, target, kind, now, errors=errors)
+    event_windows = occurrence.occurrence_windows(
+        WORKSPACE, now.tzinfo or resolve_tz(routine), target, now, errors=errors
+    )
+    fresh += _drop_duplicate_event_windows(fresh, event_windows)
     windows = _carry_windows_from_previous(old, fresh)
     state = {
         "version": 1,
@@ -1808,6 +1843,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if day_disabled(routine, kind)
         else build_windows(routine, now.date(), kind, now, errors=plan_errors)
     )
+    event_windows = occurrence.occurrence_windows(WORKSPACE, tz, now.date(), now, errors=plan_errors)
+    event_windows = _drop_duplicate_event_windows(fresh, event_windows)
+    fresh += event_windows
 
     if old and old.get("planDate") == today:
         windows = carry_forward(old, fresh)
@@ -1871,7 +1909,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         for w in routine.get("alarmWindows") or []
         if not w.get("oneOff") and not str(w.get("id") or "").startswith("once-")
     )
-    if recurring == 0:
+    if recurring == 0 and not event_windows:
         print(
             "plan: 时刻表里只有一次性提醒，没有日常窗口——今天不会有日常提醒；改时刻表见 rules/routines.md",
             file=sys.stderr,
@@ -3539,6 +3577,33 @@ def main(argv: list[str] | None = None) -> int:
     ss = sub.add_parser("status")
     ss.add_argument("--json", action="store_true")
     ss.set_defaults(func=brief.cmd_status)
+
+    sl = sub.add_parser("list", help="L2 行程本查询：事件 + 旧窗口（只读）")
+    sl.add_argument("--date", help="YYYY-MM-DD，查这一天")
+    sl.add_argument("--year", help="YYYY，查这一年 1/1–12/31")
+    sl.add_argument("--from", dest="from_date", help="区间起点 YYYY-MM-DD（配 --to）")
+    sl.add_argument("--to", dest="to_date", help="区间终点 YYYY-MM-DD（配 --from）")
+    sl.add_argument("--q", help="关键词：标题/标识/owner/别名，大小写不敏感子串")
+    sl.add_argument("--kind", help="once / recurring")
+    sl.add_argument("--owner", help="self / other:<name>")
+    sl.add_argument("--json", action="store_true")
+    sl.set_defaults(func=query.cmd_list)
+
+    ssh = sub.add_parser("show", help="按 uid 或旧 id 看单条事件全字段")
+    ssh.add_argument("target", help="事件 uid，或影子账本别名表里的旧 id")
+    ssh.add_argument("--json", action="store_true")
+    ssh.set_defaults(func=query.cmd_show)
+
+    sexp = sub.add_parser("export", help="导出 RFC 5545 .ics（复用 P2 rtc_ics 序列化层）")
+    sexp.add_argument(
+        "--ics",
+        nargs="?",
+        const=None,
+        default=None,
+        metavar="目录或文件",
+        help="输出目录或 .ics 文件路径；不填写走 stdout",
+    )
+    sexp.set_defaults(func=query.cmd_export)
 
     sb = sub.add_parser("brief")
     sb.add_argument("--now")

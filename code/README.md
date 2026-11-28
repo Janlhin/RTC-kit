@@ -1,6 +1,6 @@
 # code — 确定性脚本
 
-这一层只放**不依赖模型**的代码。`rtc.py` 是入口，实现按职责分成五个模块 + 一个 Node 旁路：
+这一层只放**不依赖模型**的代码。`rtc.py` 是入口，实现按职责分成多个模块 + 一个 Node 旁路：
 
 | 文件 | 角色 | 依赖 |
 |---|---|---|
@@ -9,10 +9,15 @@
 | `rtc_archive.py` | 每日多盘 zip 备份、按天 git 归档 | 仅标准库 |
 | `rtc_metrics.py` | 指标账本：建表 / 同步 / 导出 / report | 仅标准库 |
 | `rtc_history.py` | 执行历史的唯一真相源：`state/history.db` 四表（windows / daily / checklist / events）、同步、事件、回填 | 仅标准库 |
+| `rtc_events.py` | L2 事件模型：旧窗口投影成一等公民 Event、双向别名表（P1 影子账本，P2 起 `.ics` 为准后转为只读缓存视图） | 仅标准库 |
+| `rtc_ics.py` | RFC 5545 iCalendar：旧当天状态只读导出；P2 双向层——`calendar/<YYYY>.ics` 序列化/解析、一年一文件、跨年交叉段 | 仅标准库 |
+| `rtc_calindex.py` | L2 事件 SQL 只读索引：`state/calendar-index.db`，`rebuild` 从全部 `.ics` 重建，与直扫逐条对账 | 仅标准库 |
+| `rtc_migrate.py` | 离线迁移工具：旧窗口 → 事件影子账本（P1）；`--to-ics` 迁到 `.ics` + 索引（P2，dry-run/备份/幂等/rollback） | 仅标准库 |
 | `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
-| `rtc_events.py` | L2 事件模型：影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名（P1；离线投影，不进 tick 热路径） | 仅标准库 |
-| `rtc_migrate.py` | L2 P1 迁移骨架：dry-run / 写前备份 / 幂等 / 回滚；离线工具，不进 tick 热路径 | 仅标准库 |
+| `rtc_query.py` | L2 P6 只读查询：事件 + 旧窗口合并视图，日期/年份/区间与关键词/类型/归属筛选；`recurring` 交 `rtc_rrule` 按区间展开 occurrence 实例（带 `ocid`），`show` 按事件定义返回，`export --ics` 走 P2 序列化层；不写状态、不进 tick 热路径 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
+| `rtc_rrule.py` | RFC 5545 RRULE 解析与 occurrence 展开引擎（纯确定性，不读写账本） | 仅标准库 |
+| `rtc_occurrence.py` | 事件账本 recurring 事件的当天实例化适配层：展开 occurrence、去重 `(uid, start)`，喂给既有 plan/due/ack 机器 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 
 为什么 `rtc.py` 只有几十行：`import rtc` 拿到的是 `rtc_core` 这个模块对象（`sys.modules` 别名），所以 `rtc_due.py` / `rtc_plan.py` 调 `rtc.main()`、以及测试里替换 `rtc.atomic_write` 这类动作全部照旧有效。**不要**把它改回 `from rtc_core import *`——那样会变成两个命名空间，替换失效。
@@ -34,6 +39,10 @@ python rtc.py --workspace <dir> schedule 2026-12-15      # 查那天的详细日
 python rtc.py --workspace <dir> schedule --month 2026-12 # 那个月的概览
 python rtc.py --workspace <dir> history  2026-12-15      # 查那天的执行结果
 python rtc.py --workspace <dir> history  --month 2026-12 # 那个月的结果汇总
+python rtc.py --workspace <dir> list --date 2026-12-15   # 那天的事件 + 旧窗口（只读合并视图）
+python rtc.py --workspace <dir> list --year 2026 --q 报告 --kind once --owner self
+python rtc.py --workspace <dir> show <uid 或旧 id>       # 单事件全字段（含别名/提醒策略/DDL/状态）
+python rtc.py --workspace <dir> export --ics <目录或文件> # RFC 5545 .ics 导出（复用 P2 rtc_ics；不给路径走 stdout）
 python rtc.py --workspace <dir> postpone travel --to 2026-12-16  # 把提醒挪到别的日子
 python rtc.py --workspace <dir> cancel   travel                # 取消一个安排
 python rtc.py --workspace <dir> complete travel --text "打完了"  # 完成 + 停用
