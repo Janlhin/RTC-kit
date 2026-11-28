@@ -10,6 +10,8 @@
 | `rtc_metrics.py` | 指标账本：建表 / 同步 / 导出 / report | 仅标准库 |
 | `rtc_history.py` | 执行历史的唯一真相源：`state/history.db` 四表（windows / daily / checklist / events）、同步、事件、回填 | 仅标准库 |
 | `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
+| `rtc_events.py` | L2 事件模型：影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名（P1；离线投影，不进 tick 热路径） | 仅标准库 |
+| `rtc_migrate.py` | L2 P1 迁移骨架：dry-run / 写前备份 / 幂等 / 回滚；离线工具，不进 tick 热路径 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 

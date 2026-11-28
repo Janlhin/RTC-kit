@@ -126,3 +126,14 @@
 - **被否决**：① 运行时引入第三方时区库（如 `backports.zoneinfo` 或 `pendulum`）——违反「tick 路径零第三方依赖」；② 直接删掉 `tzOffset`——存量配置会集体报错，违背兼容要求；③ 把所有内部瞬时都锁成 UTC 存储——周期窗口要保留本地墙钟，锁瞬时会让夏令时下的本地时刻漂移。
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
+
+## D-014 L2 P1 事件模型先落派生影子账本，旧 JSON 真相源不动
+
+- **日期**：2026-11-28
+- **决策**：L2 行程本第一段（P1）先建 Event 一等公民契约与离线投影，影子账本 `state/events.json` 由旧 `routines.json` / `alarms.json` 投影生成；旧 schema 与旧命令面原样保留，P2 起 `.ics` 才成为源真相，本 JSON 转只读缓存。
+- **背景**：L2 要把一次性 / 周期 / 倒计时 / DDL 统一成带稳定 `uid`、`kind`、RRULE、`owner`、`deadline`、`status` 的事件一等公民。但旧 `routine` / `alarm-state` schema 被 373 条回归与旧命令逐字节口径钉死，直接改旧 schema 会把行为改动与模型迁移混在一起。
+- **被采纳**：① 新 `contract/event.schema.json` 与旧两份 schema 并存，旧 schema 一字不动；② `rtc_events.py` 纯标准库做影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名；`rtc_migrate.py` 是离线迁移骨架，默认 dry-run、写前自动备份、幂等跳过、`--rollback` 可恢复；③ 默认口径：`owner` 默认 `self`、替别人记 `other:<name>`；`uid` = UUIDv4 + `@rtc-kit`，旧 id / ocid 进 `aliases`；`rrule` 直接存 RFC 5545 标准字符串，不造自研 DSL；④ 事件栈不进 `plan` / `due` / `ack` tick 热路径，静态断言测试守住。
+- **被否决**：① 直接改旧 `alarm-state` / `routine` schema 承载事件字段——旧命令面与既有测试会被波及，违背「一条不改全绿」；② P1 就写 `.ics` 真相源——日历序列化是 P2 的事，提前做会把两套真相源缝在一起；③ 事件模块被 `due` / `plan` 直接 import——tick 路径变重，违反确定性与零第三方依赖边界。
+- **影响**：`contract/event.schema.json`、`code/rtc_events.py`、`code/rtc_migrate.py`、`code/tests/test_events_p1.py`、`docs/architecture.md`、`docs/behavior-contract.md` §5c、`contract/README.md`、`code/README.md`、`TASKS.md` T-016。
+- **复审条件**：P2 切 `.ics` 真相源时复核影子缓存的重建与删除路径；P5 接入提醒策略时复核 `reminderPolicy` 形状；`owner` 词汇表收紧或校验规则另提案；`holiday` 类型不进 RRULE，留外挂日期类型表。
+- **审计修订（2026-11-28，一致性审计 A2–A7）**：① `UNTIL` 改 date-time（当日 23:59:59 + 偏移），不用 date-only；② 契约补齐 `.ics` 往返七字段 `summary` / `categories` / `tzid` / `dtstamp` / `unknown` / `rev` / `crossYear`，`rev` 每次写操作 +1、落 `X-RTC-REV` 与索引；③ `end` 缺省与 `start` 同刻（零时长）；④ `createdAt` / `updatedAt` / `source` 不随 `.ics` 走；⑤ 新旧两套 UID 算法 P1 不收敛，旧 `id-<开始时间>` 回退算法仅兼容读取，P2 统一新 `uid`。口径明细见 `docs/behavior-contract.md` §5c。

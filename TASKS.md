@@ -29,6 +29,7 @@
 | T-011 | todo | 备份方案只差恢复文档：没有 `docs/RESTORE.md`，也没真删过 `alarms.json` 演练 | 写恢复文档并做一次删除恢复演练 | 删除 `state/alarms.json` 后按文档恢复，`rtc.py status` 与备份时刻一致 → 0 | 2026-11-16 | — |
 | T-012 | todo | 外部审计提出的锁实现（持久 sidecar + 操作系统持锁）尚未合并与实机验证 | 先停旧写手，再按两套锁协议不可重叠的前提合并并实测 | 两个进程并发写同一 `alarms.json`，一成一败且无静默丢写 → 0 | 2026-11-16 | — |
 | T-013 | todo | `status` 不显示备份状态，备份失败只有当天一行 stdout | 增加「上次成功 / 目标盘 / 错误」字段 | `python code/rtc.py --workspace <ws> status --json` 含 `backup` 字段 → 0 | 2026-11-16 | — |
+| T-016 | doing | L2 P1：事件一等公民模型、影子账本、旧窗口投影与迁移骨架 | 契约 `event.schema.json` + `rtc_events.py` + `rtc_migrate.py` + golden 比对；默认口径见 D-014 | 迁移前后五条命令（`status --json` / `history <date>` / `schedule <date>` / `due --now` / `report`）stdout+stderr+退出码 SHA256 逐字节 diff=0；现有测试一条不改全绿；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
 
 ## 待裁决台账
 
