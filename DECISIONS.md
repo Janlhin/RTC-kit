@@ -147,12 +147,14 @@
 - **影响**：`code/rtc_ics.py` 双向序列化/解析层、`code/rtc_calindex.py`、`code/rtc_migrate.py --to-ics`、`docs/architecture.md` §5、`docs/behavior-contract.md` §3.2、测试 `test_ics_p2.py` / `test_calindex.py` / `test_migrate_ics.py`。
 - **复审条件**：P3 RRULE 展开、P5 事件写路径接入后，复核迁移期双写口径；若后续做系统日历同步（NFR-3.6），单向导出副本另立决策，不回流改写 `.ics`。
 
-## D-019 L2 P6 查询：事件 + 旧窗口只读合并视图，周期事件先按有效期重叠归属
+## D-016 周期规则存 RFC 5545 RRULE 字符串，解析/展开引擎自研，不造 DSL、不引 dateutil
 
 - **日期**：2026-11-28
-- **决策**：P6 先交付只读查询面 `list` / `show`，事件（P1 影子账本；P2 起 `.ics` 为准）与旧窗口（`history.db`）两条来源并排呈现、用 `source` 列区分；周期事件本阶段按「规则有效期与查询区间重叠」做归属，不逐条展开 occurrence；`.ics` 导出复用 P2 的 `rtc_ics.py` 序列化层，不自写第二份。
-- **背景**：L2 验收要求任意日期 / 年份 / 跨年可查、关键词与类型 / 归属筛选、`.ics` 导出。但 occurrence 展开引擎在 P3、`.ics` 序列化在 P2，P6 不能等它们拍板；旧命令输出又被既有回归钉死，查询层不能改写旧窗口读路径。
-- **被采纳**：① 新区块独立模块 `rtc_query.py`，纯标准库、不被 tick 热路径 import；② 区间三选一（`--date` / `--year` / `--from`+`--to`），筛选 `--q`（大小写不敏感子串、AND）/ `--kind once|recurring` / `--owner self|other:<name>`，口径与 #112 对齐、待收敛；③ 跨年归属：once 按 start 日期落年；recurring 按有效期重叠（start ≤ 区间末、UNTIL ≥ 区间始），无 UNTIL 跨年两年都列出；④ 先按日期 / 年份过滤再聚合，单次返回上限 5000 条，超限退出 4 提示收窄范围；⑤ 空结果退出 0，`--json` 纯 JSON 走 stdout，诊断走 stderr；⑥ 旧窗口行 `type` 补进 history 查询 SELECT（展示面不变），映射 once/recurring。
-- **被否决**：① P6 自己写一份 RRULE occurrence 展开——引擎归 P3，重复实现会在合流时打架；② P6 自写 `.ics` 序列化——复用 P2 模块，避免两套序列化口径；③ 合并两条来源时按别名去重——影子账本与执行历史是两个视角，并列展示更不容易让用户误以为旧窗口被事件取代；④ 把 `--q` 分词或接 LLM 兜底——L2 保持确定性，不支持的表达明确无命中。
-- **影响**：`code/rtc_query.py`、`code/rtc_core.py`（新子命令接线）、`code/rtc_history.py`（SELECT 补 `type`）、`code/tests/test_query_p6.py`、`docs/behavior-contract.md` §5d、`code/README.md`、`TASKS.md` T-021。
-- **复审条件**：P3 引擎合入后把 occurrence 枚举接到 `list` 实例级过滤与条数预算（替换定义级重叠匹配）；#112 收敛后合并事件侧与旧命令侧的 `--q` / `--kind` 匹配函数；事件 `title` / 标签字段由 P5 写入侧落地后扩 `--q` 检索池。
+- **决策**：L2 事件的周期规则直接存 RFC 5545 RRULE 字符串；解析与 occurrence 展开在 `code/rtc_rrule.py` 自研，仅用标准库 `datetime` / `zoneinfo` / `calendar`；不另造自研 DSL，不引入 dateutil。
+- **背景**：FR-1.4 要求天/周/月/年重复与 RRULE 表达。候选路线有三条：① 存自研 DSL（结构化字段拼中文/私有串）；② 引入 dateutil 做解析展开；③ 存标准 RRULE 字符串 + 自研引擎覆盖所需子集。
+- **被采纳**：③。RRULE 是 1998 年开放标准，与 `.ics` 同源同构，跨代可读；本阶段所需子集（`FREQ` 天/周/月/年 + `INTERVAL` / `COUNT` / `UNTIL` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `WKST`）自研成本可控，闰年、月末、序号周几、`COUNT` / `UNTIL` 全局预算、跨年、DST 春秋切等边界由成组测试锁定；符合 AGENTS「标准库优先、先搜寻后自研」的约定，tick 路径保持零第三方依赖。
+- **被否决**：① 自研 DSL——与 `.ics` 互导要再写一层翻译，两套语义容易漂移，也背离「`.ics` 是源真相」的方向；② dateutil——成熟但带第三方依赖，其 RRULE 实现覆盖大量本阶段不需要的键，且与标准库 `zoneinfo` 的 DST 口径需要再对齐；当前子集自研边界清晰，不值得为它背依赖。
+- **影响**：新增 `code/rtc_rrule.py`、`code/tests/test_rrule.py`；`docs/behavior-contract.md` §7.1。occurrence 接入 plan / due / ack 的口径（`code/rtc_occurrence.py` 适配层、去重键、兼容红线）见 §7.2，不再单独立编号决策。
+- **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
+
+## D-019 L2 P6 查询：事件 + 旧窗口只读合并视图，周期事件按 occurrence 实例展开

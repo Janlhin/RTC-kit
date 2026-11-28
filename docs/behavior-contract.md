@@ -206,6 +206,70 @@ python rtc.py --workspace <dir> ack \
 | L2 P6 `.ics` 导出：按年分组 / 单文件 / stdout / 空结果 rc=4 | `TestExport.test_export_dir_year_files_roundtrip`、`test_export_single_file_holds_all_events`、`test_export_stdout_pure_calendar`、`test_export_empty_workspace_rc4` |
 | L2 P6 导出 CRLF、75 octet 折行与转义读回一致 | `TestExport.test_ics_uses_crlf_and_folds_long_lines` |
 
+## 7.1 RRULE 周期规则语义（`code/rtc_rrule.py`）
+
+纯解析 / 展开引擎：输入 RRULE 字符串与 DTSTART，输出 occurrence 列表。引擎本身不读写账本；接入 plan / due / ack 的口径见 §7.2。
+
+### 支持的键
+
+| 键 | 取值 | 语义 |
+|---|---|---|
+| `FREQ` | `DAILY` / `WEEKLY` / `MONTHLY` / `YEARLY` | 必填，重复粒度 |
+| `INTERVAL` | 正整数 | 间隔，默认 `1` |
+| `COUNT` | 正整数 | 全局 occurrence 预算；与 `UNTIL` 互斥 |
+| `UNTIL` | `YYYYMMDDTHHMMSSZ`（UTC）或 `YYYYMMDDTHHMMSS`（本地浮动） | 截止边界，**含边界**；与 `COUNT` 互斥 |
+| `BYDAY` | `MO/TU/WE/TH/FR/SA/SU`，可带序号 `1MO` / `-1FR` | 序号前缀仅 `MONTHLY` / `YEARLY` 有效 |
+| `BYMONTHDAY` | `1..31` 或负数（`-1` = 当月最后一天） | 月内日号过滤 |
+| `BYMONTH` | `1..12` | 月份过滤 |
+| `WKST` | `MO..SU` | 周起点，默认 `MO`；影响 `WEEKLY` + `INTERVAL>1` 的跳周锚点 |
+
+### 展开规则
+
+- 窗口为半开区间 `[window_from, window_to)`；返回列表按时间升序，每个 occurrence 沿用 `dtstart` 的 `tzinfo` 与时刻。
+- `COUNT` / `UNTIL` 是**全局预算**：从 `dtstart` 起数满 `COUNT` 条或越过 `UNTIL` 即停，不会因为查询窗口只截一段就重新计数。
+- 时区感知：`dtstart` 带时区时，每个 occurrence 保留同一 `tzinfo`；跨 DST 春切 / 秋切不漂移、不重复、不跳过。
+- 闰年 `2/29`：平年直接跳过，**不挪到 3/1**；`BYMONTHDAY=-1` 取当月最后一天；无效日（`2/30`、`4/31` 等）跳过该次。
+- 序号 `BYDAY`：`MONTHLY` / `YEARLY` 下按「当月第 n 个周几」解释，负号从尾数；裸周几在 `DAILY` / `WEEKLY` 下做星期过滤。
+
+### 错误与防御
+
+- 非法字符串、未知键、重复键、数值越界、`COUNT` 与 `UNTIL` 同给、时区口径不一致 → 抛 `RruleError`，消息可读；**不静默返回空列表**。
+- 双硬上限：条数 `MAX_OCCURRENCES`、扫描年数 `MAX_SCAN_YEARS`；超限抛 `ExpansionLimit`，防止规则写错导致死循环。
+
+### 明确不支持（本阶段）
+
+`BYSETPOS`、`BYHOUR` / `BYMINUTE` / `BYSECOND`、`BYWEEKNO`、`BYYEARDAY`、`RDATE` / `EXRULE`。引擎零第三方依赖，只用标准库 `datetime` / `zoneinfo` / `calendar`，不引入 dateutil。
+
+## 7.2 occurrence 实例化与去重（`code/rtc_occurrence.py`）
+
+P3 下半段把影子事件账本里 `kind=recurring` 的事件实例化进当天账本，供既有 plan / due / ack 机器判定；`once` 事件仍走旧 `routines.json` 链路，本模块不投影。
+
+### 接入口径
+
+- 适配层唯一入口 `occurrence_windows(workspace, tz, day, now, errors=...)`；`rtc_core` 只调本模块，不直接 import `rtc_events` / `rtc_rrule`（热路径守卫口径见 P1 测试 `TestHotPathImportGuard`）。
+- 只展开当天半开区间 `[00:00, 24:00)` 内的 occurrence，不无限展开；`COUNT` / `UNTIL` 沿用引擎全局预算，不从当天重新计数。
+- 事件账本内部去重键 = `(uid, occurrence start)`；同一事件同一天多条实例按起点区分。
+- 跨源去重（迁移期旧 `routines.json` 窗口与投影事件并存）：在 `rtc_core` 装配层按 `(旧 id / 别名, 日期, 起点时刻)` 比对；事件窗口 `label`（= 事件 `aliases[0]`）命中旧窗口 `id` / `label` 且当天起点时刻相同，认定是同一事项——保留旧窗口、丢弃该事件 occurrence。身份对不上的两条窗口即使同时刻也不去重。
+- 账本窗口身份：`id` = uid 去掉 `@rtc-kit` 后缀的 slug；`ocid` = `<slug>@YYYY-MM-DD`；确认 / 归档走既有 ocid 机器。
+- 状态过滤：仅 `scheduled` / `ringing` 实例化；`done` / `cancelled` / `missed` 跳过。
+- 时区：事件 `start` 自带偏移则沿用；朴素时刻挂工作区时区。产出 `start` / `end` 一律带偏移，不写裸 naive。
+- 单条事件解析 / 展开失败只跳过它自己并记一条诊断，不拖垮整天计划；账本缺失 / 损坏 / 空信封 → 返回 `[]`。
+
+### 语义
+
+- due 命中按 occurrence 起点所在窗口判定；`expectFires=1`，重复 tick 达上限后静默，不重复响。
+- ack 只确认当前这一条 occurrence；次日重新生成的新 occurrence 是 `pending`，昨天的确认不带过去。
+- 跨年照常出现，跨年查询不重复不丢。
+
+### 兼容红线
+
+工作区没有 `events.json`（或空信封）时，`plan / due / ack / status / history / schedule / report` 输出与基线逐字节一致；既有测试一条不改全绿。
+
+### 已知缺口
+
+- occurrence 级取消 / 改期（单条 occurrence 推迟、取消）未接；旧 routine 与事件账本的别名映射全量对齐、以及读切换阶段的跨源合并，留待后续阶段；当前跨源去重只认 `aliases[0]` ↔ 旧窗口 `id` / `label` 这一条链。
+- 带固定偏移的事件时刻不跟随工作区 ZoneInfo 的 DST 切换；朴素时刻挂 ZoneInfo 的路径才跟随秋切 / 春切。
+
 ## 8. 明确不做
 
 - Rules Engine 框架、进程内 Scheduler、宿主侧故障注入、BDD 运行框架
