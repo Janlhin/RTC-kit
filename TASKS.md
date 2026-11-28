@@ -35,6 +35,7 @@
 | T-019 | done | P4 上半段：把天 / 周 / 月 / 年与每 N 周期表达解析为 RFC 5545 RRULE + DTSTART | `rtc_nlu` 增加 recurring 分支，`recurring` 开关门控；解析层不接写路径 | 五类必测 + 三类每 N + 三类拒绝 + 跨年 + 一次性回归全绿；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | 2026-11-28 |
 | T-020 | doing | L2 P5：事件级 CRUD（create/edit/complete/cancel/undo）+ owner/deadline/reminderPolicy | `rtc_event_cmd.py` 事件写命令层；摘要守卫 + 排他锁；审计 + history 留痕；默认口径见 D-018 | create→edit→complete→cancel→undo 全链路用例；同 uid 幂等；跨日 undo 拒绝；无痕迹 undo 失败；并发 Conflict 不覆盖；旧五条命令逐字节 diff=0；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
 | T-021 | doing | P4 下半段：把 NLU 周期 / 一次性短语接到 `create --when`，落账 `start/end/rrule`；occurrence 展开联动留 P3 | `rtc_event_cmd.py` 接 `rtc_nlu`；`--when` 与 `--start/--end/--rrule` 互斥；不支持短语沿用 rc=2；映射口径见 D-018 ⑩ | 五类周期 + 三类每 N + 四句一次性 create 落账字段正确；冲突参数报错；不支持短语 rc=2；`pwsh -File scripts/verify.ps1` → 0 | 2026-11-28 | — |
+| T-022 | todo | 周期事件 occurrence 展开：当前 `create --when` 只落账 `rrule` + 首个 `start`，`plan` / `due` 尚不展开后续 occurrence | P3 展开引擎接线：按 RRULE 生成命中槽位，接 plan/due/ack 幂等键；本 lane 不展开、不写 `.ics` | 一条 `FREQ=WEEKLY;BYDAY=WE` 事件在一周内 plan 出对应槽位并可重复响铃；旧五条命令逐字节 diff=0 | 2026-11-28 | — |
 
 ## 待裁决台账
 

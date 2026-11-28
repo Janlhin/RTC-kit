@@ -142,12 +142,12 @@ python rtc.py --workspace <dir> ack \
 
 ## 5d. L2 事件 CRUD 与提醒策略契约（P5）
 
-> 状态：P5 落地事件级写命令；occurrence 粒度完成 / 平移留 P3，`.ics` 真相源留 P2，自然语言短语解析留 P4。本章节命令面在后续 phase 只增不改旧语义。
+> 状态：P5 落地事件级写命令；occurrence 粒度完成 / 平移留 P3，`.ics` 真相源留 P2，自然语言短语解析经 P4 `create --when` 接入。本章节命令面在后续 phase 只增不改旧语义。
 
 ### 5d.1 命令面（事件级，结构化参数）
 
-- `create`：新建一条事件。参数 `--title`（必填）、`--start` / `--end`（带偏移 ISO 8601）、`--rrule`（RFC 5545 字符串，省略 = 一次性）、`--owner`（默认 `self`，替别人记 `other:<name>`）、`--deadline`（`YYYY-MM-DD`，可空）、`--pre-remind N`、`--ddl-ladder N`（可重复）、`--snooze N`、`--uid`（幂等重放用，缺省自动生成）、`--now`。校验不通过退出 `3`；同 uid 已存在则幂等返回 `0`，不产生第二条、不涨审计 / history。
-- 解析器映射口径（P4 接 create 时）：解析器输出 `dtstart`（tz-aware datetime），落账为 `event.start = parsed.dtstart.isoformat()`；`end` 按窗口宽度 / 入参派生。`dtstart` 与契约字段 `start` 是命名差异、不是语义冲突；契约不迁就解析器改名，解析器也不反改影子账本字段。
+- `create`：新建一条事件。两条参数路径二选一：① 结构化参数 `--start` / `--end`（带偏移 ISO 8601）、`--rrule`（RFC 5545 字符串，省略 = 一次性）；② `--when "<中文短语>"`（交 `rtc_nlu` 确定性解析，零模型）。两条路径同时给退出 `3`，不静默取其一。其余参数：`--title`（必填）、`--owner`（默认 `self`，替别人记 `other:<name>`）、`--deadline`（`YYYY-MM-DD`，可空）、`--pre-remind N`、`--ddl-ladder N`（可重复）、`--snooze N`、`--uid`（幂等重放用，缺省自动生成）、`--now`。校验不通过退出 `3`；同 uid 已存在则幂等返回 `0`，不产生第二条、不涨审计 / history。
+- 解析器映射口径（P4 接 create）：解析器输出 `dtstart`（tz-aware datetime），落账为 `event.start = parsed.dtstart.isoformat()`；`end` 按默认窗口宽度（4 分钟）派生，结构化路径仍以入参为准。`dtstart` 与契约字段 `start` 是命名差异、不是语义冲突；契约不迁就解析器改名，解析器也不反改影子账本字段。不支持 / 词表外短语沿用解析器既有出口，退出 `2`，不接 LLM、不偷偷降级。
 - `edit`：按 `--uid` 或 `--alias`（旧 id / 别名）局部更新；只改给了的参数，未给的字段保持原样。改完整包过事件契约；找不到事件退出 `4`。
 - `complete`：`--uid` / `--alias` 把事件标 `done`；已是 `done` 时幂等返回 `0`，不重复留痕。occurrence 粒度的「只完成这一次」留 P3 接线。
 - `cancel`：窗口级取消行为一字不变；`--uid` / `--alias` 取消事件，`done` / `missed` 终态不可再取消（退出 `4`）。`--undo` 撤销当天的事件取消（见 5d.3）。
@@ -177,7 +177,7 @@ python rtc.py --workspace <dir> ack \
 
 - 本阶段不写 `.ics`；`events.json` 仍是影子账本，`create` 落库时标注「待 P2 接管」。
 - 不做 occurrence 展开；`recurring` 事件的 `complete` / `cancel` 只改事件级状态，后续 occurrence 不受影响（P3 接线后再分粒度）。
-- 不接 NLU 短语；命令面只收结构化参数，自然语言解析在 P4。
+- NLU 短语经 `create --when` 接入（P4）；事件命令层不做 occurrence 展开，`recurring` 事件的 plan/due 联动待 P3 接线。
 - 不做 year / range 查询与 `.ics` 导出（P6）。
 
 ## 6. 三条硬规矩（跨类型）
@@ -236,7 +236,8 @@ python rtc.py --workspace <dir> ack \
 
 ## 8b. NLU 前端解析（L0/L1，`rtc_nlu`）
 
-- 中文时间短语解析是**交互前端翻译层**：只挂在 `rtc_once.py` 入口；`plan` / `due` /
+- 中文时间短语解析是**交互前端翻译层**：挂在 `rtc_once.py` 入口与事件写命令层
+  `rtc_event_cmd.py`（`create --when`，函数内惰性 import）；`plan` / `due` /
   tick 判定链路与 `rtc_core` 不得 import 它（静态 AST + 运行时 `sys.modules` 双重断言）。
 - 解析确定性由注入的 `now`（tz-aware datetime）保证；模块内部不读系统时间兜底，
   同输入同 `now` 结果一致。时区走 IANA `tzinfo`，不写死固定偏移。
@@ -244,9 +245,9 @@ python rtc.py --workspace <dir> ack \
   RFC 5545 `rrule` + 首个 occurrence 的 `dtstart`；需要工作日历 / BYSETPOS /
   相对月末 / 第 N 周定位的形状（每月最后一个工作日、每年第 3 周的周三、工作日、
   节假日、隔周）契约承载不了：明确报错「现有契约不支持：<原因>」，不硬塞、不偷偷降级。
-- 周期写路径尚未接入：`recurring` 开关默认关闭，入口一次性契约下周期短语仍拒绝；
-  落库与 occurrence 展开由 P3 / P5 接线。
-- 拒绝出口复用 `rtc_once.py` 既有失败路径，退出码 **2**；不新增退出码值。
+- 落库接线：事件命令层以 `recurring=True` 解析并落账 `start` / `end` / `rrule`；
+  `rtc_once.py` 一次性入口仍保持开关默认关闭。occurrence 展开联动由 P3 接线。
+- 拒绝出口复用既有失败路径，退出码 **2**；不新增退出码值。
 - 支持 / 不支持清单与歧义口径见 [nlu-l0-l1.md](nlu-l0-l1.md)。
 
 ## 9. 这份文档怎么维护

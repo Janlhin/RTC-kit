@@ -6,10 +6,12 @@
 
 ## 1. 边界与依赖纪律
 
-- 解析器在 `code/rtc_nlu.py`，只被交互入口 `code/rtc_once.py` import。
+- 解析器在 `code/rtc_nlu.py`，只被交互入口 `code/rtc_once.py` 与事件写命令层
+  `code/rtc_event_cmd.py`（`create --when`）import；事件命令层用函数内惰性 import，
+  模块加载期不拉解析器。
 - `rtc_core`、`rtc_plan`、`rtc_due` 及判定链路模块**不得**依赖解析器；该约束有
   双重机器判据（见 `code/tests/test_nlu.py`）：
-  - 静态 AST 扫描：除 `rtc_once.py` 外，任何 `code/*.py` 都不允许 import `rtc_nlu`；
+  - 静态 AST 扫描：除 `rtc_once.py` / `rtc_event_cmd.py` 外，任何 `code/*.py` 都不允许 import `rtc_nlu`；
   - 运行时子进程：全新解释器加载核心判定链，`sys.modules` 里不得出现 `rtc_nlu`。
 - 解析器反向也不依赖核心模块，前端翻译层可独立单测。
 
@@ -65,8 +67,9 @@
 | 每 N 周期 | 每3天、每2周、每4个月 | `FREQ=DAILY;INTERVAL=3` / `FREQ=WEEKLY;INTERVAL=2` / `FREQ=MONTHLY;INTERVAL=4` | 同基础频率口径；`INTERVAL=1` 省略 |
 
 - 周期表达缺时刻默认 **09:00**；`rrule` 直接存 RFC 5545 字符串，不自造 DSL。
-- **开关默认关闭**（`recurring=False`）：入口仍是一次性契约，周期短语按既有契约
-  拒绝；周期事件的落库与 occurrence 展开由 P3 / P5 接线，本层只产出解析结构。
+- **开关默认关闭**（`recurring=False`）：`rtc_once.py` 一次性入口仍是既有契约，
+  周期短语按既有契约拒绝；事件命令层 `create --when` 以 `recurring=True` 解析，
+  落库映射见行为契约 §5d.1；occurrence 展开仍由 P3 接线。
 
 ## 4. 不支持清单（明确拒绝，不偷偷降级）
 
@@ -100,8 +103,8 @@ stderr 给出「现有契约不支持：<原因>」，**不**硬塞进某个单�
 
 ## 6. 已知边界（本轮不做，登记进 TASKS 待补）
 
-- 周期写路径与 occurrence 展开：本层只产出 `rrule` + `dtstart`；落库、按 occurrence
-  走 plan/due/ack 由 P3 / P5 接线，入口默认仍只登记一次性事件。
+- 周期写路径：`create --when` 已把解析结构落进影子账本（`start` / `end` / `rrule`）；
+  按 occurrence 走 plan/due/ack 的展开联动仍由 P3 接线，本层不产出展开实例。
 - 剩余周期形状：工作日历、BYSETPOS、相对月末、第 N 周定位、隔周 / 每两周，见 §4（T-014）。
 - 裸周几 / 月锚点缺时刻时的默认 09:00：后续可让入口向用户确认，而非固定默认（T-015）。
 - 春切空档 / 秋切重复的歧义本地时间：按 `zoneinfo` 默认 `fold=0` 解析，见
