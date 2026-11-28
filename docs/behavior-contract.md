@@ -179,6 +179,41 @@ python rtc.py --workspace <dir> ack \
 | 迁移前后五条旧命令逐字节一致 | `TestGoldenRegression.test_five_commands_byte_identical_after_migration` |
 | tick 热路径不 import 事件栈 | `TestHotPathImportGuard` |
 
+## 7.1 RRULE 周期规则语义（`code/rtc_rrule.py`）
+
+P3 上半段只落地纯解析 / 展开引擎：输入 RRULE 字符串与 DTSTART，输出 occurrence 列表。
+本阶段**不接** plan / due / ack，不碰存储层与 NLU；occurrence 接入主链路是后续 PR 的事。
+
+### 支持的键
+
+| 键 | 取值 | 语义 |
+|---|---|---|
+| `FREQ` | `DAILY` / `WEEKLY` / `MONTHLY` / `YEARLY` | 必填，重复粒度 |
+| `INTERVAL` | 正整数 | 间隔，默认 `1` |
+| `COUNT` | 正整数 | 全局 occurrence 预算；与 `UNTIL` 互斥 |
+| `UNTIL` | `YYYYMMDDTHHMMSSZ`（UTC）或 `YYYYMMDDTHHMMSS`（本地浮动） | 截止边界，**含边界**；与 `COUNT` 互斥 |
+| `BYDAY` | `MO/TU/WE/TH/FR/SA/SU`，可带序号 `1MO` / `-1FR` | 序号前缀仅 `MONTHLY` / `YEARLY` 有效 |
+| `BYMONTHDAY` | `1..31` 或负数（`-1` = 当月最后一天） | 月内日号过滤 |
+| `BYMONTH` | `1..12` | 月份过滤 |
+| `WKST` | `MO..SU` | 周起点，默认 `MO`；影响 `WEEKLY` + `INTERVAL>1` 的跳周锚点 |
+
+### 展开规则
+
+- 窗口为半开区间 `[window_from, window_to)`；返回列表按时间升序，每个 occurrence 沿用 `dtstart` 的 `tzinfo` 与时刻。
+- `COUNT` / `UNTIL` 是**全局预算**：从 `dtstart` 起数满 `COUNT` 条或越过 `UNTIL` 即停，不会因为查询窗口只截一段就重新计数。
+- 时区感知：`dtstart` 带时区时，每个 occurrence 保留同一 `tzinfo`；跨 DST 春切 / 秋切不漂移、不重复、不跳过。
+- 闰年 `2/29`：平年直接跳过，**不挪到 3/1**；`BYMONTHDAY=-1` 取当月最后一天；无效日（`2/30`、`4/31` 等）跳过该次。
+- 序号 `BYDAY`：`MONTHLY` / `YEARLY` 下按「当月第 n 个周几」解释，负号从尾数；裸周几在 `DAILY` / `WEEKLY` 下做星期过滤。
+
+### 错误与防御
+
+- 非法字符串、未知键、重复键、数值越界、`COUNT` 与 `UNTIL` 同给、时区口径不一致 → 抛 `RruleError`，消息可读；**不静默返回空列表**。
+- 双硬上限：条数 `MAX_OCCURRENCES`、扫描年数 `MAX_SCAN_YEARS`；超限抛 `ExpansionLimit`，防止规则写错导致死循环。
+
+### 明确不支持（本阶段）
+
+`BYSETPOS`、`BYHOUR` / `BYMINUTE` / `BYSECOND`、`BYWEEKNO`、`BYYEARDAY`、`RDATE` / `EXRULE`。引擎零第三方依赖，只用标准库 `datetime` / `zoneinfo` / `calendar`，不引入 dateutil。
+
 ## 8. 明确不做
 
 - Rules Engine 框架、进程内 Scheduler、宿主侧故障注入、BDD 运行框架
