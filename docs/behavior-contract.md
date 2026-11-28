@@ -193,6 +193,24 @@ python rtc.py --workspace <dir> ack \
 - 不接 NLU 短语；命令面只收结构化参数，自然语言解析在 P4。
 - 不做 year / range 查询与 `.ics` 导出（P6）。
 
+## 5d. L2 P6 查询契约（`list` / `show` / `export`）
+
+> 只读视图：不写任何状态文件，不接 plan/due/ack 判定。事件来源是 P1 影子账本，旧窗口来源沿用 `history.db` 既有读路径。
+
+- 区间三选一（互斥）：`--date YYYY-MM-DD` / `--year YYYY` / `--from A --to B`；缺区间、给两种区间、日期非法或 `--from` 晚于 `--to` → 退出 `4`，stdout 为空，诊断走 stderr。
+- 筛选（多条件 AND）：`--q <关键词>` 大小写不敏感子串匹配——事件检索 uid / owner / 别名 / 来源 routineId / 前向兼容标题字段，旧窗口检索 window_id / label / missed；中文按原字符、不分词。`--kind once|recurring` 精确匹配；`--owner self|other:<name>` 精确匹配。非法取值 → 退出 `4`。
+- 实例展开规则：`once` 按 `start` 日期落区间，出一条实例；`recurring` 交 P3 `rtc_rrule.expand_occurrences` 按区间半开窗口逐条展开，每条实例带 occurrence 起点、终点与 `ocid`（`<uid>@<YYYY-MM-DD>`）；跨年周期事件在两个年份的查询里各自出现对应实例，不漏不重。`COUNT` / `UNTIL` 沿用引擎全局预算；单条事件解析 / 展开失败只跳过它自己并往 stderr 记一条诊断。
+- 来源列：`source=event`（影子账本事件）/ `source=window`（旧窗口执行行）；同一底层窗口两条来源并列展示、互不覆盖，不做去重。
+- 空结果退出 `0`（空数组），不当错误；`--json` 纯 JSON 到 stdout，诊断只走 stderr。
+- `show <uid|旧id>`：先按 uid 命中，未中再查别名表；按**事件定义**返回，不展开 occurrence；找不到退出 `4`、stdout 为空。
+- 性能：筛选在事件定义层做，命中后再展开实例；单次查询实例条数预算 `2000`，超限退出 `4` 并提示收窄范围，不卡死、不静默截断；引擎侧另有 `MAX_OCCURRENCES` / `MAX_SCAN_YEARS` 双硬上限兜底死循环。
+- `export --ics`：序列化 / 折行 / 转义 / 跨年分组全部复用 P2 `rtc_ics.py`，命令层只做路径路由；不给路径整份日历走 stdout，`.ics` 结尾写单文件，其余按目录落 `<YYYY>.ics`；无可导出事件退出 `4`。
+- 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 在无 `events.json` 的工作区上与 P1 基线逐字节一致（SHA256 diff=0）。
+
+### 5d.1 与 #112 的筛选语义对齐
+
+`list` 的筛选语义与 #112（`history` / `schedule` / `stats` 的 `--q` / `--kind`）对齐：关键词大小写不敏感子串、多条件 AND；两边实现待 #112 收敛后合并到同一匹配函数。P6 事件侧 `--kind` 取值为事件枚举 `once` / `recurring`；旧窗口行由 `type` 映射（`oneoff` / `appointment` → `once`，其余 → `recurring`）。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |
@@ -227,6 +245,14 @@ python rtc.py --workspace <dir> ack \
 | 往返七字段过契约；`rev` 重入 +1、JSON 往返守恒、负 `rev` 被拒 | `TestEventSchema.test_roundtrip_fields_validate`、`TestWindowProjection.test_rev_increments_on_reupsert_and_survives_round_trip`、`TestEventSchema.test_rejects_negative_rev` |
 | 迁移前后五条旧命令逐字节一致 | `TestGoldenRegression.test_five_commands_byte_identical_after_migration` |
 | tick 热路径不 import 事件栈 | `TestHotPathImportGuard` |
+| L2 P6 区间（日 / 年 / 区间）与跨年两侧归属 | `test_query_p6.py` 的 `TestListScopes` |
+| L2 P6 周期事件按 occurrence 实例展开、`ocid` 与跨年实例；条数预算超限退出 4 | `TestOccurrenceExpansion` |
+| L2 P6 筛选 `--q` / `--kind` / `--owner` 与 AND 组合 | `TestListFilters` |
+| L2 P6 `show` 按 uid / 旧别名解析、未命中退出 4 | `TestShow` |
+| L2 P6 非法参数退出 4、stdout 为空；空结果退出 0、纯 JSON | `TestInvalidArgs`、`TestListScopes.test_empty_result_is_rc0_and_pure_json` |
+| L2 P6 五条旧命令对 P1 基线逐字节一致 | `TestOldCommandsByteIdentical` |
+| L2 P6 `.ics` 导出：按年分组 / 单文件 / stdout / 空结果 rc=4 | `TestExport.test_export_dir_year_files_roundtrip`、`test_export_single_file_holds_all_events`、`test_export_stdout_pure_calendar`、`test_export_empty_workspace_rc4` |
+| L2 P6 导出 CRLF、75 octet 折行与转义读回一致 | `TestExport.test_ics_uses_crlf_and_folds_long_lines` |
 
 ## 7.1 RRULE 周期规则语义（`code/rtc_rrule.py`）
 

@@ -223,7 +223,7 @@ def rows_for_day(day: str) -> list[dict[str, Any]]:
     con = _connect()
     try:
         cur = con.execute(
-            """SELECT date, window_id, label, expect, fired, acked_at, missed, state
+            """SELECT date, window_id, label, type, expect, fired, acked_at, missed, state
                FROM daily WHERE date=? ORDER BY window_id""",
             (day,),
         )
@@ -237,7 +237,7 @@ def rows_for_range(start: str, end: str) -> list[dict[str, Any]]:
     con = _connect()
     try:
         cur = con.execute(
-            """SELECT date, window_id, label, expect, fired, acked_at, missed, state
+            """SELECT date, window_id, label, type, expect, fired, acked_at, missed, state
                FROM daily WHERE date BETWEEN ? AND ? ORDER BY date, window_id""",
             (start, end),
         )
