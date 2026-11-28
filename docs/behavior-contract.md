@@ -74,6 +74,15 @@ rollover（次日 plan 时）       跨日：昨天终态归档进 history.db，
 - `.ics` 导出必须带时区：UTC 瞬时用 `Z` 后缀，本地事件用 `TZID` + `VTIMEZONE`，**不允许浮动时间**。
 - `schedule --json` 仍是纯 JSON 到 stdout；退出码语义（0 / 3 / 4 等）不变。
 
+### 3.2 L2 事件台账存储口径（P2 / D-015）
+
+- **源真相**：`calendar/<YYYY>.ics`（RFC 5545，UTF-8 无 BOM、CRLF、75 octet 折行）。按事件 `DTSTART` 年份归文件；跨年事件在结束年份文件留一段 `X-RTC-CROSS-YEAR` 交叉引用，合并查询按 `UID` 去重，主记录取开始年份那份。
+- **只读索引**：`state/calendar-index.db` 是派生缓存，不是真相；删除整个库后 `rebuild` 可从全部 `.ics` 零成本重建。索引查询与直扫 `.ics` 逐条对账，字段不一致即以 `.ics` 为准。
+- **冲突口径**：索引与 `.ics` 不一致时**以 `.ics` 为准**；陈旧记录只剔除并往 stderr 留一行可读告警，索引不反向改写 `.ics`，读取路径不做静默重建。
+- **影子派生视图**：`state/events.json` 是面向旧读路径（P3 occurrence 适配器）的派生影子副本，不是真相。`--to-ics --apply` 在写完 `.ics`、重建索引后，**从 `.ics` 逐条重建这份影子视图**，保证适配器读到的核心判定字段与真相一致，不读到迁移前的陈旧快照。影子视图只背 §5c 契约字段；`.ics` 专有扩展（`summary` / `categories` / `tzid` / `unknown` / `crossYear` / `rev` / `dtstamp`）留在真相层，不进派生视图。重建幂等；迁移前已有的影子账本随备份留存，回滚时按 manifest 恢复或删除。
+- **迁移**：`rtc_migrate.py --to-ics` 默认 dry-run；`--apply` 真跑前自动备份（`.ics` 目录、索引、影子账本 + 旧文件快照与哈希 manifest）；写完 `.ics`、重建索引后接着从 `.ics` 重建影子派生视图；重跑幂等（旧 id 命中别名保留原 `UID`，不重生；影子视图事件集合与核心字段不漂移）；`--rollback <备份目录>` 按 manifest 恢复，影子产物一并还原或删除。旧 `routines.json` / `alarms.json` 全程只读，迁移后留在原地，不删不改。
+- **本批边界**：P2 只落地 `.ics` 真相层、索引重建与迁移工具；不改 `plan` / `due` / `ack` 的判定，不做 RRULE 实例展开（P3）、不接 NLU（P4）、不开放 CRUD 命令面（P5）、不做查询筛选与导出命令（P6）。
+
 ## 4. 冲突策略（乐观锁）
 
 写入前读 `rev`，写入时比对，不符即放弃：
@@ -139,10 +148,10 @@ python rtc.py --workspace <dir> ack \
 - `end` 缺省时长（A5）：`end` 缺省默认与 `start` 同刻（零时长事件），不在适配器里藏默认分钟数；旧窗口 `end` 缺省同样回退 `start`。
 - `.ics` 往返边界（A6）：`createdAt` / `updatedAt` / `source` 是本地投影留痕，**不随 `.ics` 走**；交换格式只带 RFC `DTSTAMP`（修订时间戳）与 `X-RTC-REV`；`source`（`routineId` / `ledgerDate`）属内部溯源，不进 `.ics` 属性。
 - UID 算法取舍（A7）：P1 不收敛新旧两套算法。新层 `uid` 是 UUIDv4 + `@rtc-kit` 的稳定身份；旧 `ocid` / `id` 进 `aliases` 兼容读取；旧导出的 `id-<开始时间>@rtc-kit` 回退算法只作兼容读取，P2 `.ics` 改读新模型后统一使用新 `uid`。
-- 真相边界：P1 旧 `rules/routines.json` + `state/alarms.json` 仍是唯一真相；`events.json` 是派生影子副本，**派生永不反写真相**（沿用 §五 规则 1）。迁移只读旧文件，不回写。
-- 迁移四条性质：默认 dry-run；真跑前自动备份（manifest 留源文件哈希）；幂等（别名 / uid 已存在则跳过，不换 uid、不产生第二份）；`--rollback <备份目录>` 可恢复（迁移前无影子账本的，回滚删除本次产物）。
+- 真相边界：P1 旧 `rules/routines.json` + `state/alarms.json` 仍是唯一真相；`events.json` 是派生影子副本，**派生永不反写真相**（沿用 §五 规则 1）。迁移只读旧文件，不回写；影子视图由 `.ics` 重建，同样不反向回写 `.ics` 或旧文件。
+- 迁移四条性质：默认 dry-run；真跑前自动备份（manifest 留源文件哈希）；幂等（别名 / uid 已存在则跳过，不换 uid、不产生第二份）；`--rollback <备份目录>` 可恢复（迁移前无影子账本的，回滚删除本次产物）。P2 `--to-ics` 在写 `.ics`、重建索引后接着从 `.ics` 重建影子视图（见 §3.2）。
 - 热路径边界：`rtc_events` / `rtc_migrate` **不得**被 `plan` / `due` / `ack` tick 路径 import；有静态断言测试守住。
-- 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。
+- 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。P2 另补空工作区（无 `events.json` / 无 `calendar/`）五条命令与 `origin/main` 基线的 SHA256 golden 对照；CI 浅克隆拿不到 main ref 时退化为当前 code 两遍自比。
 
 ## 6. 三条硬规矩（跨类型）
 
