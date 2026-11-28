@@ -169,7 +169,7 @@ cron（no-agent）
 | 次日预排账本    | `state/alarms.next.json`         | `plan` 06:00 写，跨日 `due` 激活 | 临时槽位，激活后删除      |
 | 某天到底怎么排的  | `state/schedule/YYYY-MM-DD.json` | `plan` 写一次，永久               | 权威存档（不可再算出来）   |
 | 统计查询      | `state/metrics.db`               | `metrics sync`              | **派生索引，可删可重建** |
-| L2 事件影子账本 | `state/events.json`              | `rtc_migrate.py`（离线投影） | **派生影子副本**；P1 旧 JSON 仍是真相，P2 起 `.ics` 为准、本文件转缓存 |
+| L2 事件影子账本 | `state/events.json`              | `rtc_migrate.py`（离线投影 / P2 迁移后从 `.ics` 重建） | **派生影子副本**；P1 旧 JSON 仍是真相，P2 起 `.ics` 为准、本文件转缓存视图 |
 | 给模型看的今日行程 | `AGENTS.md` 的受控区块                | `plan` / `due` / `ack` 自动刷新 | **派生视图，可随时删**  |
 | L2 事件台账    | `calendar/<YYYY>.ics`            | 迁移工具 / 后续事件写路径       | **唯一真相（RFC 5545，跨代可读）** |
 | 事件 SQL 索引  | `state/calendar-index.db`         | `rtc_calindex.rebuild` 从 `.ics` 灌入 | **派生索引，可删可重建** |
@@ -196,6 +196,7 @@ cron（no-agent）
 - `state/calendar-index.db` 只是查询用的**派生只读索引**：整个删掉，`rtc_calindex.rebuild()` 能从零扫描全部 `.ics` 重建；索引查询结果必须与「直接扫 `.ics`」逐条一致（有测试对账）。
 - **冲突以 `.ics` 为准**：索引里有、`.ics` 里没有的记录判为陈旧，读取时剔除并往 stderr 留一行可读告警；**不**反向改写 `.ics`（沿用规则 1 与规则 3）。索引损坏只需 rebuild，不触发任何真相修复。
 - 迁移期旧 `rules/routines.json` / `state/alarms.json` 留在原地作只读历史，迁移工具不删不改；回滚按备份 manifest 恢复 `.ics` 与索引。
+- 影子视图 `state/events.json` 在 `--to-ics --apply` 写完 `.ics`、重建索引后，**由 `.ics` 逐条重建**（写路径动作，不是读取时静默修复），让 P3 适配器读到的核心字段与真相一致；重建幂等、只背契约字段，`.ics` 扩展字段不进派生视图；回滚时影子产物一并按 manifest 恢复或删除。
 
 
 
