@@ -234,6 +234,21 @@ python rtc.py --workspace <dir> ack \
 - **单一输出所有者**：`format: report`（due 直接出稿）与 `format: report-fallback`（模型先写 + 回执兜底）只能二选一，`plan` 同时看到两者直接拒绝——否则同一份汇报会在 09:00 与 09:10 各发一遍
 - 因此「cron 恒定两条」的旧约束在此处放宽为三条，且仅此一处
 
+## 8b. NLU 前端解析（L0/L1，`rtc_nlu`）
+
+- 中文时间短语解析是**交互前端翻译层**：只挂在 `rtc_once.py` 入口；`plan` / `due` /
+  tick 判定链路与 `rtc_core` 不得 import 它（静态 AST + 运行时 `sys.modules` 双重断言）。
+- 解析确定性由注入的 `now`（tz-aware datetime）保证；模块内部不读系统时间兜底，
+  同输入同 `now` 结果一致。时区走 IANA `tzinfo`，不写死固定偏移。
+- 周期表达分两层：基础天 / 周 / 月 / 年与每 N 周期可在 `recurring=True` 下解析为
+  RFC 5545 `rrule` + 首个 occurrence 的 `dtstart`；需要工作日历 / BYSETPOS /
+  相对月末 / 第 N 周定位的形状（每月最后一个工作日、每年第 3 周的周三、工作日、
+  节假日、隔周）契约承载不了：明确报错「现有契约不支持：<原因>」，不硬塞、不偷偷降级。
+- 周期写路径尚未接入：`recurring` 开关默认关闭，入口一次性契约下周期短语仍拒绝；
+  落库与 occurrence 展开由 P3 / P5 接线。
+- 拒绝出口复用 `rtc_once.py` 既有失败路径，退出码 **2**；不新增退出码值。
+- 支持 / 不支持清单与歧义口径见 [nlu-l0-l1.md](nlu-l0-l1.md)。
+
 ## 9. 这份文档怎么维护
 
 **行为变了，先改这里，再改测试，最后改代码。**

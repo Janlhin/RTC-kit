@@ -117,7 +117,7 @@ python code/rtc.py --workspace {{WORKSPACE_DIR}} simulate --date 2026-11-17 --js
 
 | 路径 | 职责 |
 |---|---|
-| `code/` | 确定性脚本（`rtc.py` 主链路、`rtc_plan.py` / `rtc_due.py` / `rtc_once.py` 宿主入口）与回归测试 |
+| `code/` | 确定性脚本（`rtc.py` 主链路、`rtc_plan.py` / `rtc_due.py` / `rtc_once.py` 宿主入口、`rtc_nlu.py` 交互前端时间解析）与回归测试 |
 | `contract/` | 机器可读契约（JSON Schema）与可校验示例 |
 | `rules/` | 声明式规则：`routines` / `priority-map` / `auto-resolver` / `formats` |
 | `skills/` | 5 份技能说明，由运行时加载 |
