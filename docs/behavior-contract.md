@@ -129,6 +129,21 @@ python rtc.py --workspace <dir> ack \
 - 恢复提示只有一条，走 `due` stdout；状态冲突未写成时不投递（沿用 due 静默口径）。
 - `due --bootstrap` 是宿主重启钩子的显式核对入口，不新增子命令；心跳新鲜或账本是今天时不伪造停摆。
 
+## 5c. L2 事件模型契约（P1 影子账本）
+
+> 状态：P1 落地离线投影；**P2 起 `.ics` 为源真相**，`state/events.json` 转为只读缓存视图。本章节字段口径在 P2 不推翻。
+
+- 事件一等公民字段：`uid`（RFC 5545 §3.8.4.7 风格，UUIDv4 + `@rtc-kit` 后缀；改期、取消、状态迁移都不换）、`kind`（`once` / `recurring`）、`start` / `end`（带偏移 ISO 8601）、`rrule`（RFC 5545 标准字符串，一次性为 `null`，不另造自研 DSL）、`owner`（默认 `self`；替别人记 `other:<name>`，事件级字段）、`deadline`（可空日期）、`status`（`scheduled` / `ringing` / `done` / `cancelled` / `missed`）、`reminderPolicy`（`preRemind` / `ddlLadder` / `snooze` 预留为 `null`，P5 接入）、`aliases`（旧 id / ocid 列表）。`.ics` 往返字段：`summary`（标题）、`categories`（分类）、`tzid`（事件级 IANA 时区名）、`dtstamp`（修订时间戳）、`unknown`（不认识属性的开放兜底对象）、`rev`（修订号）、`crossYear`（跨年标记）；P1 投影除 `summary` / `dtstamp` / `rev=0` 外均为 `null`，形状以 `contract/event.schema.json` 为准。
+- 投影口径：旧 `oneOff` → `once`；周期窗口 → `recurring`，RRULE 由 `dateTypes` 生成（workday → `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR`，weekend → `SA,SU`，两者皆无 → `FREQ=DAILY`，`validUntil` → `UNTIL`）；`dueDate` → `deadline`。`UNTIL` 按事件时区产出 **date-time**（当日 `23:59:59` + 偏移），不用 date-only——否则展开器兜成当天 `00:00:00`，截止日当天晚间实例会被误判过期。旧账本 state 映射：`pending→scheduled`、`ringing→ringing`、`acked/delivered→done`、`cancelled→cancelled`、`missed→missed`、`skipped→scheduled`。
+- `rev` 口径：事件每次写操作 +1，新建/投影为 0；序列化进 `.ics` 的 `X-RTC-REV` 并在索引层同步；不从旧账本 `seq` 继承（兼容读取由 `aliases` 承担）。
+- `end` 缺省时长（A5）：`end` 缺省默认与 `start` 同刻（零时长事件），不在适配器里藏默认分钟数；旧窗口 `end` 缺省同样回退 `start`。
+- `.ics` 往返边界（A6）：`createdAt` / `updatedAt` / `source` 是本地投影留痕，**不随 `.ics` 走**；交换格式只带 RFC `DTSTAMP`（修订时间戳）与 `X-RTC-REV`；`source`（`routineId` / `ledgerDate`）属内部溯源，不进 `.ics` 属性。
+- UID 算法取舍（A7）：P1 不收敛新旧两套算法。新层 `uid` 是 UUIDv4 + `@rtc-kit` 的稳定身份；旧 `ocid` / `id` 进 `aliases` 兼容读取；旧导出的 `id-<开始时间>@rtc-kit` 回退算法只作兼容读取，P2 `.ics` 改读新模型后统一使用新 `uid`。
+- 真相边界：P1 旧 `rules/routines.json` + `state/alarms.json` 仍是唯一真相；`events.json` 是派生影子副本，**派生永不反写真相**（沿用 §五 规则 1）。迁移只读旧文件，不回写。
+- 迁移四条性质：默认 dry-run；真跑前自动备份（manifest 留源文件哈希）；幂等（别名 / uid 已存在则跳过，不换 uid、不产生第二份）；`--rollback <备份目录>` 可恢复（迁移前无影子账本的，回滚删除本次产物）。
+- 热路径边界：`rtc_events` / `rtc_migrate` **不得**被 `plan` / `due` / `ack` tick 路径 import；有静态断言测试守住。
+- 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |
@@ -158,6 +173,11 @@ python rtc.py --workspace <dir> ack \
 | 历史可查（删快照也能查） | `TestHistoryDB`、`TestOneOffNoRegen.test_history_keeps_the_record` |
 | 并发写不覆盖 | `TestPostponeRollbackPreservesConcurrentEdit`、`TestLockOwnership` |
 | 重启后按 `planDate` 补建 | `TestMainlineRegression` |
+| L2 P1 事件投影 / 别名 / 迁移四条性质 | `test_events_p1.py` 的 `TestWindowProjection`、`TestMigrationSkeleton` |
+| `UNTIL` 为 date-time，截止日当天晚间实例仍在窗口内 | `TestWindowProjection.test_until_is_date_time_and_keeps_last_day_evening` |
+| 往返七字段过契约；`rev` 重入 +1、JSON 往返守恒、负 `rev` 被拒 | `TestEventSchema.test_roundtrip_fields_validate`、`TestWindowProjection.test_rev_increments_on_reupsert_and_survives_round_trip`、`TestEventSchema.test_rejects_negative_rev` |
+| 迁移前后五条旧命令逐字节一致 | `TestGoldenRegression.test_five_commands_byte_identical_after_migration` |
+| tick 热路径不 import 事件栈 | `TestHotPathImportGuard` |
 
 ## 8. 明确不做
 
