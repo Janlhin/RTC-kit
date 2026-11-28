@@ -54,6 +54,38 @@
           "items": { "type": "string" },
           "description": "旧身份（routine id / 账本 ocid）列表，兼容读取用；新引用一律走 uid。"
         },
+        "summary": {
+          "type": ["string", "null"],
+          "description": "事件标题（RFC 5545 SUMMARY）。P1 投影自旧窗口 label，缺省回退 id；都没有为 null。"
+        },
+        "categories": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "分类标签列表（RFC 5545 CATEGORIES）。P1 投影为 null，分类体系由后续 phase 接入。"
+        },
+        "tzid": {
+          "type": ["string", "null"],
+          "description": "事件级 IANA 时区名（RFC 5545 TZID）；null = 沿用账本固定偏移口径（D-012），不在事件上单独挂时区。"
+        },
+        "dtstamp": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "最近修订时间戳（RFC 5545 DTSTAMP，带偏移 ISO 8601）；P1 与 createdAt 同源。"
+        },
+        "unknown": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "description": "往返兜底对象：解析外部 .ics 时不认识的属性原样存住，不丢弃；键为属性名，值为原始字符串或结构化形态。P1 投影为 null。"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "事件修订号：每次写操作 +1，新建/投影为 0；序列化进 .ics 的 X-RTC-REV 并在索引层同步。不从旧账本 seq 继承（兼容读取由 aliases 承担）。"
+        },
+        "crossYear": {
+          "type": ["boolean", "null"],
+          "description": "跨年标记：周期实例或行程是否跨年度。P1 投影为 null，由 P3 展开器判定后回填。"
+        },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" },
         "source": {

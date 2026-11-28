@@ -172,6 +172,38 @@ class TestEventSchema(_WorkspaceCase):
         errs = list(jsonschema.Draft202012Validator(schema).iter_errors(env))
         self.assertTrue(errs, "非 RFC 5545 风格 uid 必须被拒")
 
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_roundtrip_fields_validate(self):
+        import jsonschema
+
+        schema = json.loads(EVENT_SCHEMA.read_text(encoding="utf-8"))
+        env = self._envelope()
+        ev = env["events"][0]
+        ev.update(
+            {
+                "summary": "起床",
+                "categories": ["routine", "morning"],
+                "tzid": "Asia/Shanghai",
+                "dtstamp": "2026-11-30T06:00:00+08:00",
+                "unknown": {"X-RTC-ORIGINAL-SEQLABEL": "保留原样"},
+                "rev": 3,
+                "crossYear": False,
+            }
+        )
+        validator = jsonschema.Draft202012Validator(schema)
+        errs = list(validator.iter_errors(env))
+        self.assertEqual(errs, [], f"往返字段不该被契约拒绝：{errs[:1]}")
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "本解释器没有 jsonschema")
+    def test_rejects_negative_rev(self):
+        import jsonschema
+
+        schema = json.loads(EVENT_SCHEMA.read_text(encoding="utf-8"))
+        env = self._envelope()
+        env["events"][0]["rev"] = -1
+        errs = list(jsonschema.Draft202012Validator(schema).iter_errors(env))
+        self.assertTrue(errs, "rev 为负必须被拒")
+
 
 class TestWindowProjection(unittest.TestCase):
     def setUp(self):
@@ -320,6 +352,39 @@ class TestWindowProjection(unittest.TestCase):
             self.assertEqual(len(events.all_events(reloaded)), 1)
             self.assertEqual(events.find_uid(reloaded, "wake"), ev["uid"])
             self.assertEqual(events.get_event(reloaded, ev["uid"])["uid"], ev["uid"])
+
+    def test_projection_emits_roundtrip_fields(self):
+        w = {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25", "dateTypes": ["workday"]}
+        ev = events.map_window(w, as_of=self.as_of)
+        self.assertEqual(ev["summary"], "起床")
+        self.assertIsNone(ev["categories"])
+        self.assertIsNone(ev["tzid"])
+        self.assertIsNone(ev["unknown"])
+        self.assertIsNone(ev["crossYear"])
+        self.assertEqual(ev["rev"], 0)
+        self.assertTrue(ev["dtstamp"])
+
+    def test_summary_falls_back_to_id_without_label(self):
+        w = {"id": "drink", "start": "15:00", "end": "15:10"}
+        ev = events.map_window(w, as_of=self.as_of)
+        self.assertEqual(ev["summary"], "drink")
+
+    def test_rev_increments_on_reupsert_and_survives_round_trip(self):
+        env = events.empty_envelope()
+        w = {"id": "wake", "label": "起床", "start": "07:00", "end": "07:25", "dateTypes": ["workday"]}
+        ev = events.map_window(w, as_of=self.as_of)
+        events.upsert_event(env, ev)
+        self.assertEqual(events.get_event(env, ev["uid"])["rev"], 0)
+
+        # 同一 uid 再次写入 = 一次修订，rev +1。
+        events.upsert_event(env, events.get_event(env, ev["uid"]))
+        self.assertEqual(events.get_event(env, ev["uid"])["rev"], 1)
+        events.upsert_event(env, events.get_event(env, ev["uid"]))
+        self.assertEqual(events.get_event(env, ev["uid"])["rev"], 2)
+
+        # JSON 往返后 rev 守恒，不被重新投影清零。
+        reloaded = json.loads(json.dumps(env, ensure_ascii=False))
+        self.assertEqual(events.get_event(reloaded, ev["uid"])["rev"], 2)
 
     def test_corrupt_shadow_file_falls_back_to_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -213,6 +213,13 @@ def map_window(
         "status": _status(w, ledger),
         "reminderPolicy": {"preRemind": None, "ddlLadder": None, "snooze": None},
         "aliases": _aliases(w, ledger),
+        "summary": str(w.get("label") or w.get("id") or "") or None,
+        "categories": None,
+        "tzid": None,
+        "dtstamp": stamp,
+        "unknown": None,
+        "rev": 0,
+        "crossYear": None,
         "createdAt": stamp,
         "updatedAt": stamp,
         "source": {"routineId": str(w.get("id") or ""), "ledgerDate": ledger_date},
@@ -264,14 +271,19 @@ def get_event(envelope: dict[str, Any], uid: str) -> dict[str, Any] | None:
 
 
 def upsert_event(envelope: dict[str, Any], event: dict[str, Any]) -> None:
-    """按 uid 落一条事件，并刷新旧 id → uid 正向别名索引。"""
+    """按 uid 落一条事件，并刷新旧 id → uid 正向别名索引。
+
+    同一 uid 再次写入视为一次修订：``rev`` 在旧值上 +1；新事件 ``rev`` 缺省 0。
+    """
     events = envelope.setdefault("events", [])
     uid = str(event["uid"])
     for i, existing in enumerate(events):
         if existing.get("uid") == uid:
+            event["rev"] = int(existing.get("rev") or 0) + 1
             events[i] = event
             break
     else:
+        event.setdefault("rev", 0)
         events.append(event)
     aliases = envelope.setdefault("aliases", {})
     for alias in event.get("aliases") or []:
