@@ -87,7 +87,21 @@
 | 安装器冒烟（`install.py --workspace ./_smoke-ws --dry-run`） | ok，退出码 0，5/5 链路自检 |
 | 总退出码 | **0（全部通过）** |
 
-> 说明：测试内含子进程 golden 隔离用例，coverage 下墙钟约 1574s；`install.py` 未被测试 import 的 module-not-imported 警告为既有口径，不影响阈值判定。D4 跨 OS 测试数差值需在 CI 双平台（ubuntu / windows）比对后闭环，见第 4 节。
+> 说明：测试内含子进程 golden 隔离用例，coverage 下墙钟约 1574s；`install.py` 未被测试 import 的 module-not-imported 警告为既有口径，不影响阈值判定。
+
+### 3.1 CI 双平台结果
+
+PR #125 触发的 GitHub Actions（run `46101353709`）：
+
+| Job | 结果 | 测试数 |
+|---|---|---|
+| 静态检查 | pass | — |
+| py3.11 / ubuntu-latest | pass | Ran 633 tests，OK（skipped=1） |
+| py3.13 / ubuntu-latest | pass | Ran 633 tests，OK（skipped=1） |
+| py3.11 / windows-latest | pass | Ran 633 tests，OK（skipped=1） |
+| py3.13 / windows-latest | pass | Ran 633 tests，OK（skipped=1） |
+
+**D4 闭环**：ubuntu 与 windows、py3.11 与 py3.13 四个测试 job 测试数一致（均 633，skipped=1），无跨 OS 测试数差值。日志中偶见的 `audit: 写入失败 FileExistsError state` 为既有隔离用例诊断输出，不影响结果判定。
 
 ## 4. 审计项逐条定性
 
@@ -118,7 +132,7 @@
 | D1 | #121 缺 CLI golden 逐字节证据 | #121 | **已处置**。空工作区五条命令 `status --json` / `history` / `schedule` / `due --now` / `report` 的 rc + stdout/stderr SHA256 golden 已补。 |
 | D2 | #118/#119 守卫证据未落到正文验证段 | #118 / #124 | **已处置（#118）/ 待合并时处置（#119 正文守卫说明）**。#118 引擎纯库、主链路零 import，隔离断言在测试；#124 解析层惰性 import `rtc_nlu`，正文验证段守卫位置说明随文档收口补注。 |
 | D3 | 黄金回归证据形式一致 | — | **核对一致，无问题**。 |
-| D4 | 跨 OS 测试数差值待解释 | 本次验收 | **待合并时处置**。本次 verify 输出的跳过清单见 `evidence/verify-p7.log`；需在 CI 双平台（ubuntu/windows）比对，确认差值全部为平台条件跳过而非某侧漏跑。 |
+| D4 | 跨 OS 测试数差值待解释 | 本次验收 | **已处置（CI 闭环）**。run `46101353709` 四个测试 job（ubuntu/windows × py3.11/3.13）均 Ran 633 tests、OK（skipped=1），测试数一致，无跨 OS 差值；跳过清单见 `evidence/verify-p7.log`。 |
 | E1 | 受审 PR 未复制既有资产 | #123 / #122 | **已处置**。P5/P6 未重写 #112 筛选谓词、#113 undo、#114 snooze、#115 preRemind；P6 只在事件层补字段映射。 |
 | E2 | 同源双写期旧窗口 + 投影事件双响无用例 | 读切换阶段 | **接受为已知缺口**。迁移后影子由 `.ics` 重建；同一 `routineId` 的旧窗口与 occurrence 当天去重判据（别名命中）留读切换阶段补用例。 |
 | E3 | 持久化 ocid 只编码到天，不含起点时刻 | #120 | **接受为已知缺口（latent）**。当前 RRULE 子集一天至多一实例不撞；接入 BYHOUR / 同日多实例前，ocid 预留时刻分量或命中改走 `uid + occurrence start`。 |
