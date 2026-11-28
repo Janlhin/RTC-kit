@@ -8,8 +8,9 @@
 
 边界（P5，不越界到其它 phase）：
 
-- 不写 ``.ics``（P2 接管真相源）；不做 occurrence 展开（P3）；不接 NLU 短语
-  （P4 解析器另 lane，本模块只收结构化参数）；不做 year/range 查询与导出（P6）。
+- 不写 ``.ics``（P2 接管真相源）；不做 occurrence 展开（P3）；不做 year/range
+  查询与导出（P6）。NLU 短语经 ``--when`` 交 ``rtc_nlu`` 确定性解析（零模型、
+  零第三方），解析器模块按函数内惰性 import 加载，不进 tick 链路依赖图。
 - 旧 ``rules/routines.json`` / ``state/alarms.json`` 全程只读；事件命令只碰
   ``state/events.json`` 影子账本。
 - 并发：读账本时记内容摘要，写盘前在排他锁内复核摘要，被别人改过就抛
@@ -24,7 +25,7 @@ import json
 import sqlite3
 import sys
 from copy import deepcopy
-from datetime import date, datetime, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ ACTION_CANCEL_UNDO = "cancel-undo"
 
 # 撤销恢复时保持现状的身份字段：uid 改期 / 取消 / 撤销都不换。
 _UNDO_KEEP_KEYS = frozenset({"uid", "aliases", "createdAt"})
+
+# NLU 短语落账时的默认窗口宽度（分钟），沿用 rtc_once 既有 4 分钟口径；
+# 精确窗口宽度与 occurrence 时刻展开归 P3 / 后续交互确认（T-015）。
+_NLU_WINDOW_MINUTES = 4
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -180,8 +185,25 @@ def _history(kind: str, target: str, now: datetime, note: str | None = None) -> 
 # ---------------------------------------------------------------- create
 
 
+def _create_from_phrase(
+    args: argparse.Namespace, now: datetime, tz: tzinfo
+) -> tuple[datetime, datetime, str | None]:
+    """``--when`` 中文短语 → (start, end, rrule)。
+
+    映射口径（D-018 ⑩）：``event.start = parsed.dtstart.isoformat()``；``end`` 按
+    默认窗口宽度派生；``rrule`` 原样存解析器产出的 RFC 5545 字符串，一次性为 None。
+    不支持 / 词表外短语沿用解析器既有失败出口，退出 2，不接 LLM、不降级。
+    """
+    import rtc_nlu  # 惰性 import：tick 链路不依赖解析器（静态 + 运行时双重断言）
+
+    parsed = rtc_nlu.parse_phrase(args.when, now, tz, recurring=True)
+    start = parsed.dtstart if parsed.dtstart is not None else parsed.moment
+    end = start + timedelta(minutes=_NLU_WINDOW_MINUTES)
+    return start, end, parsed.rrule
+
+
 def cmd_event_create(args: argparse.Namespace) -> int:
-    """结构化参数新建一条事件；写 events.json，``.ics`` 接管留 P2。"""
+    """新建一条事件；写 events.json，``.ics`` 接管留 P2。"""
     routine = _load_routine_raw()
     tz = core.resolve_tz(routine)
     now = _resolve_now(args, tz)
@@ -189,19 +211,34 @@ def cmd_event_create(args: argparse.Namespace) -> int:
     title = (args.title or "").strip()
     if not title:
         raise core.Validation("create: --title 不能为空")
-    # P4 解析器输出 dtstart（tz-aware datetime）→ 落账映射：
-    #   event.start = parsed.dtstart.isoformat()
-    #   event.end   = 按窗口宽度 / 入参派生
-    # 这是命名差异不是语义冲突：契约字段保持 `start`，解析器侧不改名（见 D-018）。
-    start = _parse_iso_arg(args.start, "start", tz)
-    end = _parse_iso_arg(args.end, "end", tz)
-    if end <= start:
-        raise core.Validation("create: --end 必须晚于 --start")
+
+    when = getattr(args, "when", None)
+    if when:
+        if args.start or args.end or args.rrule:
+            raise core.Validation("create: --when 与 --start / --end / --rrule 不能同时指定；二选一")
+        import rtc_nlu
+
+        try:
+            start, end, rrule = _create_from_phrase(args, now, tz)
+        except rtc_nlu.UnsupportedExpression as exc:
+            print(f"create: {exc.reason}", file=sys.stderr)
+            return 2
+        except rtc_nlu.NluError as exc:
+            print(f"create: 短语解析失败：{exc}", file=sys.stderr)
+            return 2
+    else:
+        if not args.start or not args.end:
+            raise core.Validation("create: 结构化路径必须给 --start 与 --end；或用 --when 传中文短语")
+        start = _parse_iso_arg(args.start, "start", tz)
+        end = _parse_iso_arg(args.end, "end", tz)
+        if end <= start:
+            raise core.Validation("create: --end 必须晚于 --start")
+        rrule = args.rrule or None
+        if rrule is not None and not rrule.strip():
+            rrule = None
+
     owner = _parse_owner(args.owner)
     deadline = _parse_date_arg(args.deadline, "deadline") if args.deadline else None
-    rrule = args.rrule or None
-    if rrule is not None and not rrule.strip():
-        rrule = None
     kind = "recurring" if rrule else "once"
     _positive_minutes(getattr(args, "pre_remind", None), "pre-remind")
     _positive_minutes(getattr(args, "snooze", None), "snooze")
