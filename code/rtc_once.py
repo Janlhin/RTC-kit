@@ -2,14 +2,20 @@
 """rtc_once.py — 宿主侧的确定性「一次性提醒」入口，不调用任何模型。
 
 用法:
-    python rtc_once.py 11:30 "出门"                 # 今天 11:30 响一次
+    python rtc_once.py 11:30 "出门"                  # 今天 11:30 响一次
     python rtc_once.py 09:00 "交材料" --date 2026-11-15
-    python rtc_once.py 23:45 --workspace <dir>      # 在副本上试跑
+    python rtc_once.py "明天下午三点" "看牙"          # NLU L0/L1 中文短语（确定性解析）
+    python rtc_once.py 23:45 --workspace <dir>       # 在副本上试跑
 
-做三件事，全部由宿主完成，不需要 AI 理解任何自然语言:
+做三件事，全部由宿主完成:
   1. 往 routines.json 追加一个 oneOff 窗口（结构化字段）
   2. 调 rtc.py plan --force 重新生成当天计划
   3. 打印确认信息
+
+时间入口两条路径:
+  - ``HH:MM``：既有 24 小时制路径，行为逐字未改；
+  - 中文短语：交 ``rtc_nlu`` 做封闭词表确定性解析（零模型、零第三方），
+    周期 / 集合类表达明确拒绝，不偷偷降级。
 
 不会跑 due（跑一次就会把响铃消耗掉）；到点由 cron 的 rtc-due 投递。
 """
@@ -18,12 +24,16 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import rtc_nlu
 
 if hasattr(sys.stdout, "reconfigure"):
     # 标准库类型里 TextIO 没有 reconfigure；实际解释器上是 TextIOWrapper。
@@ -63,6 +73,26 @@ def fail(msg: str) -> int:
     return 2
 
 
+def _fixed_offset(offset: str) -> timezone:
+    sign = 1 if offset[0] == "+" else -1
+    hh, mm = offset[1:].split(":")
+    return timezone(sign * timedelta(hours=int(hh), minutes=int(mm)))
+
+
+def _resolve_tz(routine: dict[str, Any]) -> tzinfo:
+    """与 ``rtc_core.resolve_tz`` 同一条回退链：IANA 名 → 旧固定偏移 → 默认 +08:00。"""
+    name = str(routine.get("timezone") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, KeyError, ValueError, OSError):
+            pass
+    offset = routine.get("tzOffset")
+    if isinstance(offset, str) and offset:
+        return _fixed_offset(offset)
+    return _fixed_offset("+08:00")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="添加一个一次性提醒（纯确定性，无模型）")
     ap.add_argument("at", help="触发时刻 HH:MM，24 小时制")
@@ -73,14 +103,6 @@ def main() -> int:
     ap.add_argument("--ack", default="知道了", help="确认词，默认「知道了」")
     args = ap.parse_args()
 
-    try:
-        hh, mm = (int(x) for x in args.at.split(":"))
-        if not (0 <= hh <= 23 and 0 <= mm <= 59 and len(args.at.split(":")) == 2):
-            raise ValueError
-    except ValueError:
-        return fail("时间必须是 24 小时制 HH:MM，例如 11:30")
-
-    target = date.today() if args.date is None else date.fromisoformat(args.date)
     ws = Path(args.workspace)
     routines = ws / "rules" / "routines.json"
     if not routines.is_file():
@@ -90,12 +112,53 @@ def main() -> int:
     if not 1 <= args.window_min <= 30:
         return fail("--window-min 必须在 1..30 之间")
 
+    try:
+        routine_data = json.loads(routines.read_bytes().decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        return fail(f"时刻表读不出来：{exc}")
+    tz = _resolve_tz(routine_data)
+
+    hh: int
+    mm: int
+    target: date
+    clock_str: str
+    date_iso: str
+    if re.fullmatch(r"\d{1,2}:\d{2}", args.at):
+        # 既有 HH:MM 路径。「今天」按工作区时区算，与 plan 的清理口径一致；
+        # 进程本地是 UTC 时不能用 date.today()，否则跨午夜后会被当成过期清掉。
+        try:
+            hh, mm = (int(x) for x in args.at.split(":"))
+            if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                raise ValueError
+        except ValueError:
+            return fail("时间必须是 24 小时制 HH:MM，例如 11:30")
+        target = date.fromisoformat(args.date) if args.date is not None else datetime.now(tz).date()
+        clock_str = f"{hh:02d}:{mm:02d}"
+        date_iso = target.isoformat()
+    else:
+        # NLU L0/L1 路径：中文短语 → 结构化日期 + 时刻。
+        if args.date is not None:
+            return fail("自然语言短语与 --date 不能同时指定；日期已包含在短语里")
+        now = datetime.now(tz)
+        try:
+            parsed = rtc_nlu.parse_phrase(args.at, now, tz)
+        except rtc_nlu.UnsupportedExpression as exc:
+            return fail(exc.reason)
+        except rtc_nlu.NluError as exc:
+            return fail(str(exc))
+        target = parsed.date
+        hh, mm = parsed.clock.hour, parsed.clock.minute
+        clock_str = parsed.hhmm
+        date_iso = parsed.date_iso
+        if parsed.crosses_midnight:
+            print("提示：该提醒落在另一个日历日（跨天）。", file=sys.stderr)
+
     start_min = hh * 60 + mm
     end_min = min(start_min + args.window_min, 23 * 60 + 59)
-    start = f"{hh:02d}:{mm:02d}"
+    start = clock_str
     end = f"{end_min // 60:02d}:{end_min % 60:02d}"
     wid = f"once-{hh:02d}{mm:02d}-{target.strftime('%Y%m%d')}"
-    iso = target.isoformat()
+    iso = date_iso
 
     state_path = ws / "state" / "alarms.json"
     before = None

@@ -127,6 +127,17 @@
 - **影响**：`code/rtc_core.py`、`code/rtc_brief.py`、`code/rtc_ics.py`、`contract/routine.schema.json`、`contract/README.md`、`rules/routines.example.md`、`docs/timezone.md`、`docs/behavior-contract.md`、`pyproject.toml`、`.github/workflows/tests.yml`、测试 `code/tests/test_timezone.py` 与 `test_ics.py`。
 - **复审条件**：若后续要做国家→时区映射、歧义/不存在本地时间消歧、单事件多时区，单独立项；本轮边界见 `docs/timezone.md` §6。
 
+## D-013 L0/L1 中文时间解析用标准库自研，不引第三方 NLU 库
+
+- **日期**：2026-11-28
+- **决策**：交互入口的中文时间短语解析（NLU L0 词表 + L1 本地时间计算）落在新模块 `code/rtc_nlu.py`，纯标准库（`re` / `datetime` / `zoneinfo`），不接 LLM、运行时零第三方依赖；判定链路保持不依赖它。
+- **背景**：需求表 FR-1.1 / FR-1.2 要求「下周三下午 3 点」「半小时后」「下个月 1 号」这类相对时间可本地录入；NFR-4.2 要求高频动作不走 LLM，NFR-4.3 要求无网可用。既有架构里「把明天八点叫我解析成结构化操作」原本划给模型层，但封闭词表内的一次性时间点可以确定性算出来，不必每次唤醒模型。
+- **被采纳**：① 封闭词表 + 正则抽取日锚点 / 时刻 / 相对时长，日期算术走本地墙钟，时长叠加走 UTC 往返；② `now` 由调用方注入，模块内部不读系统时间，保证可回归、可复现；③ 周期 / 集合类表达明确抛 `UnsupportedExpression`，不降级成单次时刻；④ 只被交互入口 import，tick 路径隔离有静态 + 运行时双重测试断言。
+- **被否决**：① 引入通用自然时间库（dateparser / chrono 系等）——带来运行时第三方依赖，与「tick 零第三方、无网可用」冲突，且库自身的歧义口径不可控；② 直接交给 LLM 解析——违背 NFR-4.2 / 4.3，同一输入不保证同一输出，不可回归；③ 在 `rtc_core` / `rtc_due` 内联解析逻辑——判定链路会染上交互层依赖，破坏单一入口与隔离边界。
+- **检索记录**：按「标准库 → 已有依赖 → 注册表」顺序评估；标准库 `re` + `zoneinfo` 已覆盖本轮封闭词表；仓库既有依赖（jsonschema / coverage 等）与时间解析无关；未从注册表安装任何新包。
+- **影响**：`code/rtc_nlu.py`、`code/rtc_once.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`docs/README.md`、`TASKS.md` 待补台账。
+- **复审条件**：若后续接 RRULE 周期事件、裸周几缺时刻的交互确认、或 L2 模型兜底，单独立项；开放表达不在本模块内消化。
+
 ## D-014 L2 P1 事件模型先落派生影子账本，旧 JSON 真相源不动
 
 - **日期**：2026-11-28
@@ -157,6 +168,16 @@
 - **被否决**：① 自研 DSL——与 `.ics` 互导要再写一层翻译，两套语义容易漂移，也背离「`.ics` 是源真相」的方向；② dateutil——成熟但带第三方依赖，其 RRULE 实现覆盖大量本阶段不需要的键，且与标准库 `zoneinfo` 的 DST 口径需要再对齐；当前子集自研边界清晰，不值得为它背依赖。
 - **影响**：新增 `code/rtc_rrule.py`、`code/tests/test_rrule.py`；`docs/behavior-contract.md` §7.1。occurrence 接入 plan / due / ack 的口径（`code/rtc_occurrence.py` 适配层、去重键、兼容红线）见 §7.2，不再单独立编号决策。
 - **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
+
+## D-017 周期中文表达产出 RFC 5545 RRULE，解析层开关门控写路径
+
+- **日期**：2026-11-28
+- **决策**：NLU 解析器增加周期分支。封闭词表内的天 / 周 / 月 / 年与每 N 周期，产出 RFC 5545 RRULE 字符串 + 首个 occurrence 的 DTSTART；周期解析由 `recurring` 开关门控，默认关闭，入口一次性契约行为不变。
+- **背景**：FR-1.4 要求周期事件可录入；#108（D-013）只解析一次性时间点，整类周期表达被拒绝。P4 上半段先把确定性解析做掉，落库与 occurrence 展开归 P3 / P5，本层不接写路径。
+- **被采纳**：① RRULE 直接存标准字符串（`FREQ` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `INTERVAL`），不自造 DSL；② DTSTART 取注入 now 之后的下一命中槽位，今天槽位已过则顺到下一周期；③ 周期表达缺时刻默认 09:00；④ 工作日历 / BYSETPOS / 相对月末 / 第 N 周定位 / 隔周等形状抛 `UnsupportedExpression`，不猜、不降级；⑤ 开关默认 `False`，`rtc_once.py` 零改动。
+- **被否决**：① 入口直接登记周期窗口——写路径与展开引擎未就绪，会把周期事件偷偷降级成单次；② 引入第三方自然时间库——破坏运行时零第三方依赖，且歧义口径不可控；③ 接 LLM 兜底——违背确定性与无网可用，同一输入不保证同一输出。
+- **影响**：`code/rtc_nlu.py`、`code/tests/test_nlu.py`、`docs/nlu-l0-l1.md`、`docs/behavior-contract.md`、`TASKS.md`（T-019 新增，T-014 收窄）。
+- **复审条件**：P3 展开引擎与 P5 写路径接线后，评估是否默认打开 `recurring`；BYSETPOS / 工作日历 / 节假日支持单独立项。
 
 ## D-018 L2 P5 事件级 CRUD 命令落影子账本，提醒策略先存形状、档位计算留 P3
 
