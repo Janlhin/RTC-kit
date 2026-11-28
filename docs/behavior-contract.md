@@ -140,6 +140,46 @@ python rtc.py --workspace <dir> ack \
 - 热路径边界：`rtc_events` / `rtc_migrate` **不得**被 `plan` / `due` / `ack` tick 路径 import；有静态断言测试守住。
 - 旧命令面零改动：`status` / `history` / `schedule` / `due` / `report` 的 stdout + stderr + 退出码，迁移前后逐字节一致（golden 用例按 SHA256 比对）。
 
+## 5d. L2 事件 CRUD 与提醒策略契约（P5）
+
+> 状态：P5 落地事件级写命令；occurrence 粒度完成 / 平移留 P3，`.ics` 真相源留 P2，自然语言短语解析留 P4。本章节命令面在后续 phase 只增不改旧语义。
+
+### 5d.1 命令面（事件级，结构化参数）
+
+- `create`：新建一条事件。参数 `--title`（必填）、`--start` / `--end`（带偏移 ISO 8601）、`--rrule`（RFC 5545 字符串，省略 = 一次性）、`--owner`（默认 `self`，替别人记 `other:<name>`）、`--deadline`（`YYYY-MM-DD`，可空）、`--pre-remind N`、`--ddl-ladder N`（可重复）、`--snooze N`、`--uid`（幂等重放用，缺省自动生成）、`--now`。校验不通过退出 `3`；同 uid 已存在则幂等返回 `0`，不产生第二条、不涨审计 / history。
+- 解析器映射口径（P4 接 create 时）：解析器输出 `dtstart`（tz-aware datetime），落账为 `event.start = parsed.dtstart.isoformat()`；`end` 按窗口宽度 / 入参派生。`dtstart` 与契约字段 `start` 是命名差异、不是语义冲突；契约不迁就解析器改名，解析器也不反改影子账本字段。
+- `edit`：按 `--uid` 或 `--alias`（旧 id / 别名）局部更新；只改给了的参数，未给的字段保持原样。改完整包过事件契约；找不到事件退出 `4`。
+- `complete`：`--uid` / `--alias` 把事件标 `done`；已是 `done` 时幂等返回 `0`，不重复留痕。occurrence 粒度的「只完成这一次」留 P3 接线。
+- `cancel`：窗口级取消行为一字不变；`--uid` / `--alias` 取消事件，`done` / `missed` 终态不可再取消（退出 `4`）。`--undo` 撤销当天的事件取消（见 5d.3）。
+- 旧子命令与退出码语义不变：窗口级 `cancel --window` / `complete --window` 走原路径；窗口级撤销（#113）与窗口级 snooze（#114）未在本 lane 接线。
+
+### 5d.2 写操作留痕与并发
+
+- 每个写命令成功后落一条审计（`action` + `target` + `old` / `new` + `actor` + `source`），并写一条 history 事件；审计 / history 失败不阻断主流程，只在 stderr 打一行（沿用 #110 口径）。
+- 并发守卫：读账本时记内容摘要，写盘前在排他锁内复核摘要；被别人改过就抛 `Conflict`（退出 `2`），磁盘内容不被静默覆盖。`events.json` 写临时文件后原子替换，半写 / 坏写可由加载层兜底识别。
+- 审计动作名：`create` / `edit` / `complete` / `cancel` / `cancel-undo`；`source` 前缀 `event:`。
+
+### 5d.3 撤销（undo）口径
+
+- `cancel --uid <uid> --undo` 按当天审计快照逐字段还原取消前状态；`uid` / `aliases` / `createdAt` 保持不变。
+- 只当天有效：痕迹时间戳换算到运行时区日历日，跨日拒绝（退出 `4`）；跨日恢复走后续 `enable` 口径，本版本不提供。
+- 无痕迹 / 事件当前不是 `cancelled`：无痕迹失败，退出 `4`，账本与审计不新增条目。
+
+### 5d.4 提醒策略（`reminderPolicy`）
+
+- `preRemind`：`{ "minutesBefore": N }`，锚点为事件 `start`；到点单独一档，不与到点提醒合并。
+- `ddlLadder`：截止阶梯提前量分钟数数组（`≥0`，去重升序）；以 `deadline` 为锚点。
+- `snooze`：`{ "minutes": N }` 默认 snooze 时长（`≥1`）。
+- 同 tick 档位优先级：阶梯预警 > 提前提醒 > 到点提醒；同一时刻重合只取最早一条。实际档位计算与 occurrence 平移由 P3 / due lane 落地；本版本只把策略形状落进事件记录。
+- 事件级 occurrence snooze 的幂等键 =（事件 uid，日期，目标时刻）；只往后推、同一天，occurrence 粒度实现留 P3，届时与窗口级 #114 收敛去重。
+
+### 5d.5 边界与缺口
+
+- 本阶段不写 `.ics`；`events.json` 仍是影子账本，`create` 落库时标注「待 P2 接管」。
+- 不做 occurrence 展开；`recurring` 事件的 `complete` / `cancel` 只改事件级状态，后续 occurrence 不受影响（P3 接线后再分粒度）。
+- 不接 NLU 短语；命令面只收结构化参数，自然语言解析在 P4。
+- 不做 year / range 查询与 `.ics` 导出（P6）。
+
 ## 6. 三条硬规矩（跨类型）
 
 | 代号 | 规矩 | 落地方式 |

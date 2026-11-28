@@ -12,6 +12,7 @@
 | `rtc_recovery.py` | 停摆恢复：陈旧心跳 + 账本滞后双证据识别、停摆期间错过的窗口归档、恢复提示文本 | 仅标准库 |
 | `rtc_events.py` | L2 事件模型：影子账本读写、旧窗口 → Event 投影、旧 id ↔ uid 双向别名（P1；离线投影，不进 tick 热路径） | 仅标准库 |
 | `rtc_migrate.py` | L2 P1 迁移骨架：dry-run / 写前备份 / 幂等 / 回滚；离线工具，不进 tick 热路径 | 仅标准库 |
+| `rtc_event_cmd.py` | L2 P5 事件级 CRUD：`create` / `edit` / `complete` / `cancel`（含当天 `--undo`）+ owner / deadline / reminderPolicy；事件写命令层，不进 tick 热路径 | 仅标准库 |
 | `rtc_brief.py` | 行程简报（写回 `AGENTS.md`）与 `schedule` / `history` / `events` / `stats` / `status` 的展示 | 仅标准库 |
 | `metrics.mjs` | 统计旁路（旧版，保留兼容） | Node，需要 `node:sqlite` |
 
@@ -39,6 +40,11 @@ python rtc.py --workspace <dir> cancel   travel                # 取消一个安
 python rtc.py --workspace <dir> complete travel --text "打完了"  # 完成 + 停用
 python rtc.py --workspace <dir> disable  tea                   # 永不提醒
 python rtc.py --workspace <dir> enable   tea                   # 又想起来了
+python rtc.py create --title 看牙 --start 2026-12-01T15:00:00+08:00 --end 2026-12-01T15:30:00+08:00
+python rtc.py edit --uid <uid> --title 洗牙
+python rtc.py complete --uid <uid>
+python rtc.py cancel --uid <uid>
+python rtc.py cancel --uid <uid> --undo
 ```
 
 契约：**stdout 为空即静默**；诊断信息全部走 stderr；退出码 `0` 正常 / `2` 状态冲突 / `3` 校验失败或部分应用 / `4` 无匹配窗口。
