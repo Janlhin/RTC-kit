@@ -136,3 +136,13 @@
 - **被否决**：① 直接改旧 `alarm-state` / `routine` schema 承载事件字段——旧命令面与既有测试会被波及，违背「一条不改全绿」；② P1 就写 `.ics` 真相源——日历序列化是 P2 的事，提前做会把两套真相源缝在一起；③ 事件模块被 `due` / `plan` 直接 import——tick 路径变重，违反确定性与零第三方依赖边界。
 - **影响**：`contract/event.schema.json`、`code/rtc_events.py`、`code/rtc_migrate.py`、`code/tests/test_events_p1.py`、`docs/architecture.md`、`docs/behavior-contract.md` §5c、`contract/README.md`、`code/README.md`、`TASKS.md` T-016。
 - **复审条件**：P2 切 `.ics` 真相源时复核影子缓存的重建与删除路径；P5 接入提醒策略时复核 `reminderPolicy` 形状；`owner` 词汇表收紧或校验规则另提案；`holiday` 类型不进 RRULE，留外挂日期类型表。
+
+## D-016 周期规则存 RFC 5545 RRULE 字符串，解析/展开引擎自研，不造 DSL、不引 dateutil
+
+- **日期**：2026-11-28
+- **决策**：L2 事件的周期规则直接存 RFC 5545 RRULE 字符串；解析与 occurrence 展开在 `code/rtc_rrule.py` 自研，仅用标准库 `datetime` / `zoneinfo` / `calendar`；不另造自研 DSL，不引入 dateutil。
+- **背景**：FR-1.4 要求天/周/月/年重复与 RRULE 表达。候选路线有三条：① 存自研 DSL（结构化字段拼中文/私有串）；② 引入 dateutil 做解析展开；③ 存标准 RRULE 字符串 + 自研引擎覆盖所需子集。
+- **被采纳**：③。RRULE 是 1998 年开放标准，与 `.ics` 同源同构，跨代可读；本阶段所需子集（`FREQ` 天/周/月/年 + `INTERVAL` / `COUNT` / `UNTIL` / `BYDAY` / `BYMONTHDAY` / `BYMONTH` / `WKST`）自研成本可控，闰年、月末、序号周几、`COUNT` / `UNTIL` 全局预算、跨年、DST 春秋切等边界由成组测试锁定；符合 AGENTS「标准库优先、先搜寻后自研」的约定，tick 路径保持零第三方依赖。
+- **被否决**：① 自研 DSL——与 `.ics` 互导要再写一层翻译，两套语义容易漂移，也背离「`.ics` 是源真相」的方向；② dateutil——成熟但带第三方依赖，其 RRULE 实现覆盖大量本阶段不需要的键，且与标准库 `zoneinfo` 的 DST 口径需要再对齐；当前子集自研边界清晰，不值得为它背依赖。
+- **影响**：新增 `code/rtc_rrule.py`、`code/tests/test_rrule.py`；`docs/behavior-contract.md` §7.1。occurrence 接入 plan / due / ack 的口径（`code/rtc_occurrence.py` 适配层、去重键、兼容红线）见 §7.2，不再单独立编号决策。
+- **复审条件**：若后续需要 `BYSETPOS` / `BYWEEKNO` / `BYYEARDAY` 等未支持键，先评估 dateutil 替换自研引擎的成本与 DST 口径差异，再回本决策修订。
